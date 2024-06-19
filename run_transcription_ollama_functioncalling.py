@@ -21,6 +21,7 @@ class IntegratedTranscription:
 
     def __init__(self, model_path='tiny.en', use_vad=True):
         self.model = "mistral:instruct"
+        # self.model = "llama3:text"
         self.model_path = model_path
         self.use_vad = use_vad
         self.vad_detector = VoiceActivityDetector(frame_rate=self.RATE)
@@ -60,7 +61,7 @@ class IntegratedTranscription:
             functions.get_current_weather.__name__: functions.get_current_weather,
             functions.get_current_time.__name__: functions.get_current_time,
         }
-
+        self.ollama_client = ollama.Client()
         self.preload_ollama()
 
         print("Finished Initialization: READY")
@@ -119,23 +120,36 @@ class IntegratedTranscription:
         else:
             logging.info("No audio data to transcribe")
 
+    def create_prompt(self, transcribed_text, conversation_history, functions_json):
+        # creates the raw prompt with the required function definition tags for Mistral
+        tools_section = f"[AVAILABLE_TOOLS]{functions_json}[/AVAILABLE_TOOLS]"
+        system_section = f"[SYSTEM]{self.pre_context}[/SYSTEM]"
+        history_section = "\n".join(conversation_history)
+        user_input_section = f"[INST] {transcribed_text} [/INST]"
+
+        prompt = f"{tools_section}\n{system_section}\n{history_section}\n{user_input_section}"
+        return prompt
+
     def process_transcription(self, transcribed_text):
         # if we're starting a new conversation, create the pre-context and instructions:
         if self.current_conversation is None:
             print("STARTING NEW CONVERSATION")
-            self.current_conversation = (
-                f"[INST][AVAILABLE_TOOLS]{json.dumps(functions.definitions)}[/AVAILABLE_TOOLS]\n"
-                f"[SYSTEM] {self.pre_context} [/SYSTEM][/INST]"
-            )
+            self.current_conversation = []
 
-        # Append the new user input to the conversation history:
-        self.current_conversation += f"\n[INST] {transcribed_text} [/INST]"
+        prompt = self.create_prompt(
+            transcribed_text=transcribed_text,
+            conversation_history=self.current_conversation,
+            functions_json=functions.functions_json
+        )
+
+        # Append the new user input to the conversation history (but not before the prompt:
+        self.current_conversation.append(f"[USER] {transcribed_text}")
 
         # Debugging: Print the formatted conversation context:
-        print(f"Updated conversation context: {self.current_conversation}")
+        print(f"Generated prompt: {prompt}")
 
         # Send the text to Ollama:
-        raw_response, function_calls, error = self.send_to_ollama(self.current_conversation)
+        raw_response, function_calls, error = self.send_to_ollama(prompt)
 
         if error:
             print(f"Error from Ollama: {error}")
@@ -143,19 +157,22 @@ class IntegratedTranscription:
 
         if function_calls:
             fn_responses = self.call_functions(function_calls)
-            self.current_conversation += f"\n[RESPONSE] {json.dumps(fn_responses)} [/RESPONSE]"
+            # self.current_conversation += f"\n[RESPONSE] {json.dumps(fn_responses)} [/RESPONSE]"
+            # Ensure that fn_responses is a list of strings
+            self.current_conversation.append(f"[ASSISTANT] {json.dumps(fn_responses)}")
             self.handle_response(json.dumps(fn_responses))
         else:
-            self.current_conversation += f"\n[RESPONSE] {raw_response} [/RESPONSE]"
+            # self.current_conversation += f"\n[RESPONSE] {raw_response} [/RESPONSE]"
+            self.current_conversation.append(f"[ASSISTANT] {raw_response}")
             self.handle_response(raw_response)
 
     def preload_ollama(self):
         # Preload the model so that it doesn't take forever for the first request
         try:
-            ollama.generate(
+            self.ollama_client.chat(
                 model=self.model,
                 keep_alive="2h",
-                prompt="this is preloading you",
+                messages=[{"role": "user", "content": "this is preloading you"}],
             )
         except Exception as e:
             print(f"Failure pre-loading model {self.model}: {e}")
@@ -164,43 +181,47 @@ class IntegratedTranscription:
     def send_to_ollama(self, prompt_text):
         try:
             # Send request to Ollama API
-            response = ollama.generate(
+            options = {
+                # "max_tokens": 150,     # Limit the response length
+                "temperature": 0.7,    # Adjust randomness
+                "top_p": 0.9,          # Use top-p sampling
+                # "presence_penalty": 0, # Control repetition
+                # "frequency_penalty": 0,# Control token frequency
+                # "stream": True         # Enable streaming
+            }
+
+            response_stream = self.ollama_client.generate(  # alternative is generate
                 model=self.model,
                 prompt=prompt_text,
-                raw=True
+                stream=True,
+                keep_alive="2h",
+                raw=True,
+                options=options
             )
 
-            # Print the raw response for debugging
-            print(f"Raw response from Ollama: {response}")
-
-            # Extract the 'response' field
-            raw_response = response.get('response', '')
-
-            # Print the full 'response' content
-            print(f"Full response content: {raw_response}")
-
+            # Initialise empty containers for response and function calls
             tool_calls = []
             final_response = ""
 
-            # Split the response into segments by double newlines
-            json_segments = raw_response.split('\n\n')
+            # Iterate over the streaming response
+            for response_chunk in response_stream:
+                try:
+                    # Debugging raw response live:
+                    # print(f"Received chunk: {response_chunk}")
 
-            for segment in json_segments:
-                segment = segment.strip()
-                if segment.startswith('[') and segment.endswith(']'):
-                    try:
-                        # Attempt to parse the segment as JSON
-                        parsed_data = json.loads(segment)
-                        if isinstance(parsed_data, list):
-                            tool_calls.extend(parsed_data)
-                        else:
-                            print(f"Unexpected JSON format: {parsed_data}")
-                    except json.JSONDecodeError as e:
-                        print(f"JSON decoding error in tool calls: {e}")
-                        print(f"Segment causing error: {segment}")
-                else:
-                    final_response += segment + " "
+                    if isinstance(response_chunk, dict):
+                        # Handle JSON chunk
+                        response_content = response_chunk.get('response', '')
+                        final_response += response_content + ""
+                    else:
+                        # needed now?
+                        response_str = str(response_chunk).strip()
+                        final_response += response_str + ""
 
+                except Exception as e:
+                    print(f"Error processing response chunk: {e}")
+
+            # Clean up the final response
             final_response = final_response.strip()
 
             return final_response, tool_calls, None
