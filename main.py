@@ -23,6 +23,9 @@ from bs4 import BeautifulSoup
 from requests_html import HTMLSession
 import urllib.parse
 
+# for database interaction:
+import sqlite3
+
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -81,8 +84,143 @@ class IntegratedTranscription:
         self.ollama_client = ollama.Client()
         # self.preload_ollama()
 
+        # init the db if it needs it:
+        self.init_db()
+
         print("Finished Initialization: READY")
         self.speak_text("Finished starting up")
+
+    def init_db(self, db_name="knowledge.db"):
+        conn = sqlite3.connect(db_name)
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS knowledge (
+                id INTEGER PRIMARY KEY,
+                title TEXT UNIQUE,
+                content TEXT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        conn.commit()
+        conn.close()
+
+    def search_knowledge_exact(self, term, db_name="knowledge.db"):
+        conn = sqlite3.connect(db_name)
+        cursor = conn.cursor()
+        cursor.execute("SELECT title, content FROM knowledge WHERE title = ?", (term,))
+        rows = cursor.fetchall()
+        conn.close()
+        return rows
+
+    def search_knowledge_wildcard(self, term, db_name="knowledge.db"):
+        conn = sqlite3.connect(db_name)
+        cursor = conn.cursor()
+        cursor.execute("SELECT title, content FROM knowledge WHERE title LIKE ?", (f"%{term}%",))
+        rows = cursor.fetchall()
+        conn.close()
+        return rows
+
+    def search_knowledge_partial(self, term, db_name="knowledge.db"):
+        conn = sqlite3.connect(db_name)
+        cursor = conn.cursor()
+        cursor.execute("SELECT title, content FROM knowledge WHERE title LIKE ?", (f"{term}%",))
+        rows = cursor.fetchall()
+        conn.close()
+        return rows
+
+    def process_knowledge_search_command(self, command):
+        function_name = command.get("function")
+        term = command.get("term")
+        if function_name == "search_knowledge_exact":
+            results = self.search_knowledge_exact(term)
+        elif function_name == "search_knowledge_wildcard":
+            results = self.search_knowledge_wildcard(term)
+        elif function_name == "search_knowledge_partial":
+            results = self.search_knowledge_partial(term)
+        else:
+            results = []
+
+        if results:
+            result_texts = [f"Title: {title}, Content: {content}" for title, content in results]
+            result_text = "\n".join(result_texts)
+            self.speak_text(f"Found knowledge")
+            return result_text
+        else:
+            self.speak_text("No found knowledge.")
+            return f"Function result: No matching knowledge found"
+
+    def list_knowledge_titles(self, db_name="knowledge.db"):
+        """
+        Lists all the titles stored in the knowledge database.
+
+        :param db_name: The name of the database file.
+        :return: A list of all titles in the knowledge database.
+        """
+        conn = sqlite3.connect(db_name)
+        cursor = conn.cursor()
+        cursor.execute("SELECT title FROM knowledge")
+        rows = cursor.fetchall()
+        conn.close()
+        result_text = "Function return: Titles in Knowledgebase:"
+        if rows:
+            result_texts = [f"ID: {row[0]}, Title: {row[1]}" for row in rows]
+            result_text = "\n".join(result_texts)
+            self.speak_text("Checked Knowledgebase.")
+            return result_text
+        else:
+            return "Function return: nothing in knowledgebase!"
+
+    def store_knowledge(self, title, content, db_name="knowledge.db"):
+        """
+        Stores knowledge in the database. If the title already exists, updates the content and timestamp.
+
+        :param title: The title of the knowledge entry.
+        :param content: The content of the knowledge entry.
+        :param db_name: The name of the database file.
+        """
+        try:
+            conn = sqlite3.connect(db_name)
+            cursor = conn.cursor()
+            try:
+                cursor.execute("INSERT INTO knowledge (title, content) VALUES (?, ?)", (title, content))
+                conn.commit()
+            except sqlite3.IntegrityError:
+                cursor.execute("UPDATE knowledge SET content = ?, timestamp = CURRENT_TIMESTAMP WHERE title = ?",
+                               (content, title))
+                conn.commit()
+            conn.close()
+            return "Function return: Knowledge stored successfully"
+        except Exception as e:
+            return f"Function return: Failed to store knowledge: {e}"
+
+    def delete_knowledge(self, row_number, db_name="knowledge.db"):
+        """
+        Deletes a knowledge entry from the database based on its row number.
+
+        :param row_number: The row number of the knowledge entry to delete.
+        :param db_name: The name of the database file.
+        :return: A message indicating whether the deletion was successful or if the entry was not found.
+        """
+        conn = sqlite3.connect(db_name)
+        cursor = conn.cursor()
+
+        # Fetch the row to get the ID
+        cursor.execute("SELECT id FROM knowledge LIMIT 1 OFFSET ?", (row_number - 1,))
+        row = cursor.fetchone()
+
+        if row:
+            id_to_delete = row[0]
+            cursor.execute("DELETE FROM knowledge WHERE id = ?", (id_to_delete,))
+            conn.commit()
+            rows_deleted = cursor.rowcount
+            conn.close()
+            if rows_deleted > 0:
+                return f"Function return: Knowledge entry in row number '{row_number}' was deleted."
+            else:
+                return f"Function return: Failed to delete the knowledge entry in row number '{row_number}'."
+        else:
+            conn.close()
+            return f"Function Return: No knowledge entry found in row number '{row_number}'."
 
     def duckduckgo_search(self, query):
         """Perform a web search using DuckDuckGo and return a list of results."""
@@ -119,14 +257,27 @@ class IntegratedTranscription:
 
         return results
 
-    def open_web_link(self, url):
+    def open_web_link(url, max_retries=3):
         """Open a web link and return the text content."""
         session = HTMLSession()
-        response = session.get(url)
-        response.html.render()
 
-        soup = BeautifulSoup(response.html.html, 'html.parser')
-        return soup.get_text()
+        for attempt in range(max_retries):
+            try:
+                response = session.get(url)
+                response.html.render()
+                soup = BeautifulSoup(response.html.html, 'html.parser')
+                return soup.get_text()
+            except requests.exceptions.RequestException as e:
+                if isinstance(e, requests.exceptions.ConnectionError) and 'Name or service not known' in str(e):
+                    print(f"DNS resolution error: {e}")
+                    return f"Function return: DNS resolution error for {url}"
+                print(f"Attempt {attempt + 1} failed: {e}")
+                time.sleep(2)  # Wait for 2 seconds before retrying
+            except Exception as e:
+                print(f"An unexpected error occurred: {e}")
+                return f"Function return: unexpected error for {url}"
+
+        return "Function return: error in web search module"
 
     def clean_text(self, text):
         # Replace common escaped characters with their actual meanings
@@ -261,7 +412,7 @@ class IntegratedTranscription:
 
     def add_to_context(self, text, context):
         """Add the retrieved text to the context."""
-        context.append({'role': 'system', 'content': text})
+        context.append({'role': 'user', 'content': text})
         return context
 
     def process_transcription(self, transcribed_text):
@@ -343,11 +494,36 @@ class IntegratedTranscription:
                         page_text = self.open_web_link(url)
                         self.current_conversation = self.add_to_context(page_text, self.current_conversation)
                         self.speak_text("Content added to context.")
+                elif "search_knowledge" in function_name:
+                    self.current_conversation = self.add_to_context(
+                        self.process_knowledge_search_command(command),
+                        self.current_conversation
+                    )
+                elif function_name == "store_knowledge":
+                    self.current_conversation = self.add_to_context(
+                        self.store_knowledge(
+                            command.get("title"),
+                            command.get("content")
+                        ),
+                        self.current_conversation
+                    )
+                elif function_name == "delete_knowledge":
+                    self.current_conversation = self.add_to_context(
+                        self.delete_knowledge(
+                            command.get("id")
+                        ),
+                        self.current_conversation
+                    )
+                elif function_name == "list_knowledge_titles":
+                    self.current_conversation = self.add_to_context(
+                        self.list_knowledge_titles(),
+                        self.current_conversation
+                    )
                 else:
                     print("UNKNOWN COMMAND")
                     self.current_conversation.append({
                         'role': 'user',
-                        'content': "Unknown command or incorrect command format, try again"
+                        'content': "Unknown command or incorrect command format, try again?"
                     })
 
                 # update the prompt for next spin:

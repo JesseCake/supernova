@@ -1,0 +1,2 @@
+FROM llama3
+PARAMETER num_thread 12
