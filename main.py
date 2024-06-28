@@ -241,21 +241,21 @@ class IntegratedTranscription:
                 })
 
             # if we have a command response
-            if not command == "":  # when we have an actual response
+            if command:  # when we have an actual response
                 print(f"Command: {command}")
-                if command.strip() == "end":
+                if command.strip() == "end_conversation":
                     print("RECEIVED END COMMAND")
                     # wipe out our conversation history and set flag for sleep
                     self.close_channel()
                     break
-                elif command.strip() == "time":
+                elif command.strip() == "get_current_time":
                     print("RECEIVED TIME COMMAND")
                     """Get the current time in a simple 12-hour format."""
                     now = datetime.now()
                     nowtime = now.strftime('%I:%M%p')
                     self.current_conversation.append({
                         'role': 'user',
-                        'content': f"{nowtime}"
+                        'content': f"function return: {nowtime}"
                     })
                     print(f"Added time {nowtime} to history")
                 else:
@@ -267,7 +267,7 @@ class IntegratedTranscription:
 
                 # update the prompt for next spin:
                 prompt = self.update_prompt(self.current_conversation)
-                self.generate_tone(700, 0.1, 0.2)
+                self.generate_tone(700, 0.05, 0.2)
 
             else:
                 break
@@ -313,9 +313,9 @@ class IntegratedTranscription:
 
             elif self.chat_mode is True:
                 # debugging weird pre-context:
-                #print("Formatted prompt being send:")
-                #for item in prompt_text:
-                #    print(f"{item['role']}: {item['content']}\n")
+                print("Formatted prompt being send:")
+                for item in prompt_text:
+                    print(f"{item['role']}: {item['content']}\n")
 
                 response_stream = self.ollama_client.chat(  # alternative is generate
                     model=self.model,
@@ -328,8 +328,9 @@ class IntegratedTranscription:
             # Initialise empty containers for response and function calls
 
             # for the command logic:
-            command_accumulator = ""
-            command_mode = False
+            command_data = None
+            json_accumulator = ""
+            json_collecting = False
 
             # the total response to add to conversation history (returned):
             full_response = ""
@@ -357,28 +358,32 @@ class IntegratedTranscription:
                 # print(f"{response_content}")
 
                 if response_content:
-                    if "[" in response_content and not command_mode:
-                        # Split the response around the opening bracket
-                        # in case there is also some of the command included in the chunk:
-                        parts = response_content.split("[", 1)
-                        accumulated_text += parts[0].strip()
-                        command_accumulator += parts[1]
-                        command_mode = True
-                        print("FOUND COMMAND COMING IN")
-                    elif command_mode:
-                        # Check for closing bracket and any trailing characters
-                        match = re.match(r'^(.*?)]\s*(.*)$', response_content)
-                        if match:
-                            command_accumulator += match.group(1)
-                            print(f"FINISHED COMMAND INPUT: [{command_accumulator}]")
-                            command_mode = False
-                            # ensure any accidental words or text beyond it are added to the accumulated text
-                            remaining_text = match.group(2).strip()
-                            if remaining_text:
-                                accumulated_text += remaining_text
-                        else:
-                            command_accumulator += response_content
-                    else:
+
+                    # watch for JSON and accumulate if so:
+                    if '{' in response_content:
+                        json_collecting = True
+
+                    if json_collecting:
+                        json_accumulator += response_content
+
+                    if '}' in response_content and json_collecting:
+                        try:
+                            # Attempt to parse the JSON from the accumulated text
+                            response_json = json.loads(json_accumulator.strip())
+                            print(f"Response JSON: {response_json}")
+
+                            # Check for the function key in the parsed JSON
+                            if "function" in response_json:
+                                command_data = response_json["function"]
+                                print(f"GOT JSON: {command_data}")
+                                break
+                        except json.JSONDecodeError:
+                            print("NOT JSON")
+                            # If it's not a complete JSON object yet, keep accumulating
+                            pass
+
+
+                    if not json_collecting:
                         # accumulation for speaking text
                         accumulated_text += response_content
 
@@ -395,11 +400,7 @@ class IntegratedTranscription:
 
             print("FINISHED RESPONSE")
 
-            # make sure we only return a string in the command if there is anything
-            if command_accumulator == "":
-                command_accumulator = None
-
-            return full_response, command_accumulator
+            return full_response, command_data
 
         except Exception as e:
             print(f"Error communicating with Ollama API: {e}")
@@ -514,7 +515,7 @@ class IntegratedTranscription:
         # self.play_sound(self.close_channel_sound)
         self.current_conversation = None
         self.channel_open = False
-        self.generate_tone(300, 0.2, 0.5)
+        self.generate_tone(300, 0.2, 0.2)
 
     def generate_tone(self, frequency=440, duration=0.2, volume=0.5):
         """
