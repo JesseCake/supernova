@@ -15,6 +15,7 @@ import re
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 
+
 class IntegratedTranscription:
     RATE = 16000
     CHUNK = 4096
@@ -48,14 +49,14 @@ class IntegratedTranscription:
         self.pre_context = self.load_pre_context('precontext_llama3.txt')
         self.current_conversation = None
 
-        # Preload sounds
-        self.sounds_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sounds')
+        # Preload sounds (not using right now)
+        '''self.sounds_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sounds')
         self.open_channel_sound = sa.WaveObject.from_wave_file(
             os.path.join(self.sounds_folder, "channel_open.wav")
         )
         self.close_channel_sound = sa.WaveObject.from_wave_file(
             os.path.join(self.sounds_folder, "channel_closed.wav")
-        )
+        )'''
 
         # Define the available functions in a dictionary
         self.available_functions = {
@@ -117,7 +118,7 @@ class IntegratedTranscription:
 
     def transcribe_audio(self):
         if self.frames_np.size > 0:
-            logging.info(f"Transcribing {self.frames_np.size} samples")
+            # print(f"Transcribing {self.frames_np.size} samples")
             try:
                 segments, _ = self.transcriber.transcribe(self.frames_np)
                 if segments:
@@ -126,7 +127,7 @@ class IntegratedTranscription:
                     if not self.channel_open and self.wake_word in result_text.lower():
                         print(f"Wake word detected: {self.wake_word}")
                         self.channel_open = True
-                        self.play_open_channel_sound()
+                        self.open_channel()
                     elif self.channel_open:
                         if self.close_channel_phrase in result_text.lower():
                             functions.end_conversation(transcriber)
@@ -302,7 +303,7 @@ class IntegratedTranscription:
                         cleaned_text = end_conversation.sub('', accumulated_text)
                         self.speak_text(accumulated_text)
                         self.current_conversation = None
-                        self.play_close_channel_sound()
+                        self.close_channel()
                         return None
 
                     else:
@@ -355,7 +356,8 @@ class IntegratedTranscription:
         return results
 
     def handle_response(self, response):
-        # Split the response into segments by both periods and commas, this keeps things nimble and fast speaking while generating
+        # Split the response into segments by both periods and commas,
+        # this keeps things nimble and fast speaking while generating
         segments = re.split(r'[.,]', response)
         for segment in segments:
             clean_segment = segment.strip()
@@ -431,11 +433,13 @@ class IntegratedTranscription:
         finally:
             self.resume_audio_stream()
 
-    def play_open_channel_sound(self):
-        self.play_sound(self.open_channel_sound)
+    def open_channel(self):
+        # self.play_sound(self.open_channel_sound)
+        self.speak_text("I'm here")
 
-    def play_close_channel_sound(self):
-        self.play_sound(self.close_channel_sound)
+    def close_channel(self):
+        # self.play_sound(self.close_channel_sound)
+        self.speak_text("Goodbye")
 
     def run(self):
         try:

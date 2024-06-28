@@ -45,7 +45,7 @@ def end_conversation(transcriber):
     # Close the channel
     transcriber.channel_open = False
     # Play close channel sound
-    transcriber.play_close_channel_sound()
+    transcriber.close_channel()
     return json.dumps({
         "message": "The conversation has been ended.",
         "action": "end_conversation"
