@@ -15,7 +15,14 @@ import functions
 import re
 from datetime import datetime
 
-import importlib
+import importlib  # for updating the pre-context live
+
+# for the web request/search sections:
+import requests
+from bs4 import BeautifulSoup
+from requests_html import HTMLSession
+import urllib.parse
+
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -75,6 +82,39 @@ class IntegratedTranscription:
 
         print("Finished Initialization: READY")
         self.speak_text("Finished starting up")
+
+    def duckduckgo_search(self, query):
+        """Perform a web search using DuckDuckGo and return a list of results."""
+        print(f"SEARCHING TEXT: {query}")
+        try:
+            encoded_query = urllib.parse.quote(query)
+            url = f"https://duckduckgo.com/html/?q={encoded_query}"
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            }
+
+            response = requests.get(url, headers=headers)
+            soup = BeautifulSoup(response.text, 'html.parser')
+
+            results = []
+            for result in soup.find_all('a', class_='result__a'):
+                title = result.text
+                link = result['href']
+                results.append({'title': title, 'link': link})
+        except Exception as e:
+            print(f"WEB SEARCH ERROR: {e}")
+            return "Function return: error in web search module"
+
+        return results
+
+    def open_web_link(self, url):
+        """Open a web link and return the text content."""
+        session = HTMLSession()
+        response = session.get(url)
+        response.html.render()
+
+        soup = BeautifulSoup(response.html.html, 'html.parser')
+        return soup.get_text()
 
     def clean_text(self, text):
         # Replace common escaped characters with their actual meanings
@@ -207,6 +247,11 @@ class IntegratedTranscription:
 
         return prompt
 
+    def add_to_context(self, text, context):
+        """Add the retrieved text to the context."""
+        context.append({'role': 'system', 'content': text})
+        return context
+
     def process_transcription(self, transcribed_text):
         # if we're starting a new conversation, create the pre-context and instructions:
         if self.current_conversation is None:
@@ -242,22 +287,50 @@ class IntegratedTranscription:
 
             # if we have a command response
             if command:  # when we have an actual response
-                print(f"Command: {command}")
-                if command.strip() == "end_conversation":
+                self.generate_tone(700, 0.05, 0.2)
+                print(f"Command type: {type(command)}")
+
+                if isinstance(command, str):
+                    try:
+                        command = json.loads(command)
+                        print(f"Parsed command: {command}")
+                    except json.JSONDecodeError as e:
+                        print(f"Failed to parse command JSON: {e}")
+                        command = {}
+
+                function_name = command.get("function")
+                print(f"Command: {function_name}")
+
+                if function_name == "end_conversation":
                     print("RECEIVED END COMMAND")
                     # wipe out our conversation history and set flag for sleep
                     self.close_channel()
                     break
-                elif command.strip() == "get_current_time":
+                elif function_name == "get_current_time":
                     print("RECEIVED TIME COMMAND")
                     """Get the current time in a simple 12-hour format."""
                     now = datetime.now()
                     nowtime = now.strftime('%I:%M%p')
                     self.current_conversation.append({
-                        'role': 'user',
+                        'role': 'system',
                         'content': f"function return: {nowtime}"
                     })
                     print(f"Added time {nowtime} to history")
+                elif function_name == "web_search":
+                    query = command.get("query")
+                    if query:
+                        results = self.duckduckgo_search(query)
+                        self.current_conversation.append({
+                            'role': 'user',
+                            'content': f"search results: {results}"
+                        })
+                        self.speak_text("Processing search results.")
+                elif function_name == "open_web_link":
+                    url = command.get("url")
+                    if url:
+                        page_text = self.open_web_link(url)
+                        self.current_conversation = self.add_to_context(page_text, self.current_conversation)
+                        self.speak_text("Content added to context.")
                 else:
                     print("UNKNOWN COMMAND")
                     self.current_conversation.append({
@@ -267,7 +340,7 @@ class IntegratedTranscription:
 
                 # update the prompt for next spin:
                 prompt = self.update_prompt(self.current_conversation)
-                self.generate_tone(700, 0.05, 0.2)
+
 
             else:
                 break
@@ -347,7 +420,8 @@ class IntegratedTranscription:
             # iterate over the response stream as it comes in:
             for chunk in response_stream:
                 # debugging:
-                print(f"Raw response chunk: {chunk}")
+                # print(f"Raw response chunk: {chunk}")
+                print(f".", end='')
 
                 response_content = chunk.get('message', {}).get('content', '')
 
@@ -374,14 +448,13 @@ class IntegratedTranscription:
 
                             # Check for the function key in the parsed JSON
                             if "function" in response_json:
-                                command_data = response_json["function"]
+                                command_data = response_json
                                 print(f"GOT JSON: {command_data}")
                                 break
                         except json.JSONDecodeError:
-                            print("NOT JSON")
+                            # print("NOT JSON")
                             # If it's not a complete JSON object yet, keep accumulating
                             pass
-
 
                     if not json_collecting:
                         # accumulation for speaking text
