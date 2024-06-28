@@ -282,6 +282,8 @@ class IntegratedTranscription:
 
             # Define sentence-ending punctuation
             sentence_endings = re.compile(r'([.,!?])')
+            # match comma only when not followed by number, and full stop only when not followed by letter or number
+            # sentence_endings = re.compile(r'([.!?](?![A-Za-z0-9])|,(?!\d))')
             end_conversation = re.compile(r'\[end\]', re.IGNORECASE)
 
             # iterate over the response stream as it comes in:
