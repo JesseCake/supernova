@@ -36,7 +36,8 @@ class IntegratedTranscription:
 
         self.chat_mode = True  # for using chat endpoint for Ollama or not
         # self.model = "mistral:instruct"
-        self.model = "llama3"
+        self.model = "llama3"  # we are still using llama3, but have modded params in a new modelfile
+        # self.model = "supernova"
         self.model_path = model_path
         self.use_vad = use_vad
         self.vad_detector = VoiceActivityDetector(frame_rate=self.RATE)
@@ -258,12 +259,11 @@ class IntegratedTranscription:
             print("STARTING NEW CONVERSATION")
             self.current_conversation = []
 
-        if self.model == "llama3":
-            prompt = self.create_prompt(
-                transcribed_text=transcribed_text,
-                conversation_history=self.current_conversation,
-                # functions_json=functions.functions_json,  # add this back in when we figure out functions
-            )
+        prompt = self.create_prompt(
+            transcribed_text=transcribed_text,
+            conversation_history=self.current_conversation,
+            # functions_json=functions.functions_json,  # add this back in when we figure out functions
+        )
 
         # Append the new user input to the conversation history (but not before the prompt:
         # self.current_conversation.append(f"[USER] {transcribed_text}")  # raw method
