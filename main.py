@@ -95,6 +95,10 @@ class IntegratedTranscription:
             }
 
             response = requests.get(url, headers=headers)
+            if response.status_code != 200:
+                print(f"Non-200 response: {response.status_code}")
+                return "Function return: error in web search module, perhaps try again?"
+
             soup = BeautifulSoup(response.text, 'html.parser')
 
             results = []
@@ -102,6 +106,13 @@ class IntegratedTranscription:
                 title = result.text
                 link = result['href']
                 results.append({'title': title, 'link': link})
+
+            if not results:
+                print("No results returned, failure most probably")
+
+        except requests.RequestException as e:
+            print(f"WEB SEARCH ERROR: {e}")
+            return "Function return: error in web search module"
         except Exception as e:
             print(f"WEB SEARCH ERROR: {e}")
             return "Function return: error in web search module"
