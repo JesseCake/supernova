@@ -24,7 +24,7 @@ Available functions and format (only one can be used per response):
     Command: {{ "function": "get_current_time" }}
     ========================
     Title: Perform a web search
-    Description: When the user requests a web search, perform the search with this command.
+    Description: When the user requests a web search or similar, perform the search with this command.
     Command: {{ "function": "web_search", "query": "search term" }}
     Response: search results
     ========================
@@ -72,5 +72,7 @@ Some example user prompts and how to answer:
     user: what is 1 + 1?
     assistant: 2 {{ "function": "end_conversation" }}
     
+    user: can you look up what year Sunbeam designed their radiant heat toaster?
+    assistant: {{ "function": "web_search", "query": "sunbeam radiant heat toaster design year" }}
 
 """

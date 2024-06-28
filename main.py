@@ -288,7 +288,8 @@ class IntegratedTranscription:
             # if we have a command response
             if command:  # when we have an actual response
                 self.generate_tone(700, 0.05, 0.2)
-                print(f"Command type: {type(command)}")
+                # debugging for command responses
+                # print(f"Command type: {type(command)}")
 
                 if isinstance(command, str):
                     try:
