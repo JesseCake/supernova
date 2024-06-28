@@ -5,3 +5,6 @@ Leverages Ollama to run the actual LLM (so will require installation of it separ
 
 The VAD and transcriber files in the whisper_live folder are from:
 https://github.com/AIWintermuteAI/WhisperLive
+
+
+So far only for Linux (currently runs on my Ubuntu 22.04 laptop)

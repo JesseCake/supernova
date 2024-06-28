@@ -4,7 +4,6 @@ import json
 from datetime import datetime
 
 
-
 def get_current_weather(latitude, longitude):
   """Get the current weather in a given latitude and longitude"""
   base = "https://api.openweathermap.org/data/2.5/weather"

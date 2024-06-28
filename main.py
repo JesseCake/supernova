@@ -5,12 +5,17 @@ import ollama
 import os
 import time
 import json
+
+import precontext
 from whisper_live.vad import VoiceActivityDetector
 from whisper_live.transcriber import WhisperModel
 import simpleaudio as sa
 from TTS.api import TTS
 import functions
 import re
+from datetime import datetime
+
+import importlib
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -46,10 +51,11 @@ class IntegratedTranscription:
         self.wake_word = "supernova"
         self.close_channel_phrase = "finish conversation"
         self.channel_open = False
-        self.pre_context = self.load_pre_context('precontext_llama3.txt')
+        # self.pre_context = self.load_pre_context('precontext_llama3.txt')
+        self.pre_context = precontext.llama3_context
         self.current_conversation = None
 
-        # Preload sounds (not using right now)
+        # Preload sounds (not using right now, opting for spoken responses for now)
         '''self.sounds_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sounds')
         self.open_channel_sound = sa.WaveObject.from_wave_file(
             os.path.join(self.sounds_folder, "channel_open.wav")
@@ -84,18 +90,14 @@ class IntegratedTranscription:
             with open(file_path, 'r', encoding='utf-8') as file:
                 pre_context = file.read().strip()
                 # Print raw content for debugging
-                #print("Raw content from file:")
-                #print(pre_context)
+                print("Raw content from file:")
+                print(pre_context)
 
                 # Clean the pre-context to replace escaped characters
                 pre_context = self.clean_text(pre_context)
 
-                # Print cleaned content for debugging
-                #print("Cleaned content:")
-                #print(pre_context)
-
                 print(f"Loaded pre-context from {file_path}")
-                return pre_context
+                return f"{pre_context}"
         except FileNotFoundError:
             logging.error(f"Pre-context file not found: {file_path}")
             return "You are a helpful assistant."
@@ -153,6 +155,13 @@ class IntegratedTranscription:
         return prompt
 
     def create_prompt(self, transcribed_text, conversation_history, functions_json=None):
+        # Reload the precontext module to get the latest context (so we can tweak live)
+        loadprecontext = importlib.import_module('precontext')
+        importlib.reload(loadprecontext)
+
+        # Use the reloaded context
+        self.pre_context = loadprecontext.llama3_context
+
         # creates a list of dictionaries based prompt using ollama's roles
         # (yet to find out how to do function inclusion well)
         system_section = {
@@ -173,6 +182,28 @@ class IntegratedTranscription:
         if functions_json:  # if we have the functions section?
             tools_section = functions_json
             prompt.insert(1, tools_section)
+
+        return prompt
+
+    def update_prompt(self, conversation_history):
+        # Reload the precontext module to get the latest context (so we can tweak live)
+        loadprecontext = importlib.import_module('precontext')
+        importlib.reload(loadprecontext)
+
+        # Use the reloaded context
+        self.pre_context = loadprecontext.llama3_context
+
+        # creates a list of dictionaries based prompt using ollama's roles
+        # (yet to find out how to do function inclusion well)
+        system_section = {
+            'role': 'system',
+            'content': self.pre_context,
+            # 'content': self.pre_context.replace('\n', '\\n').replace('"', '\\"'),
+        }
+
+        history_section = conversation_history
+
+        prompt = [system_section] + history_section
 
         return prompt
 
@@ -197,31 +228,49 @@ class IntegratedTranscription:
         })
 
         # Debugging: Print the formatted conversation context:
-        print(f"Generated prompt: {prompt}")
+        # print(f"Generated prompt: {prompt}")
 
-        # Send the text to Ollama:
-        #raw_response, function_calls, error = self.send_to_ollama(prompt)
-        raw_response = self.send_to_ollama(prompt)
+        while True:  # we will stay in a loop for function callbacks unless broken out
+            # Send the text to Ollama:
+            full_response, command = self.send_to_ollama(prompt)
 
-        """if error:
-            print(f"Error from Ollama: {error}")
-            return
+            if full_response:
+                self.current_conversation.append({
+                    'role': 'assistant',
+                    'content': full_response
+                })
 
-        if function_calls:
-            fn_responses = self.call_functions(function_calls)
-            # self.current_conversation += f"\n[RESPONSE] {json.dumps(fn_responses)} [/RESPONSE]"
-            # Ensure that fn_responses is a list of strings
-            #self.current_conversation.append(f"[ASSISTANT] {json.dumps(fn_responses)}")
-            self.handle_response(json.dumps(fn_responses))"""
-        if raw_response:
-            #print(f"Chunking text to speech synth: {raw_response}")
-            # self.current_conversation += f"\n[RESPONSE] {raw_response} [/RESPONSE]"
-            #self.current_conversation.append(f"[ASSISTANT] {raw_response}")
-            # self.handle_response(raw_response)
-            self.current_conversation.append({
-                'role': 'assistant',
-                'content': raw_response
-            })
+            # if we have a command response
+            if not command == "":  # when we have an actual response
+                print(f"Command: {command}")
+                if command.strip() == "end":
+                    print("RECEIVED END COMMAND")
+                    # wipe out our conversation history and set flag for sleep
+                    self.close_channel()
+                    break
+                elif command.strip() == "time":
+                    print("RECEIVED TIME COMMAND")
+                    """Get the current time in a simple 12-hour format."""
+                    now = datetime.now()
+                    nowtime = now.strftime('%I:%M%p')
+                    self.current_conversation.append({
+                        'role': 'user',
+                        'content': f"{nowtime}"
+                    })
+                    print(f"Added time {nowtime} to history")
+                else:
+                    print("UNKNOWN COMMAND")
+                    self.current_conversation.append({
+                        'role': 'user',
+                        'content': "Unknown command or incorrect command format, try again"
+                    })
+
+                # update the prompt for next spin:
+                prompt = self.update_prompt(self.current_conversation)
+                self.generate_tone(700, 0.1, 0.2)
+
+            else:
+                break
 
     def preload_ollama(self):
         # Preload the model so that it doesn't take forever for the first request
@@ -238,7 +287,7 @@ class IntegratedTranscription:
     def send_to_ollama(self, prompt_text):
         try:
 
-            if self.chat_mode is False:  # we're using the generate mode
+            if self.chat_mode is False:  # we're using the generate mode - not good for conversation
                 # Concatenate messages from create_prompt into a big fat string
                 concatenated_prompt = "\n".join([f"{msg['role']}: {msg['content']}" for msg in prompt_text])
                 print(f"Concatenated prompt being sent: {concatenated_prompt}")
@@ -264,9 +313,9 @@ class IntegratedTranscription:
 
             elif self.chat_mode is True:
                 # debugging weird pre-context:
-                formatted_prompt = json.dumps(prompt_text, indent=2)
-                print("Formatted prompt being send:")
-                print(formatted_prompt)
+                #print("Formatted prompt being send:")
+                #for item in prompt_text:
+                #    print(f"{item['role']}: {item['content']}\n")
 
                 response_stream = self.ollama_client.chat(  # alternative is generate
                     model=self.model,
@@ -277,8 +326,15 @@ class IntegratedTranscription:
                 )
 
             # Initialise empty containers for response and function calls
-            tool_calls = []
-            final_response = ""
+
+            # for the command logic:
+            command_accumulator = ""
+            command_mode = False
+
+            # the total response to add to conversation history (returned):
+            full_response = ""
+
+            # storage for accumulating text in chunks and returning to speech synth as we go to save time:
             accumulated_text = ""
 
             # Define sentence-ending punctuation
@@ -294,21 +350,37 @@ class IntegratedTranscription:
 
                 response_content = chunk.get('message', {}).get('content', '')
 
+                # add the full response to an accumulator to add to conversation history:
+                full_response += response_content
+
                 # debugging:
                 # print(f"{response_content}")
 
                 if response_content:
-                    if end_conversation.search(accumulated_text):
-                        # we've found an end marker, speak the rest of text then return
-                        cleaned_text = end_conversation.sub('', accumulated_text)
-                        self.speak_text(accumulated_text)
-                        self.current_conversation = None
-                        self.close_channel()
-                        return None
-
+                    if "[" in response_content and not command_mode:
+                        # Split the response around the opening bracket
+                        # in case there is also some of the command included in the chunk:
+                        parts = response_content.split("[", 1)
+                        accumulated_text += parts[0].strip()
+                        command_accumulator += parts[1]
+                        command_mode = True
+                        print("FOUND COMMAND COMING IN")
+                    elif command_mode:
+                        # Check for closing bracket and any trailing characters
+                        match = re.match(r'^(.*?)]\s*(.*)$', response_content)
+                        if match:
+                            command_accumulator += match.group(1)
+                            print(f"FINISHED COMMAND INPUT: [{command_accumulator}]")
+                            command_mode = False
+                            # ensure any accidental words or text beyond it are added to the accumulated text
+                            remaining_text = match.group(2).strip()
+                            if remaining_text:
+                                accumulated_text += remaining_text
+                        else:
+                            command_accumulator += response_content
                     else:
+                        # accumulation for speaking text
                         accumulated_text += response_content
-                        final_response += response_content
 
                         # Check if accumulated text ends with a sentence-ending punctuation
                         if sentence_endings.search(accumulated_text):
@@ -317,16 +389,17 @@ class IntegratedTranscription:
                             # wipe it out fresh after speaking
                             accumulated_text = ""
 
-            # Speak any remaining text after processing all chunks
-            #if accumulated_text.strip():
-            #    self.speak_text(accumulated_text.strip())
-
-            # Clean up the final response
-            final_response = final_response.strip()
+            # Speak any remaining text after processing all chunks (if there is any)
+            if not accumulated_text == "":
+                self.speak_text(accumulated_text.strip())
 
             print("FINISHED RESPONSE")
 
-            return final_response
+            # make sure we only return a string in the command if there is anything
+            if command_accumulator == "":
+                command_accumulator = None
+
+            return full_response, command_accumulator
 
         except Exception as e:
             print(f"Error communicating with Ollama API: {e}")
@@ -439,7 +512,27 @@ class IntegratedTranscription:
 
     def close_channel(self):
         # self.play_sound(self.close_channel_sound)
-        self.speak_text("Goodbye")
+        self.current_conversation = None
+        self.channel_open = False
+        self.generate_tone(300, 0.2, 0.5)
+
+    def generate_tone(self, frequency=440, duration=0.2, volume=0.5):
+        """
+        Generate a tone with the specified frequency, duration, and volume.
+
+        :param frequency: Frequency of the tone in Hz (default is 440 Hz, which is A4).
+        :param duration: Duration of the tone in seconds (default is 1.0 seconds).
+        :param volume: Volume of the tone (0.0 to 1.0, default is 0.5).
+        """
+        sample_rate = 44100
+        t = np.linspace(0, duration, int(sample_rate * duration), False)
+        tone = np.sin(frequency * t * 2 * np.pi)
+        audio = tone * (2 ** 15 - 1) / np.max(np.abs(tone))
+        audio = audio * volume
+        audio = audio.astype(np.int16)
+
+        play_obj = sa.play_buffer(audio, 1, 2, sample_rate)
+        play_obj.wait_done()
 
     def run(self):
         try:
