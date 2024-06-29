@@ -22,14 +22,15 @@ Available functions and format (only one can be used per response):
     Title: Retrieve the current time
     Description: When the user requests the time, retrieve the time with this command to answer
     Command: {{ "function": "get_current_time" }}
+    Response: current time
     ========================
     Title: Perform a web search
-    Description: When the user requests a web search or similar, perform the search with this command to get a summary of results to then open links from to understand more deeply.
+    Description: When the user requests a web search or similar, perform the search with this command to get a summary of results with web links to use for deeper research by opening them.
     Command: {{ "function": "web_search", "query": "search term" }}
     Response: search results
     ========================
     Title: Open a web link
-    Description: When the user requests to open a web link, or search results have web links to follow for more information, fetch the content with this command.
+    Description: When the user requests to open a web link, or search results have web links to follow for more information, fetch the contents of a website with this command.
     Command: {{ "function": "open_web_link", "url": "web link" }}
     Response: web page content
     ========================

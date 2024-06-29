@@ -240,7 +240,7 @@ class IntegratedTranscription:
 
             soup = BeautifulSoup(response.text, 'html.parser')
 
-            results = [{'instruction': "Use the following search results to comprehend and summarize, or access the web pages for deeper information to do the same. Do not just read out the web links themselves."}]
+            results = [{'instruction': "Use the following search results to comprehend and summarize, and use the web links with the open web link function for deeper information to do the same. Do not just read out the web links themselves."}]
             for result in soup.find_all('a', class_='result__a'):
                 title = result.text
                 link = result['href']
@@ -431,7 +431,7 @@ class IntegratedTranscription:
         # Append the new user input to the conversation history (but not before the prompt:
         # self.current_conversation.append(f"[USER] {transcribed_text}")  # raw method
         self.current_conversation.append({
-            'role': 'user',
+            'role': 'assistant',
             'content': transcribed_text,
         })
 
@@ -444,7 +444,7 @@ class IntegratedTranscription:
 
             if full_response:
                 self.current_conversation.append({
-                    'role': 'assistant',
+                    'role': 'user',
                     'content': full_response
                 })
 
@@ -476,7 +476,7 @@ class IntegratedTranscription:
                     now = datetime.now()
                     nowtime = now.strftime('%I:%M%p')
                     self.current_conversation.append({
-                        'role': 'system',
+                        'role': 'user',
                         'content': f"function return: {nowtime}"
                     })
                     print(f"Added time {nowtime} to history")
@@ -661,6 +661,8 @@ class IntegratedTranscription:
                 self.speak_text(accumulated_text.strip())
 
             print("FINISHED RESPONSE")
+            # Generate a tone to signify that the response has finished
+            self.generate_tone(300, 0.1, 0.2)
 
             return full_response, command_data
 
@@ -777,7 +779,10 @@ class IntegratedTranscription:
         # self.play_sound(self.close_channel_sound)
         self.current_conversation = None
         self.channel_open = False
-        self.generate_tone(300, 0.2, 0.2)
+        for _ in range (3):
+            self.generate_tone(300, 0.2, 0.2)
+            time.sleep(0.3)
+
 
     def generate_tone(self, frequency=440, duration=0.2, volume=0.5):
         """
