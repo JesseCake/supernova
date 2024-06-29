@@ -40,6 +40,7 @@ class IntegratedTranscription:
         self.chat_mode = True  # for using chat endpoint for Ollama or not
         # self.model = "mistral:instruct"
         self.model = "llama3"  # we are still using llama3, but have modded params in a new modelfile
+        # self.model = "dolphin-llama3:8b"
         # self.model = "supernova"
         self.model_path = model_path
         self.use_vad = use_vad
@@ -232,14 +233,14 @@ class IntegratedTranscription:
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
             }
 
-            response = requests.get(url, headers=headers)
+            response = requests.get(url, headers=headers, timeout=5)  # timeout of 5 seconds
             if response.status_code != 200:
                 print(f"Non-200 response: {response.status_code}")
-                return "Function return: error in web search module, perhaps try again?"
+                return f"Function return: error in web search module, Error: {response.status_code}. Decide how to proceed."
 
             soup = BeautifulSoup(response.text, 'html.parser')
 
-            results = []
+            results = [{'instruction': "Use the following search results to comprehend and summarize, or access the web pages for deeper information to do the same. Do not just read out the web links themselves."}]
             for result in soup.find_all('a', class_='result__a'):
                 title = result.text
                 link = result['href']
@@ -250,10 +251,10 @@ class IntegratedTranscription:
 
         except requests.RequestException as e:
             print(f"WEB SEARCH ERROR: {e}")
-            return "Function return: error in web search module"
+            return f"Function return: error in web search module: {e}. Decide how to proceed."
         except Exception as e:
             print(f"WEB SEARCH ERROR: {e}")
-            return "Function return: error in web search module"
+            return f"Function return: error in web search module: {e}. Decide how to proceed."
 
         return results
 
@@ -412,7 +413,7 @@ class IntegratedTranscription:
 
     def add_to_context(self, text, context):
         """Add the retrieved text to the context."""
-        context.append({'role': 'user', 'content': text})
+        context.append({'role': 'assistant', 'content': text})
         return context
 
     def process_transcription(self, transcribed_text):
@@ -485,15 +486,15 @@ class IntegratedTranscription:
                         results = self.duckduckgo_search(query)
                         self.current_conversation.append({
                             'role': 'user',
-                            'content': f"search results: {results}"
+                            'content': f"{results}"
                         })
-                        self.speak_text("Processing search results.")
+                        self.speak_text("Searching online.")
                 elif function_name == "open_web_link":
                     url = command.get("url")
                     if url:
                         page_text = self.open_web_link(url)
                         self.current_conversation = self.add_to_context(page_text, self.current_conversation)
-                        self.speak_text("Content added to context.")
+                        self.speak_text("Website pulled.")
                 elif "search_knowledge" in function_name:
                     self.current_conversation = self.add_to_context(
                         self.process_knowledge_search_command(command),
