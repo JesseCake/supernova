@@ -76,4 +76,57 @@ tools = [
             },
         },
     },
+
+    {
+        'type': 'function',
+        'function': {
+            'name': 'ha_list_entities_with_states',
+            'description': 'List all of the available Home Automation entities with their states to use with other home automation functions. Always check this before attempting to manipulate home automation objects',
+            'parameters': {
+                'type': 'object',
+                'properties': {},
+            },
+        },
+    },
+
+    {
+        'type': 'function',
+        'function': {
+            'name': 'ha_set_switch',
+            'description': 'Set the state of a switch in the Home Automation. IMPORTANT: you must check the real entity id before using this',
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'entity_id': {
+                        'type': 'string',
+                        'description': 'The id of the switch entity'
+                    },
+                    'state': {
+                        'type': 'string',
+                        'description': 'The desired state. Either on or off'
+                    },
+                },
+                'required': ['entity_id', 'state'],
+            },
+        },
+    },
+
+{
+        'type': 'function',
+        'function': {
+            'name': 'ha_activate_scene',
+            'description': 'Activate lighting scene in the Home Automation.',
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'scene_id': {
+                        'type': 'string',
+                        'description': 'The id of the scene entity'
+                    },
+                },
+                'required': ['scene_id'],
+            },
+        },
+    },
+
 ]

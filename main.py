@@ -30,6 +30,9 @@ import wikipedia
 # for database interaction:
 import sqlite3
 
+# home assistant API link
+from homeassistant_api import Client as HAClient
+
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -93,8 +96,174 @@ class IntegratedTranscription:
         # init the db if it needs it:
         self.init_db()
 
+        # Home assistant API key:
+        self.ha_key = self.get_ha_key()
+        self.ha_url = 'http://192.168.20.3:8123/api'
+        self.home_assistant = HAClient(self.ha_url, self.ha_key)
+
+        # NOW LET's ADD AVAILABLE HA STUFF TO THE PRE-CONTEXT:
+        self.add_ha_to_pre_context()
+
+        # test
+        #self.ha_get_switches()
+        #self.ha_set_switch('switch.espresso', 'on')
+        #print(self.ha_list_entities_with_states())
+        #self.ha_set_scene('bedroom_bright_light')
+        #print(self.ha_get_available_switches_and_scenes())
+
+
         print("Finished Initialization: READY")
         self.speak_text("Finished starting up")
+
+    def get_ha_key(self):
+        """
+        Retrieves your API key you've set up in Home Assistant and stored in a file 'home_assistant_api'
+        Make sure you put in that file only:
+        HA_API_KEY = "yourkeyhere"
+        """
+        with open("home_assistant_api", "r") as file:
+            # Iterate over each line in the file
+            for line in file:
+                # Check if the line starts with "HA_API_KEY"
+                if line.startswith("HA_API_KEY"):
+                    # Split the line at the '=' and strip any whitespace and quotes
+                    return line.split('=')[1].strip().strip('"')
+
+    def add_ha_to_pre_context(self):
+        """adds our home assistant available entities to the end of the pre-context"""
+        # Get the formatted list of available switches and scenes
+        new_context_info = self.ha_get_available_switches_and_scenes()
+
+        # Append this new information to the existing pre-context
+        self.pre_context += new_context_info
+
+    def ha_get_available_switches_and_scenes(self):
+        """For adding to the end of your pre-context"""
+        # Retrieve all states from Home Assistant
+        all_states = self.home_assistant.get_states()
+
+        # Filter for switches and scenes
+        available_switches = [entity.entity_id for entity in all_states if entity.entity_id.startswith("switch.")]
+        available_scenes = [entity.entity_id.split('.')[1] for entity in all_states if
+                            entity.entity_id.startswith("scene.")]
+
+        # Format the available switches and scenes into a string
+        pre_context_info = (
+                "Available Home Automation Entities for use with tools:\n"
+                "Available Switch entity_id:\n" +
+                "\n".join([f" - {switch}" for switch in available_switches]) +
+                "\n\nAvailable Scene entity_id:\n" +
+                "\n".join([f" - {scene}" for scene in available_scenes])
+        )
+
+        return pre_context_info
+
+    def ha_list_entities_with_states(self):
+        # Retrieve all states from Home Assistant
+        all_states = self.home_assistant.get_states()
+
+        # Print each entity's ID and current state
+        #print("All Entities and Their States:")
+        #for entity in all_states:
+        #    print(f" - {entity.entity_id}: {entity.state}")
+
+        # Domains of interest (so we don't give the LLM everything
+        domains_of_interest = {
+            "scene": "Available Lighting Scenes:",
+            "switch": "Available Switches with current states:",
+            #"light": "Available Lights with current states:",
+            "media_player": "Available Media Players with current states:"
+        }
+
+        # Organize entities by domain
+        categorized_entities = {domain: [] for domain in domains_of_interest}
+
+        for entity in all_states:
+            domain = entity.entity_id.split('.')[0]
+            if domain in categorized_entities:
+                categorized_entities[domain].append(entity)
+
+            # Prepare the output dictionary
+            response = {"Available Home Automation objects": {}}
+
+            for domain, header in domains_of_interest.items():
+                if categorized_entities[domain]:
+                    if domain == "scene":
+                        # Include only scene names
+                        response["Available Home Automation objects"][header] = [
+                            entity.entity_id.split('.')[1] for entity in categorized_entities[domain]
+                        ]
+                    else:
+                        # Include entity IDs and their states for other domains
+                        response["Available Home Automation objects"][header] = [
+                            {entity.entity_id: entity.state} for entity in categorized_entities[domain]
+                        ]
+                else:
+                    response["Available Home Automation objects"][header] = []
+
+        # Return the formatted JSON to the LLM
+        return json.dumps(response)
+
+    def ha_set_switch(self, tool_args):
+        entity_id = tool_args.get('parameters').get('entity_id')
+        state = tool_args.get('parameters').get('state')
+
+        print(f"TOOL: SET SWITCH entity_id={entity_id}, state={state}")
+
+        # Validate the desired state
+        if state not in ["on", "off"]:
+            print(f"Bad state: {state}")
+            return json.dumps({"setting switch error":"State must be either 'on' or 'off'."})
+
+        print('GETTING DOMAIN')
+        # Get the switch domain
+        switch = self.home_assistant.get_domain("switch")
+
+        '''print('GETTING ALL SWITCHES FROM DOMAIN')
+        # Get the list of all available switch entity_ids
+        all_switches = [switch.entity_id for switch in switch.get_entities()]
+
+        print('CHECKING IF ID IS IN AVAILABLE SWITCHES')
+        # Check if the provided entity_id is in the list of available switches
+        if entity_id not in all_switches:
+            print("HA set switch: Bad switch id")
+            return json.dumps({
+                "set switch error": f"Invalid switch ID '{entity_id}'.",
+                "available switches": all_switches,
+                "instruction": "Try again with valid ID"
+            })'''
+        print('getting to switching section')
+        try:
+            # Call the appropriate service based on the state
+            if state == "on":
+                switch.turn_on(entity_id=entity_id)
+            else:
+                switch.turn_off(entity_id=entity_id)
+
+            print(f"Successful switch!")
+            return json.dumps({'set switch': f'successfully switched {entity_id} {state}'})
+
+        except Exception as e:
+            print(f"Failed to call switch")
+            return json.dumps({'set switch error': f'Error in switching {entity_id} {state}'})
+
+    def ha_activate_scene(self, tool_args):
+        scene_id = tool_args.get('parameters').get('scene_id')
+        # Get the scene domain
+        scene = self.home_assistant.get_domain("scene")
+
+        # Construct the full entity_id for the scene
+        scene_id = f"scene.{scene_id}"
+
+        try:
+            # Attempt to activate the scene
+            scene.turn_on(entity_id=scene_id)
+            # Return success message
+            return json.dumps({'activate scene': f'Successfully activated {scene_id}'})
+        except Exception as e:
+            # Return error message if something goes wrong
+            return json.dumps({'activate scene error': f'Failed to activate {scene_id}: {str(e)}'})
+
 
     def init_db(self, db_name="knowledge.db"):
         conn = sqlite3.connect(db_name)
@@ -346,7 +515,6 @@ class IntegratedTranscription:
 
         return json.dumps({'wikipedia_search_results': f'{results}'})
 
-
     def get_current_time(self, tool_args):
         print("TOOL: GET CURRENT TIME")
         """Get the current time in a simple 12-hour format."""
@@ -357,7 +525,6 @@ class IntegratedTranscription:
     def end_conversation(self, tool_args):
         print("TOOL: END CONVERSATION")
         self.close_channel()
-
 
     def clean_text(self, text):
         # Replace common escaped characters with their actual meanings
@@ -444,6 +611,8 @@ class IntegratedTranscription:
 
         # Use the reloaded context
         self.pre_context = loadprecontext.llama3_context
+        # add available HA stuff to pre-context tail
+        self.add_ha_to_pre_context()
 
         # creates a list of dictionaries based prompt using ollama's roles
         # (yet to find out how to do function inclusion well)
@@ -475,6 +644,8 @@ class IntegratedTranscription:
 
         # Use the reloaded context
         self.pre_context = loadprecontext.llama3_context
+        # add available HA stuff to pre-context tail
+        self.add_ha_to_pre_context()
 
         # creates a list of dictionaries based prompt using ollama's roles
         # (yet to find out how to do function inclusion well)
@@ -540,6 +711,9 @@ class IntegratedTranscription:
                     'web_search': self.web_search,
                     'open_web_link': self.open_web_link,
                     'wikipedia_search': self.wikipedia_search,
+                    'ha_list_entities_with_states': self.ha_list_entities_with_states,
+                    'ha_set_switch': self.ha_set_switch,
+                    'ha_activate_scene': self.ha_activate_scene
                 }
 
                 for tool in tool_calls:
