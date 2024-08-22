@@ -7,6 +7,7 @@ import time
 import json
 
 import precontext
+import tools
 from whisper_live.vad import VoiceActivityDetector
 from whisper_live.transcriber import WhisperModel
 import simpleaudio as sa
@@ -22,6 +23,9 @@ import requests
 from bs4 import BeautifulSoup
 from requests_html import HTMLSession
 import urllib.parse
+
+# wikipedia search
+import wikipedia
 
 # for database interaction:
 import sqlite3
@@ -39,7 +43,7 @@ class IntegratedTranscription:
 
         self.chat_mode = True  # for using chat endpoint for Ollama or not
         # self.model = "mistral:instruct"
-        self.model = "llama3"  # we are still using llama3, but have modded params in a new modelfile
+        self.model = "llama3.1"  # we are still using llama3, but have modded params in a new modelfile
         # self.model = "dolphin-llama3:8b"
         # self.model = "supernova"
         self.model_path = model_path
@@ -65,6 +69,7 @@ class IntegratedTranscription:
         self.channel_open = False
         # self.pre_context = self.load_pre_context('precontext_llama3.txt')
         self.pre_context = precontext.llama3_context
+        self.tools = tools.tools
         self.current_conversation = None
 
         # Preload sounds (not using right now, opting for spoken responses for now)
@@ -82,7 +87,7 @@ class IntegratedTranscription:
             functions.get_current_weather.__name__: functions.get_current_weather,
             functions.get_current_time.__name__: functions.get_current_time,
         }
-        self.ollama_client = ollama.Client()
+        self.ollama_client = ollama.Client(host='http://192.168.20.200:11434')
         # self.preload_ollama()
 
         # init the db if it needs it:
@@ -223,24 +228,34 @@ class IntegratedTranscription:
             conn.close()
             return f"Function Return: No knowledge entry found in row number '{row_number}'."
 
-    def duckduckgo_search(self, query):
+    def web_search(self, tool_args):
         """Perform a web search using DuckDuckGo and return a list of results."""
-        print(f"SEARCHING TEXT: {query}")
+        query = tool_args.get('parameters').get('query')
+        print(f'TOOL: WEB SEARCH "{query}"')
+
         try:
             encoded_query = urllib.parse.quote(query)
+            # debugging:
+            # print(f"Encoded query = {encoded_query}")
             url = f"https://duckduckgo.com/html/?q={encoded_query}"
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
             }
 
-            response = requests.get(url, headers=headers, timeout=5)  # timeout of 5 seconds
+            session = requests.Session()
+            response = session.get(url, headers=headers, timeout=50, allow_redirects=True)
+
+            # debug:
+            #print(f'RAW RESPONSE: {response.text}')
+
             if response.status_code != 200:
                 print(f"Non-200 response: {response.status_code}")
-                return f"Function return: error in web search module, Error: {response.status_code}. Decide how to proceed."
+                return json.dumps({'web_search_error': f'error in web search module. Error: {response.status_code}'})
 
             soup = BeautifulSoup(response.text, 'html.parser')
 
-            results = [{'instruction': "Use the following search results to comprehend and summarize, and use the web links with the open web link function for deeper information to do the same. Do not just read out the web links themselves."}]
+            #results = [{'Function Return': "Use the following search results to comprehend and summarize, and use the web links with the open web link function for deeper information to do the same. Do not just read out the web links themselves."}]
+            results = []
             for result in soup.find_all('a', class_='result__a'):
                 title = result.text
                 link = result['href']
@@ -248,37 +263,101 @@ class IntegratedTranscription:
 
             if not results:
                 print("No results returned, failure most probably")
+                results.append({'error': 'no results found, probably web search tool failure'})
 
         except requests.RequestException as e:
             print(f"WEB SEARCH ERROR: {e}")
-            return f"Function return: error in web search module: {e}. Decide how to proceed."
+            #return f"Function return: error in web search module: {e}. Decide how to proceed."
+            return json.dumps({'web_search_error': f'Error in web search: {e}'})
         except Exception as e:
             print(f"WEB SEARCH ERROR: {e}")
-            return f"Function return: error in web search module: {e}. Decide how to proceed."
+            #return f"Function return: error in web search module: {e}. Decide how to proceed."
+            return json.dumps({'web_search_error': f'Error in web search: {e}'})
 
-        return results
+        return json.dumps({'web_search_results': f'{results}'})
 
-    def open_web_link(url, max_retries=3):
+    def open_web_link(self, tool_args, max_retries=3):
         """Open a web link and return the text content."""
+        print("TOOL: OPEN WEB LINK")
         session = HTMLSession()
+        url = tool_args.get('parameters').get('url')
 
         for attempt in range(max_retries):
             try:
                 response = session.get(url)
                 response.html.render()
                 soup = BeautifulSoup(response.html.html, 'html.parser')
-                return soup.get_text()
+                #return soup.get_text()
+                return json.dumps({'web_link_results': soup.get_text()})
             except requests.exceptions.RequestException as e:
                 if isinstance(e, requests.exceptions.ConnectionError) and 'Name or service not known' in str(e):
                     print(f"DNS resolution error: {e}")
-                    return f"Function return: DNS resolution error for {url}"
+                    #return f"Function return: DNS resolution error for {url}"
+                    return json.dumps({'web_link_error': f"DNS resolution error for {url}"})
                 print(f"Attempt {attempt + 1} failed: {e}")
                 time.sleep(2)  # Wait for 2 seconds before retrying
             except Exception as e:
                 print(f"An unexpected error occurred: {e}")
-                return f"Function return: unexpected error for {url}"
+                #return f"Function return: unexpected error for {url}"
+                return json.dumps({'web_link_error': f'Unexpected error for {url}: {e}'})
+        return json.dumps({'web_link_error': f'Failed to open web link after {max_retries} attempts'})
 
-        return "Function return: error in web search module"
+    def wikipedia_search(self, tool_args):
+        """Search Wikipedia for results"""
+        query = tool_args.get('parameters').get('query')
+
+        print("Wikipedia searching...")
+        search_results = wikipedia.search(query)
+        print("Wikipedia got results")
+
+        results = []
+
+        if search_results:
+            for title in search_results:
+                print(f"Retrieving info for result title: {title}")
+                try:
+                    summary = wikipedia.summary(title, sentences=2)
+                    page = wikipedia.page(title)
+
+                    soup = BeautifulSoup(page.html(), features="lxml")
+
+                    result = {
+                        "title": title,
+                        "summary": summary,
+                        "url": page.url
+                    }
+                    results.append(result)
+                except wikipedia.DisambiguationError as e:
+                    # Handle disambiguation pages in necessary
+                    results.append({
+                        "title": title,
+                        "summary": "Disambiguation page, multiple meanings exist",
+                        "url": None
+                    })
+                except wikipedia.PageError:
+                    # Handle page not found errors
+                    results.append({
+                        "title": title,
+                        "summary": "Page does not exist.",
+                        "url": None
+                    })
+        else:
+            results.append('No results, try another search term')
+
+        return json.dumps({'wikipedia_search_results': f'{results}'})
+
+
+    def get_current_time(self, tool_args):
+        print("TOOL: GET CURRENT TIME")
+        """Get the current time in a simple 12-hour format."""
+        now = datetime.now()
+        nowtime = now.strftime('%I:%M%p')
+        return json.dumps({'current_time': nowtime})
+
+    def end_conversation(self, tool_args):
+        print("TOOL: END CONVERSATION")
+        self.close_channel()
+
 
     def clean_text(self, text):
         # Replace common escaped characters with their actual meanings
@@ -439,8 +518,11 @@ class IntegratedTranscription:
         # print(f"Generated prompt: {prompt}")
 
         while True:  # we will stay in a loop for function callbacks unless broken out
+            full_response = None
+            tool_calls = None
+
             # Send the text to Ollama:
-            full_response, command = self.send_to_ollama(prompt)
+            full_response, tool_calls = self.send_to_ollama(prompt)
 
             if full_response:
                 self.current_conversation.append({
@@ -449,83 +531,99 @@ class IntegratedTranscription:
                 })
 
             # if we have a command response
-            if command:  # when we have an actual response
+            if tool_calls:  # when we have an actual response
                 self.generate_tone(700, 0.05, 0.2)
-                # debugging for command responses
-                # print(f"Command type: {type(command)}")
 
-                if isinstance(command, str):
+                available_functions = {
+                    'end_conversation': self.end_conversation,
+                    'get_current_time': self.get_current_time,
+                    'web_search': self.web_search,
+                    'open_web_link': self.open_web_link,
+                    'wikipedia_search': self.wikipedia_search,
+                }
+
+                for tool in tool_calls:
                     try:
-                        command = json.loads(command)
-                        print(f"Parsed command: {command}")
-                    except json.JSONDecodeError as e:
-                        print(f"Failed to parse command JSON: {e}")
-                        command = {}
+                        #tool_name = tool.get("name")
+                        print(f"Tool: {tool.get('name')}")
 
-                function_name = command.get("function")
-                print(f"Command: {function_name}")
+                        function_to_call = available_functions[tool['name']]
+                        function_response = function_to_call(tool_args=tool)
 
-                if function_name == "end_conversation":
-                    print("RECEIVED END COMMAND")
-                    # wipe out our conversation history and set flag for sleep
-                    self.close_channel()
-                    break
-                elif function_name == "get_current_time":
-                    print("RECEIVED TIME COMMAND")
-                    """Get the current time in a simple 12-hour format."""
-                    now = datetime.now()
-                    nowtime = now.strftime('%I:%M%p')
-                    self.current_conversation.append({
-                        'role': 'user',
-                        'content': f"function return: {nowtime}"
-                    })
-                    print(f"Added time {nowtime} to history")
-                elif function_name == "web_search":
-                    query = command.get("query")
-                    if query:
-                        results = self.duckduckgo_search(query)
+                        if self.current_conversation:
+                            # add function response to the conversation:
+                            self.current_conversation.append(
+                                {
+                                    'role': 'tool',
+                                    'content': function_response
+                                }
+                            )
+
+                    except Exception as e:
+                        # something went wrong:
+                        self.current_conversation.append(
+                            {
+                                'role': 'tool',
+                                'content': f'Error with tool, or bad use of tool: {e}',
+                            }
+                        )
+
+                    '''if tool_name == "end_conversation":
+                        print("RECEIVED END COMMAND")
+                        # wipe out our conversation history and set flag for sleep
+                        self.close_channel()
+                        break
+                        
+
+                    elif tool_name == "web_search":
+                        query = command.get("query")
+                        if query:
+                            results = self.duckduckgo_search(query)
+                            self.current_conversation.append({
+                                'role': 'user',
+                                'content': f"{results}"
+                            })
+                            self.speak_text("Searching online.")
+                    elif tool_name == "open_web_link":
+                        print("GOING TO OPEN WEB LINK NOW")
+                        url = command.get("url")
+                        if url:
+                            page_text = self.open_web_link(url)
+                            print(f"Pulled page text: {page_text}")
+                            self.current_conversation = self.add_to_context(page_text, self.current_conversation)
+                            print(f"Added scraped website to conversation text")
+                            self.speak_text("Website pulled.")
+                    elif "search_knowledge" in tool_name:
+                        self.current_conversation = self.add_to_context(
+                            self.process_knowledge_search_command(command),
+                            self.current_conversation
+                        )
+                    elif tool_name == "store_knowledge":
+                        self.current_conversation = self.add_to_context(
+                            self.store_knowledge(
+                                command.get("title"),
+                                command.get("content")
+                            ),
+                            self.current_conversation
+                        )
+                    elif tool_name == "delete_knowledge":
+                        self.current_conversation = self.add_to_context(
+                            self.delete_knowledge(
+                                command.get("id")
+                            ),
+                            self.current_conversation
+                        )
+                    elif tool_name == "list_knowledge_titles":
+                        self.current_conversation = self.add_to_context(
+                            self.list_knowledge_titles(),
+                            self.current_conversation
+                        )
+                    else:
+                        print("UNKNOWN COMMAND")
                         self.current_conversation.append({
                             'role': 'user',
-                            'content': f"{results}"
-                        })
-                        self.speak_text("Searching online.")
-                elif function_name == "open_web_link":
-                    url = command.get("url")
-                    if url:
-                        page_text = self.open_web_link(url)
-                        self.current_conversation = self.add_to_context(page_text, self.current_conversation)
-                        self.speak_text("Website pulled.")
-                elif "search_knowledge" in function_name:
-                    self.current_conversation = self.add_to_context(
-                        self.process_knowledge_search_command(command),
-                        self.current_conversation
-                    )
-                elif function_name == "store_knowledge":
-                    self.current_conversation = self.add_to_context(
-                        self.store_knowledge(
-                            command.get("title"),
-                            command.get("content")
-                        ),
-                        self.current_conversation
-                    )
-                elif function_name == "delete_knowledge":
-                    self.current_conversation = self.add_to_context(
-                        self.delete_knowledge(
-                            command.get("id")
-                        ),
-                        self.current_conversation
-                    )
-                elif function_name == "list_knowledge_titles":
-                    self.current_conversation = self.add_to_context(
-                        self.list_knowledge_titles(),
-                        self.current_conversation
-                    )
-                else:
-                    print("UNKNOWN COMMAND")
-                    self.current_conversation.append({
-                        'role': 'user',
-                        'content': "Unknown command or incorrect command format, try again?"
-                    })
+                            'content': "Unknown command or incorrect command format, try again?"
+                        })'''
 
                 # update the prompt for next spin:
                 prompt = self.update_prompt(self.current_conversation)
@@ -575,9 +673,9 @@ class IntegratedTranscription:
 
             elif self.chat_mode is True:
                 # debugging weird pre-context:
-                print("Formatted prompt being send:")
-                for item in prompt_text:
-                    print(f"{item['role']}: {item['content']}\n")
+                #print("Formatted prompt being send:")
+                #for item in prompt_text:
+                #    print(f"{item['role']}: {item['content']}\n")
 
                 response_stream = self.ollama_client.chat(  # alternative is generate
                     model=self.model,
@@ -585,14 +683,19 @@ class IntegratedTranscription:
                     stream=True,
                     keep_alive="2h",
                     # raw=True,
+                    tools=self.tools
                 )
 
             # Initialise empty containers for response and function calls
 
             # for the command logic:
-            command_data = None
+            # command_data = None
             json_accumulator = ""
             json_collecting = False
+            # for keeping track of how many open brackets we have when in json collect mode:
+            json_brackets = 0
+            # tool call accumulation:
+            tool_calls = []
 
             # the total response to add to conversation history (returned):
             full_response = ""
@@ -606,11 +709,13 @@ class IntegratedTranscription:
             # sentence_endings = re.compile(r'([.!?](?![A-Za-z0-9])|,(?!\d))')
             end_conversation = re.compile(r'\[end\]', re.IGNORECASE)
 
+
+
             # iterate over the response stream as it comes in:
             for chunk in response_stream:
                 # debugging:
                 # print(f"Raw response chunk: {chunk}")
-                print(f".", end='')
+                #print(f".", end='')
 
                 response_content = chunk.get('message', {}).get('content', '')
 
@@ -621,29 +726,26 @@ class IntegratedTranscription:
                 # print(f"{response_content}")
 
                 if response_content:
-
                     # watch for JSON and accumulate if so:
-                    if '{' in response_content:
-                        json_collecting = True
 
-                    if json_collecting:
-                        json_accumulator += response_content
+                    for char in response_content:
+                        if char == '{':
+                            if not json_collecting:
+                                json_collecting = True
+                                json_accumulator = ""
+                            json_brackets += 1
+                        if json_collecting:
+                            json_accumulator += char
+                        if char == '}':
+                            json_brackets -= 1
+                            if json_brackets == 0:
+                                try:
+                                    response_json = json.loads(json_accumulator.strip())
+                                    print(f"Response JSON: {response_json}")
+                                    tool_calls.append(response_json)
 
-                    if '}' in response_content and json_collecting:
-                        try:
-                            # Attempt to parse the JSON from the accumulated text
-                            response_json = json.loads(json_accumulator.strip())
-                            print(f"Response JSON: {response_json}")
-
-                            # Check for the function key in the parsed JSON
-                            if "function" in response_json:
-                                command_data = response_json
-                                print(f"GOT JSON: {command_data}")
-                                break
-                        except json.JSONDecodeError:
-                            # print("NOT JSON")
-                            # If it's not a complete JSON object yet, keep accumulating
-                            pass
+                                except json.JSONDecodeError:
+                                    print("BAD JSON")
 
                     if not json_collecting:
                         # accumulation for speaking text
@@ -651,7 +753,7 @@ class IntegratedTranscription:
 
                         # Check if accumulated text ends with a sentence-ending punctuation
                         if sentence_endings.search(accumulated_text):
-                            # Speak the sentence
+                            # Speak the sentence early so we feel snappier
                             self.speak_text(accumulated_text)
                             # wipe it out fresh after speaking
                             accumulated_text = ""
@@ -660,11 +762,12 @@ class IntegratedTranscription:
             if not accumulated_text == "":
                 self.speak_text(accumulated_text.strip())
 
+
             print("FINISHED RESPONSE")
             # Generate a tone to signify that the response has finished
             self.generate_tone(300, 0.1, 0.2)
 
-            return full_response, command_data
+            return full_response, tool_calls
 
         except Exception as e:
             print(f"Error communicating with Ollama API: {e}")
