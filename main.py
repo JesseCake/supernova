@@ -711,7 +711,6 @@ class IntegratedTranscription:
                     'web_search': self.web_search,
                     'open_web_link': self.open_web_link,
                     'wikipedia_search': self.wikipedia_search,
-                    'ha_list_entities_with_states': self.ha_list_entities_with_states,
                     'ha_set_switch': self.ha_set_switch,
                     'ha_activate_scene': self.ha_activate_scene
                 }

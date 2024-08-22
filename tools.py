@@ -80,18 +80,6 @@ tools = [
     {
         'type': 'function',
         'function': {
-            'name': 'ha_list_entities_with_states',
-            'description': 'List all of the available Home Automation entities with their states to use with other home automation functions. Always check this before attempting to manipulate home automation objects',
-            'parameters': {
-                'type': 'object',
-                'properties': {},
-            },
-        },
-    },
-
-    {
-        'type': 'function',
-        'function': {
             'name': 'ha_set_switch',
             'description': 'Set the state of a switch in the Home Automation. IMPORTANT: you must check the real entity id before using this',
             'parameters': {
