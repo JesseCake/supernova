@@ -522,8 +522,8 @@ class IntegratedTranscription:
         nowtime = now.strftime('%I:%M%p')
         return json.dumps({'current_time': nowtime})
 
-    def end_conversation(self, tool_args):
-        print("TOOL: END CONVERSATION")
+    def close_voice_channel(self, tool_args):
+        print("TOOL: CLOSE VOICE CHANNEL")
         self.close_channel()
 
     def clean_text(self, text):
@@ -706,7 +706,7 @@ class IntegratedTranscription:
                 self.generate_tone(700, 0.05, 0.2)
 
                 available_functions = {
-                    'end_conversation': self.end_conversation,
+                    'close_voice_channel': self.close_voice_channel,
                     'get_current_time': self.get_current_time,
                     'web_search': self.web_search,
                     'open_web_link': self.open_web_link,
@@ -734,69 +734,13 @@ class IntegratedTranscription:
 
                     except Exception as e:
                         # something went wrong:
+                        print(f"bad tool call")
                         self.current_conversation.append(
                             {
                                 'role': 'tool',
                                 'content': f'Error with tool, or bad use of tool: {e}',
                             }
                         )
-
-                    '''if tool_name == "end_conversation":
-                        print("RECEIVED END COMMAND")
-                        # wipe out our conversation history and set flag for sleep
-                        self.close_channel()
-                        break
-                        
-
-                    elif tool_name == "web_search":
-                        query = command.get("query")
-                        if query:
-                            results = self.duckduckgo_search(query)
-                            self.current_conversation.append({
-                                'role': 'user',
-                                'content': f"{results}"
-                            })
-                            self.speak_text("Searching online.")
-                    elif tool_name == "open_web_link":
-                        print("GOING TO OPEN WEB LINK NOW")
-                        url = command.get("url")
-                        if url:
-                            page_text = self.open_web_link(url)
-                            print(f"Pulled page text: {page_text}")
-                            self.current_conversation = self.add_to_context(page_text, self.current_conversation)
-                            print(f"Added scraped website to conversation text")
-                            self.speak_text("Website pulled.")
-                    elif "search_knowledge" in tool_name:
-                        self.current_conversation = self.add_to_context(
-                            self.process_knowledge_search_command(command),
-                            self.current_conversation
-                        )
-                    elif tool_name == "store_knowledge":
-                        self.current_conversation = self.add_to_context(
-                            self.store_knowledge(
-                                command.get("title"),
-                                command.get("content")
-                            ),
-                            self.current_conversation
-                        )
-                    elif tool_name == "delete_knowledge":
-                        self.current_conversation = self.add_to_context(
-                            self.delete_knowledge(
-                                command.get("id")
-                            ),
-                            self.current_conversation
-                        )
-                    elif tool_name == "list_knowledge_titles":
-                        self.current_conversation = self.add_to_context(
-                            self.list_knowledge_titles(),
-                            self.current_conversation
-                        )
-                    else:
-                        print("UNKNOWN COMMAND")
-                        self.current_conversation.append({
-                            'role': 'user',
-                            'content': "Unknown command or incorrect command format, try again?"
-                        })'''
 
                 # update the prompt for next spin:
                 prompt = self.update_prompt(self.current_conversation)

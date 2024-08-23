@@ -2,8 +2,8 @@ tools = [
     {
         'type': 'function',
         'function': {
-            'name': 'end_conversation',
-            'description': 'End the conversation. Only for use when you have answered a user request or the conversation has naturally come to a stop.',
+            'name': 'close_voice_channel',
+            'description': 'Close the Voice channel. Only for use when you have answered a user request or the conversation has naturally come to an end.',
             'parameters': {
                 'type': 'object',
                 'properties': {},
