@@ -53,4 +53,4 @@ class WebInterface:
             fn=process_message,
             type="messages",
             title="Supernova",
-        ).launch(share=False)
+        ).launch(share=False, server_name="0.0.0.0")

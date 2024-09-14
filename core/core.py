@@ -321,8 +321,8 @@ class CoreProcessor:
         session['response_queue'].put(f"{response_text}  \n")
 
     def close_voice_channel(self, tool_args, session):
-        print("TOOL: CLOSE COMMS CHANNEL")
-        self.send_whole_response("Agent closed channel", session)
+        # print("TOOL: CLOSE COMMS CHANNEL")
+        # self.send_whole_response("Agent closed channel", session)
         session['close_voice_channel'].set()
 
     def get_current_time(self, tool_args, session):
