@@ -34,12 +34,15 @@ class CoreProcessor:
         #self.response_queue = queue.Queue()  # Response queue for sending results
         #self.response_finished = threading.Event()  # To signal when the response is complete
 
-        self.model = "llama3.1"
+        self.model = "llama3.1:8b"
         self.ollama_client = ollama.Client(host='http://192.168.20.200:11434')
         self.pre_context = precontext.llama3_context
         self.voice_pre_context = precontext.voice_context
         self.current_conversation = None
         # self.tools = tools.general_tools
+
+        # for weather forecasts:
+        self.weather_api_key = self.get_weather_key()
 
         # Home assistant integration
         self.ha_key = self.get_ha_key()
@@ -52,6 +55,7 @@ class CoreProcessor:
             'perform_search': self.perform_search,
             'open_website': self.open_website,
             'home_automation_action': self.home_automation_action,
+            'check_weather': self.check_weather,
         }
 
     def create_session(self, session_id):
@@ -77,6 +81,19 @@ class CoreProcessor:
         with open(file_path, "r") as file:
             for line in file:
                 if line.startswith("HA_API_KEY"):
+                    return line.split('=')[1].strip().strip('"')
+
+    def get_weather_key(self):
+        """Pulls the Weather API key from file"""
+        # Get the directory of the current script (core.py)
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+
+        # Construct the full path to the home_assistant_api file
+        file_path = os.path.join(script_dir, '../config/weather_api')
+
+        with open(file_path, "r") as file:
+            for line in file:
+                if line.startswith("WEATHER_API_KEY"):
                     return line.split('=')[1].strip().strip('"')
 
     def add_ha_to_pre_context(self, pre_context):
@@ -489,12 +506,12 @@ class CoreProcessor:
                 return json.dumps({'home_automation_action': f'Successfully activated scene {scene_id}'})
 
             else:
-                return json.dumps({'home_automation_action_error': 'Invalid action type specified. Choose "set_switch" or "activate_scene".'})
+                return json.dumps({'home_automation_action': 'Error: Invalid action type specified. Choose "set_switch" or "activate_scene".'})
 
         except Exception as e:
             self.send_whole_response(f"Error in tool! {e}")
             return json.dumps(
-                {'home_automation_action_error': f'Error performing {action_type} on {entity_id}: {str(e)}'})
+                {'home_automation_action': f'Error performing {action_type} on {entity_id}: {str(e)}'})
 
     '''def ha_set_switch(self, tool_args, session):
         self.send_whole_response("Setting switch in Home Assistant", session)
@@ -592,4 +609,72 @@ class CoreProcessor:
 
         # Return the formatted JSON to the LLM
         return json.dumps(response)
+
+    def check_weather(self, tool_args, session):
+        location = tool_args.get('parameters').get('location', "Brunswick, VIC, Australia")
+        #location = "Brunswick, VIC, Australia"
+        forecast = tool_args.get('parameters').get('forecast', False)
+        self.send_whole_response(f"Fetching weather for {location}", session)
+
+        try:
+            if forecast:
+                self.send_whole_response("Fetching 5 day forecast", session)
+                # Get the 5-day forecast
+                url = f"http://api.openweathermap.org/data/2.5/forecast?q={location}&appid={self.weather_api_key}&units=metric"
+                response = requests.get(url)
+                weather_data = response.json()
+
+                if response.status_code == 200:
+                    forecast_list = weather_data['list']
+                    forecast_data = []
+                    for entry in forecast_list[:5]:  # Limit to the first 5 entries (next 15 hours)
+                        forecast_data.append({
+                            'datetime': entry['dt_txt'],
+                            'temperature': entry['main']['temp'],
+                            'description': entry['weather'][0]['description'],
+                        })
+
+                    result = {
+                        'location': location,
+                        'forecast': forecast_data
+                    }
+                    # self.send_whole_response(f"Forecast Result: {result}", session)
+                    return json.dumps({'check_weather': result})
+
+                else:
+                    return json.dumps(
+                        {'check_weather': f"Failed to fetch forecast data: {weather_data.get('message', 'Unknown error')}"})
+
+            else:
+                # Get the current weather
+                self.send_whole_response("Fetching current weather", session)
+                url = f"http://api.openweathermap.org/data/2.5/weather?q={location}&appid={self.weather_api_key}&units=metric"
+                response = requests.get(url)
+                weather_data = response.json()
+
+                if response.status_code == 200:
+                    main = weather_data['main']
+                    weather_desc = weather_data['weather'][0]['description']
+                    temp = main['temp']
+                    feels_like = main['feels_like']
+                    humidity = main['humidity']
+
+                    result = {
+                        'location': location,
+                        'temperature': temp,
+                        'feels_like': feels_like,
+                        'humidity': humidity,
+                        'description': weather_desc
+                    }
+                    # self.send_whole_response(f"Current Result: {result}", session)
+                    return json.dumps({'check_weather': result})
+
+                else:
+                    return json.dumps(
+                        {'check_weather': f"Failed to fetch weather data: {weather_data.get('message', 'Unknown error')}"})
+
+        except Exception as e:
+            return json.dumps({'check_weather': f"Error fetching weather data: {str(e)}"})
+
+
 

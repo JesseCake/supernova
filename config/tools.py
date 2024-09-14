@@ -75,6 +75,29 @@ general_tools = [
             },
         },
     },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'check_weather',
+            'description': 'Fetch the current weather or forecast information for a location.',
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'location': {
+                        'type': 'string',
+                        'description': 'Only enter a location if looking for anywhere other than home. The name of the location (e.g., city) to get the weather for. Default is here at home: "Brunswick, VIC, Australia".',
+                        'default': 'Brunswick, VIC, Australia'
+                    },
+                    'forecast': {
+                        'type': 'boolean',
+                        'description': 'Set to true to get a 5-day weather forecast. Default is false.',
+                        'default': False
+                    },
+                },
+                'required': [],
+            },
+        },
+    },
 ]
 
 voice_tools = [
