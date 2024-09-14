@@ -46,6 +46,15 @@ class VoiceInterface:
         self.close_channel_phrase = "finish conversation"
         self.channel_open = False
 
+        # output stream:
+        self.output_stream = self.p.open(
+            format=pyaudio.paFloat32,
+            channels=1,
+            rate=self.sample_rate,
+            output=True,
+            frames_per_buffer=4096
+        )
+
     def close_voice_channel(self, tool_args):
         print("TOOL: CLOSE VOICE CHANNEL")
         self.close_channel()
@@ -66,7 +75,7 @@ class VoiceInterface:
     def add_frames(self, frame_np):
         self.frames_np = np.concatenate((self.frames_np, frame_np), axis=0) if self.frames_np.size > 0 else frame_np.copy()
 
-    def contact_agent(self, input):
+    def contact_core(self, input):
         # we will send the text to the core, and handle the return from the core
 
         # initialise session if not already done:
@@ -123,7 +132,7 @@ class VoiceInterface:
                             self.close_channel()
                         else:
                             # we have successful transcription, let's send it to the agent and handle return:
-                            close_channel = self.contact_agent(result_text)
+                            close_channel = self.contact_core(result_text)
 
                             if close_channel:
                                 print(f"Closing voice channel")
@@ -158,22 +167,14 @@ class VoiceInterface:
                 audio = self.tts.tts(text, speed=self.speech_speed, speaker=self.speech_speaker)
                 audio_data = np.array(audio, dtype=np.float32)
 
-                stream = self.p.open(
-                    format=pyaudio.paFloat32,
-                    channels=1,
-                    rate=self.sample_rate,
-                    output=True,
-                    frames_per_buffer=4096
-                )
-
                 chunk_size = 1024
                 for start in range(0, len(audio_data), chunk_size):
                     end = start + chunk_size
-                    stream.write(audio_data[start:end].tobytes())
+                    self.output_stream.write(audio_data[start:end].tobytes())
                     time.sleep(0.01)
 
-                stream.stop_stream()
-                stream.close()
+                # self.output_stream.stop_stream()
+                # self.output_stream.close()
             except Exception as e:
                 logging.error(f"Error during speaking: {e}")
             finally:
@@ -263,20 +264,3 @@ class VoiceInterface:
             self.stream.stop_stream()
             self.stream.close()
         self.p.terminate()
-
-    def start_listening(self):
-        #EDIT THIS?!
-        while True:
-            input_text = self.listen_and_transcribe()
-
-            # Feed the input to the core processor
-            self.core_processor.process_input(input_text, self.session_id)
-
-            # Wait for the response to be finished
-            self.core_processor.get_session(self.session_id)['response_finished'].wait()
-
-            # Process the response from the core processor
-            response_queue = self.core_processor.get_session(self.session_id)['response_queue']
-            while not response_queue.empty():
-                response_text = response_queue.get()
-                self.speak_text(response_text)

@@ -14,6 +14,7 @@ llama3_context = f"""
         1. You do not have to use a tool for every query, they are only available to augment your own abilities as needed
         2. Try not to talk about tool usage, except in a case where a tool has failed, you can let the user know then
         3. ONLY USE TOOLS AS NEEDED. Needlessly searching, or checking the time, or switching on/off switches is annoying. These tools are only to help when asked to do something useful.
+        4. DO NOT TALK ABOUT THE TOOLS. The user has no knowledge about them, so we need to keep them internal to you only.
 
 """
 
