@@ -611,7 +611,7 @@ class CoreProcessor:
         return json.dumps(response)
 
     def check_weather(self, tool_args, session):
-        location = tool_args.get('parameters').get('location', "Brunswick, VIC, Australia")
+        location = tool_args.get('parameters').get('location', 'Brunswick, VIC, Australia')
         #location = "Brunswick, VIC, Australia"
         forecast = tool_args.get('parameters').get('forecast', False)
         self.send_whole_response(f"Fetching weather for {location}", session)

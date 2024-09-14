@@ -85,7 +85,7 @@ general_tools = [
                 'properties': {
                     'location': {
                         'type': 'string',
-                        'description': 'Only enter a location if looking for anywhere other than home. The name of the location (e.g., city) to get the weather for. Default is here at home: "Brunswick, VIC, Australia".',
+                        'description': 'The name of the location (e.g., city) to get the weather for. Use commas and state initials, country name to ensure correct city. Default is here at home: "Brunswick, VIC, Australia". For queries without a place name, leave as default',
                         'default': 'Brunswick, VIC, Australia'
                     },
                     'forecast': {
@@ -94,7 +94,6 @@ general_tools = [
                         'default': False
                     },
                 },
-                'required': [],
             },
         },
     },
