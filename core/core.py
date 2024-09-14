@@ -49,11 +49,9 @@ class CoreProcessor:
         self.available_functions = {
             'close_voice_channel': self.close_voice_channel,
             'get_current_time': self.get_current_time,
-            'web_search': self.web_search,
+            'perform_search': self.perform_search,
             'open_website': self.open_website,
-            'wikipedia_search': self.wikipedia_search,
-            'ha_set_switch': self.ha_set_switch,
-            'ha_activate_scene': self.ha_activate_scene
+            'home_automation_action': self.home_automation_action,
         }
 
     def create_session(self, session_id):
@@ -316,7 +314,76 @@ class CoreProcessor:
         now_time = now.strftime('%I:%M%p')
         return json.dumps({'current_time': now_time})
 
-    def web_search(self, tool_args, session):
+    def perform_search(self, tool_args, session):
+        query = tool_args.get('parameters').get('query')
+        source = tool_args.get('parameters').get('source')
+        num_responses = int(tool_args.get('parameters').get('number', 10))
+
+        if source == 'web':
+            self.send_whole_response(f"Performing Web Search: '{query}'", session)
+            return self._perform_web_search(query, num_responses)
+
+        elif source == 'wikipedia':
+            self.send_whole_response(f"Performing research on Wikipedia on subject: {query}", session)
+            return self._perform_wikipedia_search(query)
+
+        else:
+            return json.dumps({'error': 'Invalid source specified. Choose "web" or "wikipedia".'})
+
+    def _perform_web_search(self, query, num_responses):
+        try:
+            # Using the Google search function to get results
+            results = []
+            for url in search(query, num=num_responses, stop=num_responses, pause=2, country='au'):
+                results.append({'link': url})
+
+            if not results:
+                results.append({'error': 'no results found, probably web search tool failure'})
+            else:
+                # Add instruction for the LLM at the beginning of results
+                results.insert(0, {
+                    'instruction': 'If more information is required, open the websites of interest from the following results.'})
+
+        except Exception as e:
+            return json.dumps({'web_search_error': f'Error in web search: {e}'})
+
+        return json.dumps({'web_search_results': results})
+
+    def _perform_wikipedia_search(self, query):
+        search_results = wikipedia.search(query)
+        results = []
+
+        if search_results:
+            for title in search_results:
+                try:
+                    summary = wikipedia.summary(title, sentences=2)
+                    page = wikipedia.page(title)
+
+                    result = {
+                        "title": title,
+                        "summary": summary,
+                        "url": page.url
+                    }
+                    results.append(result)
+                except wikipedia.DisambiguationError:
+                    results.append({
+                        "title": title,
+                        "summary": "Disambiguation page, multiple meanings exist",
+                        "url": None
+                    })
+                except wikipedia.PageError:
+                    results.append({
+                        "title": title,
+                        "summary": "Page does not exist.",
+                        "url": None
+                    })
+        else:
+            results.append({'error': 'No results, try another search term'})
+
+        return json.dumps({'wikipedia_search_results': results})
+
+
+    '''def web_search(self, tool_args, session):
         query = tool_args.get('parameters').get('query')
         num_responses = int(tool_args.get('parameters').get('number', 10))
         self.send_whole_response(f"Performing Web Search: '{query}'", session)
@@ -339,7 +406,7 @@ class CoreProcessor:
             # print(f"ERROR WEB SEARCH CALL: {e}")
             return json.dumps({'web_search_error': f'Error in web search: {e}'})
 
-        return json.dumps({'web_search_results': results})
+        return json.dumps({'web_search_results': results})'''
 
     def open_website(self, tool_args, session, max_retries=3):
         web_session = HTMLSession()
@@ -358,7 +425,7 @@ class CoreProcessor:
         self.send_whole_response(f"Opened Website: {url}", session)
         return json.dumps({'web_link_error': f'Failed to open web link after {max_retries} attempts'})
 
-    def wikipedia_search(self, tool_args, session):
+    '''def wikipedia_search(self, tool_args, session):
         query = tool_args.get('parameters').get('query')
         self.send_whole_response(f"Performing research on Wikipedia on subject: {query}", session)
 
@@ -393,9 +460,43 @@ class CoreProcessor:
         else:
             results.append('No results, try another search term')
 
-        return json.dumps({'wikipedia_search_results': f'{results}'})
+        return json.dumps({'wikipedia_search_results': f'{results}'})'''
 
-    def ha_set_switch(self, tool_args, session):
+    def home_automation_action(self, tool_args, session):
+        action_type = tool_args.get('parameters').get('action_type')
+        entity_id = tool_args.get('parameters').get('entity_id')
+        self.send_whole_response(f"Performing '{action_type}' action in Home Assistant", session)
+
+        try:
+            if action_type == "set_switch":
+                state = tool_args.get('parameters').get('state')
+                switch = self.home_assistant.get_domain("switch")
+                self.send_whole_response(f"Set switch {switch} to {state}")
+
+                if state == "on":
+                    switch.turn_on(entity_id=entity_id)
+                else:
+                    switch.turn_off(entity_id=entity_id)
+
+                return json.dumps({'home_automation_action': f'Successfully switched {entity_id} {state}'})
+
+            elif action_type == "activate_scene":
+                self.send_whole_response(f"Activated Scene '{entity_id}'")
+                scene_id = f"scene.{entity_id}"
+                scene = self.home_assistant.get_domain("scene")
+                scene.turn_on(entity_id=scene_id)
+
+                return json.dumps({'home_automation_action': f'Successfully activated scene {scene_id}'})
+
+            else:
+                return json.dumps({'home_automation_action_error': 'Invalid action type specified. Choose "set_switch" or "activate_scene".'})
+
+        except Exception as e:
+            self.send_whole_response(f"Error in tool! {e}")
+            return json.dumps(
+                {'home_automation_action_error': f'Error performing {action_type} on {entity_id}: {str(e)}'})
+
+    '''def ha_set_switch(self, tool_args, session):
         self.send_whole_response("Setting switch in Home Assistant", session)
         entity_id = tool_args.get('parameters').get('entity_id')
         state = tool_args.get('parameters').get('state')
@@ -424,7 +525,7 @@ class CoreProcessor:
             return json.dumps({'activate scene': f'Successfully activated {scene_id}'})
         except Exception as e:
             return json.dumps({'activate scene error': f'Failed to activate {scene_id}: {str(e)}'})
-
+'''
     def ha_get_available_switches_and_scenes(self):
         """For adding to the end of your pre-context"""
         # Retrieve all states from Home Assistant

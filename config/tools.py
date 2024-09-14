@@ -4,53 +4,35 @@ general_tools = [
         'function': {
             'name': 'get_current_time',
             'description': 'Get the current time',
-            'parameters': {
-                'type': 'object',
-                'properties': {},
-                },
+            'parameters': {},
             },
         },
-
     {
         'type': 'function',
         'function': {
-            'name': 'web_search',
-            'description': 'Perform a web search, receive links and headers for further knowledge seeking',
+            'name': 'perform_search',
+            'description': 'Perform a search on the web or Wikipedia.',
             'parameters': {
                 'type': 'object',
                 'properties': {
                     'query': {
                         'type': 'string',
-                        'description': 'The query to search the internet with'
+                        'description': 'The query to search with.'
+                    },
+                    'source': {
+                        'type': 'string',
+                        'description': 'The source to search (options: "web", "wikipedia").'
                     },
                     'number': {
                         'type': 'integer',
-                        'description': 'Number of results to return. Default is 10.'
+                        'description': 'Number of results to return. Default is 10.',
+                        'default': 10
                     }
                 },
-                'required': ['query'],
+                'required': ['query', 'source'],
             },
         },
     },
-
-    {
-        'type': 'function',
-        'function': {
-            'name': 'wikipedia_search',
-            'description': 'Perform a wikipedia search, receive titles, summaries, and links further knowledge seeking',
-            'parameters': {
-                'type': 'object',
-                'properties': {
-                    'query': {
-                        'type': 'string',
-                        'description': 'The query to search the Wikipedia with'
-                    },
-                },
-                'required': ['query'],
-            },
-        },
-    },
-
     {
         'type': 'function',
         'function': {
@@ -68,43 +50,28 @@ general_tools = [
             },
         },
     },
-
     {
         'type': 'function',
         'function': {
-            'name': 'ha_set_switch',
-            'description': 'Set the state of a switch in the Home Automation. IMPORTANT: you must check the real entity id before using this',
+            'name': 'home_automation_action',
+            'description': 'Perform actions in the Home Automation system (e.g., set a switch, activate a scene) as requested by user.',
             'parameters': {
                 'type': 'object',
                 'properties': {
+                    'action_type': {
+                        'type': 'string',
+                        'description': 'The type of action (options: "set_switch", "activate_scene").'
+                    },
                     'entity_id': {
                         'type': 'string',
-                        'description': 'The id of the switch entity'
+                        'description': 'The ID of the switch or scene entity.'
                     },
                     'state': {
                         'type': 'string',
-                        'description': 'The desired state. Either on or off'
-                    },
+                        'description': 'The desired state for switches (either "on" or "off"). Required if action_type is "set_switch".'
+                    }
                 },
-                'required': ['entity_id', 'state'],
-            },
-        },
-    },
-
-{
-        'type': 'function',
-        'function': {
-            'name': 'ha_activate_scene',
-            'description': 'Activate lighting scene in the Home Automation.',
-            'parameters': {
-                'type': 'object',
-                'properties': {
-                    'scene_id': {
-                        'type': 'string',
-                        'description': 'The id of the scene entity'
-                    },
-                },
-                'required': ['scene_id'],
+                'required': ['action_type', 'entity_id'],
             },
         },
     },
