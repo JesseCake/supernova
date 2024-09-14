@@ -37,8 +37,9 @@ class CoreProcessor:
         self.model = "llama3.1"
         self.ollama_client = ollama.Client(host='http://192.168.20.200:11434')
         self.pre_context = precontext.llama3_context
+        self.voice_pre_context = precontext.voice_context
         self.current_conversation = None
-        self.tools = tools.tools
+        # self.tools = tools.general_tools
 
         # Home assistant integration
         self.ha_key = self.get_ha_key()
@@ -46,9 +47,10 @@ class CoreProcessor:
         self.home_assistant = HAClient(self.ha_url, self.ha_key)
 
         self.available_functions = {
+            'close_voice_channel': self.close_voice_channel,
             'get_current_time': self.get_current_time,
             'web_search': self.web_search,
-            'open_web_link': self.open_web_link,
+            'open_website': self.open_website,
             'wikipedia_search': self.wikipedia_search,
             'ha_set_switch': self.ha_set_switch,
             'ha_activate_scene': self.ha_activate_scene
@@ -60,7 +62,8 @@ class CoreProcessor:
         self.sessions[session_id] = {
             'conversation_history': [],
             'response_queue': queue.Queue(),
-            'response_finished': threading.Event()
+            'response_finished': threading.Event(),
+            'close_voice_channel': threading.Event(),  # for flagging channel close from functions in voice mode
         }
     def get_session(self, session_id):
         return self.sessions.get(session_id)
@@ -78,15 +81,21 @@ class CoreProcessor:
                 if line.startswith("HA_API_KEY"):
                     return line.split('=')[1].strip().strip('"')
 
-    def add_ha_to_pre_context(self):
+    def add_ha_to_pre_context(self, pre_context):
         """Adds the available Home Assistant connections to the pre-context"""
         new_context_info = self.ha_get_available_switches_and_scenes()
-        self.pre_context += new_context_info
+        pre_context += new_context_info
+        return pre_context
 
-    def process_input(self, input_text, session_id, voice=False):
+    def add_voice_to_pre_context(self, pre_context):
+        """Adds the voice commands to pre-context"""
+        pre_context += self.voice_pre_context()
+        return pre_context
+
+    def process_input(self, input_text, session_id, is_voice=False):
         #print("STARTING NEW INPUT")
 
-        # Retrieve the session-specific data:
+        # Retrieve the session-specific data - NOT SURE IF NEEDED NOW:
         session = self.get_session(session_id)
         if session is None:
             self.create_session(session_id)
@@ -95,8 +104,11 @@ class CoreProcessor:
         # clear the response_finished event at the start:
         session['response_finished'].clear()
 
+        # as well as close_voice_channel event flag if relevant
+        if is_voice:
+            session['close_voice_channel'].clear()
+
         conversation_history = session['conversation_history']
-        response_queue = session['response_queue']
 
         # if we're starting a new conversation, create the pre-context and instructions:
         if conversation_history is None:
@@ -105,6 +117,7 @@ class CoreProcessor:
         prompt = self.create_prompt(
             input_text=input_text,
             conversation_history=conversation_history,
+            voice=is_voice,
         )
 
         conversation_history.append({
@@ -115,11 +128,18 @@ class CoreProcessor:
         # Debugging: Print the formatted conversation context:
         # print(f"Generated prompt: {prompt}")
 
-        while True:
-            full_response = None
-            tool_calls = None
+        # now we construct the tools:
+        if is_voice:
+            # it seems order is important, putting voice close channel tool first:
+            prompt_tools = tools.voice_tools + tools.general_tools
+        else:
+            prompt_tools = tools.general_tools
 
-            full_response, tool_calls = self.send_to_ollama(prompt, session)
+        # debugging:
+        # print(f"PROMPT TOOLS=\n\n {prompt_tools}")
+
+        while True:
+            full_response, tool_calls = self.send_to_ollama(prompt_text=prompt, prompt_tools=prompt_tools, session=session)
 
             if full_response:
                 conversation_history.append({
@@ -128,6 +148,9 @@ class CoreProcessor:
                 })
 
             if tool_calls:
+                # Debugging:
+                # print(f"TOOL CALLS RECEIVED: {tool_calls}")
+
                 for tool in tool_calls:
                     try:
                         function_to_call = self.available_functions[tool['name']]
@@ -149,8 +172,8 @@ class CoreProcessor:
                             }
                         )
 
-                # update the prompt for next spin around:
-                prompt = self.update_prompt(conversation_history)
+                # update the prompt for next spin around for tool call response routines:
+                prompt = self.update_prompt(conversation_history, is_voice)
             else:
                 break
 
@@ -160,16 +183,22 @@ class CoreProcessor:
 
         # print('\ncore: Finishing processing input and response')
 
-    def create_prompt(self, input_text, conversation_history, functions_json=None):
-        loadprecontext = importlib.import_module('config.precontext')
-        importlib.reload(loadprecontext)
+    def create_prompt(self, input_text, conversation_history, voice=False):  # functions_json=None):
+        # right now we reload this each time so we can tweak it live, may be unnecessary in future:
+        #loadprecontext = importlib.import_module('config.precontext')
+        #importlib.reload(loadprecontext)
 
-        self.pre_context = loadprecontext.llama3_context
-        self.add_ha_to_pre_context()
+        full_pre_context = self.pre_context
+
+        if voice:
+            full_pre_context += self.voice_pre_context
+
+        # we add this each time so we have up to date info from Home Assistant:
+        full_pre_context += self.add_ha_to_pre_context(full_pre_context)
 
         system_section = {
             'role': 'system',
-            'content': self.pre_context,
+            'content': full_pre_context,
         }
 
         history_section = conversation_history
@@ -180,32 +209,32 @@ class CoreProcessor:
         }
 
         prompt = [system_section] + history_section + [user_input_section]
-
-        if functions_json:
-            tools_section = functions_json
-            prompt.insert(1, tools_section)
-
         return prompt
 
-    def update_prompt(self, conversation_history):
-        loadprecontext = importlib.import_module('config.precontext')
-        importlib.reload(loadprecontext)
+    def update_prompt(self, conversation_history, voice=False):
+        # right now we reload this each time so we can tweak it live, may be unnecessary in future:
+        #loadprecontext = importlib.import_module('config.precontext')
+        #importlib.reload(loadprecontext)
 
-        self.pre_context = loadprecontext.llama3_context
-        self.add_ha_to_pre_context()
+        full_pre_context = self.pre_context
+
+        if voice:
+            full_pre_context += self.voice_pre_context
+
+        # we add this each time so we have up to date info from Home Assistant:
+        full_pre_context += self.add_ha_to_pre_context(full_pre_context)
 
         system_section = {
             'role': 'system',
-            'content': self.pre_context,
+            'content': full_pre_context,
         }
 
         history_section = conversation_history
 
         prompt = [system_section] + history_section
-
         return prompt
 
-    def send_to_ollama(self, prompt_text, session):
+    def send_to_ollama(self, prompt_text, prompt_tools, session):
         """Sends request to Ollama, processes return along with tool calls, streams response to message queue"""
         response_queue = session['response_queue']
 
@@ -215,7 +244,7 @@ class CoreProcessor:
                 messages=prompt_text,
                 stream=True,
                 keep_alive="2h",
-                tools=self.tools
+                tools=prompt_tools
             )
 
             full_response = ""
@@ -262,7 +291,7 @@ class CoreProcessor:
 
                     if not json_collecting:
                         # send the non-tool call response chunk back to the response thread live:
-                        print(f'{response_content}', end='')
+                        # print(f'{response_content}', end='')
                         response_queue.put(response_content)
 
 
@@ -279,7 +308,7 @@ class CoreProcessor:
     def close_voice_channel(self, tool_args, session):
         print("TOOL: CLOSE COMMS CHANNEL")
         self.send_whole_response("Agent closed channel", session)
-        # self.close_channel()
+        session['close_voice_channel'].set()
 
     def get_current_time(self, tool_args, session):
         self.send_whole_response("Checking Time", session)
@@ -289,23 +318,30 @@ class CoreProcessor:
 
     def web_search(self, tool_args, session):
         query = tool_args.get('parameters').get('query')
+        num_responses = int(tool_args.get('parameters').get('number', 10))
         self.send_whole_response(f"Performing Web Search: '{query}'", session)
 
         try:
-            # Using the google search function to get results
+            # Using the Google search function to get results
             results = []
-            for url in search(query, num=10, stop=10, pause=2):
+            for url in search(query, num=num_responses, stop=10, pause=2, country='au'):
                 results.append({'link': url})
 
             if not results:
                 results.append({'error': 'no results found, probably web search tool failure'})
+            else:
+                # Add instruction for the LLM at the beginning of results
+                results.insert(0, {
+                    'instruction': 'If more information is required, open the websites of interest from the following results.'})
 
         except Exception as e:
+            # Debugging:
+            # print(f"ERROR WEB SEARCH CALL: {e}")
             return json.dumps({'web_search_error': f'Error in web search: {e}'})
 
         return json.dumps({'web_search_results': results})
 
-    def open_web_link(self, tool_args, session, max_retries=3):
+    def open_website(self, tool_args, session, max_retries=3):
         web_session = HTMLSession()
         url = tool_args.get('parameters').get('url')
 
@@ -319,7 +355,7 @@ class CoreProcessor:
                 time.sleep(2)
             except Exception as e:
                 return json.dumps({'web_link_error': f'Unexpected error for {url}: {e}'})
-        self.send_whole_response("Opened Website", session)
+        self.send_whole_response(f"Opened Website: {url}", session)
         return json.dumps({'web_link_error': f'Failed to open web link after {max_retries} attempts'})
 
     def wikipedia_search(self, tool_args, session):

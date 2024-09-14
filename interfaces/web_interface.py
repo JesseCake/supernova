@@ -9,7 +9,7 @@ class WebInterface:
         self.core_processor = core_processor
         self.session_id = None  # store the session ID here
 
-    def start(self):
+    def run(self):
         def process_message(message, history):
             if history is None:
                 history = []
@@ -25,7 +25,7 @@ class WebInterface:
             # Run the input processing in a separate thread
             process_thread = threading.Thread(
                 target=self.core_processor.process_input,
-                kwargs={"input_text": message, "session_id": self.session_id, "voice":False}
+                kwargs={"input_text": message, "session_id": self.session_id, "is_voice":False}
             )
             process_thread.start()
 

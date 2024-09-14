@@ -7,15 +7,15 @@ from interfaces.voice_interface import VoiceInterface
 if __name__ == "__main__":
     core_processor = CoreProcessor()
 
+    # Start the voice interface (using defaults)
+    voice_interface = VoiceInterface(core_processor=core_processor)
+    voice_thread = threading.Thread(target=voice_interface.run)
+    voice_thread.start()
+
+    # Join thread (optional, if we want to join for certain functionality)
+    # voice_thread.join()
+
     # Start the web interface
     web_interface = WebInterface(core_processor)
-    web_interface.start()
-
-    # Start the voice interface
-    #voice_interface = VoiceInterface(core_processor)
-    #voice_thread = threading.Thread(target=voice_interface.start_listening)
-    #voice_thread.start()
-
-    # Join thread (optional, depending on your use case)
-    #voice_thread.join()
+    web_interface.run()
 

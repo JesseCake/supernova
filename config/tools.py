@@ -1,16 +1,4 @@
-tools = [
-    {
-        'type': 'function',
-        'function': {
-            'name': 'close_voice_channel',
-            'description': 'Close the Voice channel. Only for use when you have answered a user request or the conversation has naturally come to an end.',
-            'parameters': {
-                'type': 'object',
-                'properties': {},
-            },
-        },
-    },
-
+general_tools = [
     {
         'type': 'function',
         'function': {
@@ -35,6 +23,10 @@ tools = [
                         'type': 'string',
                         'description': 'The query to search the internet with'
                     },
+                    'number': {
+                        'type': 'integer',
+                        'description': 'Number of results to return. Default is 10.'
+                    }
                 },
                 'required': ['query'],
             },
@@ -62,8 +54,8 @@ tools = [
     {
         'type': 'function',
         'function': {
-            'name': 'open_web_link',
-            'description': 'Open Web Link to view page contents for knowledge seeking',
+            'name': 'open_website',
+            'description': 'Open Website to see contents to answer user requests',
             'parameters': {
                 'type': 'object',
                 'properties': {
@@ -116,5 +108,18 @@ tools = [
             },
         },
     },
+]
 
+voice_tools = [
+    {
+        'type': 'function',
+        'function': {
+            'name': 'close_voice_channel',
+            'description': 'Close the Voice channel. Only for use when you have answered a user request or the conversation has naturally come to an end.',
+            'parameters': {
+                'type': 'object',
+                'properties': {},
+            },
+        },
+    },
 ]
