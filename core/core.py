@@ -9,6 +9,7 @@ import os
 
 # wikipedia search
 import wikipedia
+from TTS.tts.layers.xtts.zh_num2words import create_system
 
 # google search
 from googlesearch import search
@@ -34,7 +35,8 @@ class CoreProcessor:
         #self.response_queue = queue.Queue()  # Response queue for sending results
         #self.response_finished = threading.Event()  # To signal when the response is complete
 
-        self.model = "llama3.1:8b"
+        #self.model = "llama3.1:8b"
+        self.model = "llama3.2"
         self.ollama_client = ollama.Client(host='http://192.168.20.200:11434')
         self.pre_context = precontext.llama3_context
         self.voice_pre_context = precontext.voice_context
@@ -99,7 +101,7 @@ class CoreProcessor:
     def add_ha_to_pre_context(self, pre_context):
         """Adds the available Home Assistant connections to the pre-context"""
         new_context_info = self.ha_get_available_switches_and_scenes()
-        pre_context += new_context_info
+        pre_context += f"\n{new_context_info}"
         return pre_context
 
     def add_voice_to_pre_context(self, pre_context):
@@ -132,7 +134,6 @@ class CoreProcessor:
         prompt = self.create_prompt(
             input_text=input_text,
             conversation_history=conversation_history,
-            voice=is_voice,
         )
 
         conversation_history.append({
@@ -142,6 +143,9 @@ class CoreProcessor:
 
         # Debugging: Print the formatted conversation context:
         # print(f"Generated prompt: {prompt}")
+
+        # now we create the system message:
+        system_message = self.create_system_message(voice=is_voice)
 
         # now we construct the tools:
         if is_voice:
@@ -154,7 +158,7 @@ class CoreProcessor:
         # print(f"PROMPT TOOLS=\n\n {prompt_tools}")
 
         while True:
-            full_response, tool_calls = self.send_to_ollama(prompt_text=prompt, prompt_tools=prompt_tools, session=session)
+            full_response, tool_calls = self.send_to_ollama(prompt_text=prompt, prompt_system=system_message, prompt_tools=prompt_tools, session=session, raw_mode=True)
 
             if full_response:
                 conversation_history.append({
@@ -188,22 +192,35 @@ class CoreProcessor:
                         )
 
                 # update the prompt for next spin around for tool call response routines:
-                prompt = self.update_prompt(conversation_history, is_voice)
+                prompt = self.update_prompt(conversation_history)
             else:
                 break
 
         # if we break out of loop, set that we've finished to other threads:
-        self.send_whole_response("", session)
+        #self.send_whole_response(None, session)
+        self.response_finished(session)
         session['response_finished'].set()
 
         # print('\ncore: Finishing processing input and response')
 
-    def create_prompt(self, input_text, conversation_history, voice=False):  # functions_json=None):
+    def create_prompt(self, input_text, conversation_history):  # functions_json=None):
+        """
+        Creates a formatted prompt for sending to Ollama, using separate sections for system, tools, and messages.
+
+        Parameters:
+        - input_text (str): The latest input from the user.
+        - conversation_history (list): List of previous conversation messages with 'role' and 'content'.
+        - voice (bool): Flag indicating whether this is a voice interaction, affecting tool selection.
+
+        Returns:
+        - str: The formatted prompt text.
+        """
+
         # right now we reload this each time so we can tweak it live, may be unnecessary in future:
         #loadprecontext = importlib.import_module('config.precontext')
         #importlib.reload(loadprecontext)
 
-        full_pre_context = self.pre_context
+        '''full_pre_context = self.pre_context
 
         if voice:
             full_pre_context += self.voice_pre_context
@@ -214,7 +231,7 @@ class CoreProcessor:
         system_section = {
             'role': 'system',
             'content': full_pre_context,
-        }
+        }'''
 
         history_section = conversation_history
 
@@ -223,15 +240,16 @@ class CoreProcessor:
             'content': input_text
         }
 
-        prompt = [system_section] + history_section + [user_input_section]
+        #prompt = [system_section] + history_section + [user_input_section]
+        prompt = history_section + [user_input_section]
         return prompt
 
-    def update_prompt(self, conversation_history, voice=False):
+    def update_prompt(self, conversation_history):
         # right now we reload this each time so we can tweak it live, may be unnecessary in future:
         #loadprecontext = importlib.import_module('config.precontext')
         #importlib.reload(loadprecontext)
 
-        full_pre_context = self.pre_context
+        '''full_pre_context = self.pre_context
 
         if voice:
             full_pre_context += self.voice_pre_context
@@ -242,26 +260,82 @@ class CoreProcessor:
         system_section = {
             'role': 'system',
             'content': full_pre_context,
-        }
+        }'''
 
         history_section = conversation_history
 
-        prompt = [system_section] + history_section
+        #prompt = [system_section] + history_section
+        prompt = history_section
         return prompt
 
-    def send_to_ollama(self, prompt_text, prompt_tools, session):
+    def create_system_message(self, voice=False):
+        full_pre_context = self.pre_context
+
+        if voice:
+            full_pre_context += self.voice_pre_context
+
+        # we add this each time so we have up to date info from Home Assistant:
+        full_pre_context = self.add_ha_to_pre_context(full_pre_context)
+
+        system_section = {
+            'role': 'system',
+            'content': full_pre_context,
+        }
+
+        print(f"DEBUGGING SYSTEM: \n{system_section['content']}")
+
+        return system_section
+
+    def format_raw_prompt(self, system, messages, tools=None):
+        """
+        Creates a minimal prompt text for the LLM, focusing on essential content and omitting internal metadata.
+
+        Parameters:
+        - system (str): The system message content.
+        - messages (list of dict): Conversation history, each dict containing 'role' and 'content'.
+        - tools (list of str): List of tool descriptions.
+
+        Returns:
+        - str: Cleaned and formatted prompt text.
+        """
+        prompt_text = ""
+
+        # Add system content
+        if system and 'content' in system:
+            #prompt_text += f"System: {system['content']}\n\n"
+            prompt_text += f"<|start_header_id|>system<|end_header_id|>\n{system['content']}\n<|eot_id|>\n\n"
+
+        # Conditionally add tools section if needed
+        if tools:
+            #prompt_text += f"When you receive a tool call response, use the output to format an answer to the original use question, or to further call other tools to do so."
+            #prompt_text += "Available functions:\n" + json.dumps(tools, indent=2) + "\n"
+            #prompt_text += 'Given the previous functions, if required to assist the user, please respond with a JSON for a function call with its proper arguments that best answers the given prompt. Respond in the format {"name": function name, "parameters": dictionary of argument name and its value}. Do not use variables.\n\n'
+            tools_json = json.dumps(tools, indent=2)
+            prompt_text += (
+                "<|start_header_id|>tools<|end_header_id|>\n"
+                f"When you receive a tool call response, use the output to format an answer to the original user question or to further call other tools.\n"
+                f"Available functions:\n{tools_json}\n\n"
+                "Given the previous functions, if required to assist the user, please respond with a JSON for a function call with its proper arguments that best answers the given prompt. "
+                'Respond in the format {"name": function name, "parameters": dictionary of argument name and its value}. Do not use variables.\n<|eot_id|>\n\n'
+            )
+
+        # Add conversation history without metadata
+        for message in messages:
+            role = message['role']
+            content = message['content']
+            #prompt_text += f"{role.capitalize()}: {content}\n\n"
+            prompt_text += f"<|start_header_id|>{role}<|end_header_id|>\n{content}\n<|eot_id|>\n\n"
+
+        # finally a kick to make the LLM respond:
+        prompt_text += "<|start_header_id|>assistant<|end_header_id|>"
+
+        return prompt_text.strip()
+
+    def send_to_ollama(self, prompt_text, prompt_system, prompt_tools, session, raw_mode=False):
         """Sends request to Ollama, processes return along with tool calls, streams response to message queue"""
         response_queue = session['response_queue']
 
         try:
-            response_stream = self.ollama_client.chat(
-                model=self.model,
-                messages=prompt_text,
-                stream=True,
-                keep_alive="2h",
-                tools=prompt_tools
-            )
-
             full_response = ""
             tool_calls = []
 
@@ -271,8 +345,42 @@ class CoreProcessor:
             inside_code_block = False  # for when we receive code
             backtick_buffer = ""
 
+            if raw_mode:
+                print("starting to process RAW mode...")
+                combined_prompt = self.format_raw_prompt(system=prompt_system, tools=prompt_tools, messages=prompt_text)
+                print("Created full prompt from scratch...")
+                print(f"Full prompt:\n\n{combined_prompt}")
+
+                # Send raw text input to Ollama
+                response_stream = self.ollama_client.generate(
+                    model=self.model,
+                    prompt=combined_prompt,
+                    stream=True,
+                    raw=True,
+                    keep_alive="2h"
+                )
+
+            else:
+                response_stream = self.ollama_client.chat(
+                    model=self.model,
+                    messages=prompt_text,
+                    stream=True,
+                    keep_alive="2h",
+                    tools=prompt_tools
+                )
+
             for chunk in response_stream:
-                response_content = chunk.get('message', {}).get('content', '')
+                #debugging responses:
+                #print(f"{chunk}")
+
+                if raw_mode is True:
+                    response_content = chunk.get('response', '')
+                else:
+                    response_content = chunk.get('message', {}).get('content', '')
+
+                #debugging responses:
+                print(f"{response_content}", end="")
+
                 full_response += response_content
 
                 if response_content:
@@ -319,6 +427,9 @@ class CoreProcessor:
 
     def send_whole_response(self, response_text, session):
         session['response_queue'].put(f"{response_text}  \n")
+
+    def response_finished(self, session):
+        session['response_queue'].put(None)
 
     def close_voice_channel(self, tool_args, session):
         # print("TOOL: CLOSE COMMS CHANNEL")
@@ -488,7 +599,7 @@ class CoreProcessor:
             if action_type == "set_switch":
                 state = tool_args.get('parameters').get('state')
                 switch = self.home_assistant.get_domain("switch")
-                self.send_whole_response(f"Set switch {switch} to {state}")
+                self.send_whole_response(f"Set switch {switch} to {state}", session)
 
                 if state == "on":
                     switch.turn_on(entity_id=entity_id)
@@ -498,7 +609,7 @@ class CoreProcessor:
                 return json.dumps({'home_automation_action': f'Successfully switched {entity_id} {state}'})
 
             elif action_type == "activate_scene":
-                self.send_whole_response(f"Activated Scene '{entity_id}'")
+                self.send_whole_response(f"Activated Scene '{entity_id}'", session)
                 scene_id = f"scene.{entity_id}"
                 scene = self.home_assistant.get_domain("scene")
                 scene.turn_on(entity_id=scene_id)
@@ -509,7 +620,7 @@ class CoreProcessor:
                 return json.dumps({'home_automation_action': 'Error: Invalid action type specified. Choose "set_switch" or "activate_scene".'})
 
         except Exception as e:
-            self.send_whole_response(f"Error in tool! {e}")
+            self.send_whole_response(f"Error in tool! {e}", session)
             return json.dumps(
                 {'home_automation_action': f'Error performing {action_type} on {entity_id}: {str(e)}'})
 
@@ -549,7 +660,9 @@ class CoreProcessor:
         all_states = self.home_assistant.get_states()
 
         # Filter for switches and scenes
-        available_switches = [entity.entity_id for entity in all_states if entity.entity_id.startswith("switch.")]
+        #available_switches = [entity.entity_id for entity in all_states if entity.entity_id.startswith("switch.")]
+        available_switches = [entity.entity_id.split("switch.")[1] for entity in all_states if
+                              entity.entity_id.startswith("switch.")]
         available_scenes = [entity.entity_id.split('.')[1] for entity in all_states if
                             entity.entity_id.startswith("scene.")]
 

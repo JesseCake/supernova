@@ -13,9 +13,9 @@ if __name__ == "__main__":
     voice_thread.start()
 
     # Join thread (optional, if we want to join for certain functionality)
-    # voice_thread.join()
+    voice_thread.join()
 
     # Start the web interface
-    web_interface = WebInterface(core_processor)
-    web_interface.run()
+    #web_interface = WebInterface(core_processor)
+    #web_interface.run()
 

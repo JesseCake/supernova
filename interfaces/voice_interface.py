@@ -96,18 +96,26 @@ class VoiceInterface:
         sentence_endings = re.compile(r'([.,!?])')
 
         # Stream response chunks incrementally
-        while not session['response_finished'].is_set():
+        #while not session['response_finished'].is_set():
+        while True:
             if not session['response_queue'].empty():
                 response_chunk = session['response_queue'].get()
-                print(f"{response_chunk}", end="")
-                assistant_response += response_chunk
+                if response_chunk is None:
+                    print('RESPONSE FINISHED')
+                    break
+                else:
+                    print(f"{response_chunk}", end="")
+                    assistant_response += response_chunk
 
-                # Check if accumulated text ends with a sentence-ending punctuation
-                if sentence_endings.search(assistant_response):
-                    # Speak the sentence early so we feel snappier
-                    self.speak_text(assistant_response)
-                    # wipe it out fresh after speaking
-                    assistant_response = ""
+                    if sentence_endings.search(assistant_response):
+                        # Speak the sentence early so we feel snappier
+                        self.speak_text(assistant_response)
+                        # wipe it out fresh after speaking
+                        assistant_response = ""
+
+        # After loop, ensure all remaining text is spoken
+        if assistant_response:
+            self.speak_text(assistant_response.strip())
 
         if session['close_voice_channel'].is_set():
             print("CLOSING VOICE CHANNEL")
