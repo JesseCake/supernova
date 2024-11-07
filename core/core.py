@@ -177,14 +177,15 @@ class CoreProcessor:
                         function_to_call = self.available_functions[tool['name']]
                         function_response = function_to_call(tool_args=tool, session=session)
 
-                        # debugging:
-                        print(f"core: Function response: {function_response}")
+                        if function_response is not None:
+                            # debugging:
+                            print(f"core: Function response: {function_response}")
 
-                        if conversation_history:
-                            conversation_history.append({
-                                    'role': 'tool',
-                                    'content': function_response
-                            })
+                            if conversation_history:
+                                conversation_history.append({
+                                        'role': 'tool',
+                                        'content': function_response
+                                })
 
                     except Exception as e:
                         print(f"Error in tool call: {e}")
@@ -269,6 +270,9 @@ class CoreProcessor:
 
         #prompt = [system_section] + history_section
         prompt = history_section
+
+        # print(f"DEBUGGING HISTORY: \n{prompt}")
+
         return prompt
 
     def create_system_message(self, voice=False):

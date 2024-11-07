@@ -92,8 +92,15 @@ class VoiceInterface:
 
         session = self.core_processor.get_session(self.session_id)  # get the session object from the core to interact with
         assistant_response = ""
+
         # Define sentence-ending punctuation
         sentence_endings = re.compile(r'([.,!?])')
+
+        # Pattern to detect if a string starts with a digit (used for lookahead so we only speak when we're not halfway through a number)
+        starts_with_digit = re.compile(r'^\s*\d')
+
+        # Flag to determine if we are waiting to confirm if punctuation is part of a number
+        waiting_for_number = False
 
         # Stream response chunks incrementally
         #while not session['response_finished'].is_set():
@@ -101,24 +108,35 @@ class VoiceInterface:
             if not session['response_queue'].empty():
                 response_chunk = session['response_queue'].get()
                 if response_chunk is None:
-                    print('RESPONSE FINISHED')
+                    # print('RESPONSE FINISHED')
                     break
                 else:
                     # print(f"{response_chunk}", end="")
                     assistant_response += response_chunk
 
-                    if sentence_endings.search(assistant_response):
-                        # Speak the sentence early so we feel snappier
-                        self.speak_text(assistant_response)
-                        # wipe it out fresh after speaking
-                        assistant_response = ""
+                    if waiting_for_number:
+                        # Check if the current chunk starts with a number (continuation of a number)
+                        if starts_with_digit.search(response_chunk):
+                            # If it starts with a number, continue accumulating
+                            waiting_for_number = False  # Reset flag, we've resolved the lookahead
+                        else:
+                            # If it does not start with a number, speak the text accumulated so far
+                            self.speak_text(assistant_response)
+                            assistant_response = ""
+                            waiting_for_number = False  # Reset flag after speaking
+                    else:
+                        if sentence_endings.search(assistant_response):
+                            # Set flag to wait and see if the next chunk starts with a number
+                            waiting_for_number = True
+
+
 
         # After loop, ensure all remaining text is spoken
         if assistant_response:
             self.speak_text(assistant_response.strip())
 
         if session['close_voice_channel'].is_set():
-            print("CLOSING VOICE CHANNEL")
+            print("voice: Closing voice channel")
             return True
         else:
             return False
