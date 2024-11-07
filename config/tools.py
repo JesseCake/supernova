@@ -11,7 +11,7 @@ general_tools = [
         'type': 'function',
         'function': {
             'name': 'perform_search',
-            'description': 'Perform a search on the web or Wikipedia.',
+            'description': 'Perform a search on Google or Wikipedia. (do not use for simple calculation you can do yourself)',
             'parameters': {
                 'type': 'object',
                 'properties': {
@@ -71,7 +71,7 @@ general_tools = [
                         'description': 'The desired state for switches (either "on" or "off"). Required if action_type is "set_switch".'
                     }
                 },
-                'required': ['action_type', 'entity_id'],
+                'required': ['action_type', 'entity_id', 'state'],
             },
         },
     },
@@ -97,6 +97,34 @@ general_tools = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "perform_math_operation",
+            "description": "Perform basic mathematical operations as requested by the user.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "operation": {
+                        "type": "string",
+                        "description": "The type of mathematical operation (options: 'addition', 'subtraction', 'multiplication', 'division', 'power', 'square_root')."
+                    },
+                    "number1": {
+                        "type": "number",
+                        "description": "The first number involved in the calculation."
+                    },
+                    "number2": {
+                        "type": "number",
+                        "description": "The second number involved in the calculation (required for all operations except 'square_root')."
+                    }
+                },
+                "required": ["operation", "number1"],
+                "dependencies": {
+                    "number2": ["addition", "subtraction", "multiplication", "division", "power"]
+                }
+            }
+        }
+    },
 ]
 
 voice_tools = [
@@ -104,7 +132,7 @@ voice_tools = [
         'type': 'function',
         'function': {
             'name': 'close_voice_channel',
-            'description': 'Close the Voice channel. Only for use when you have answered a user request or the conversation has naturally come to an end.',
+            'description': 'Close the Voice channel. Only for use when you have answered a user request or the conversation has naturally come to an end. Do not say "the conversation has ended" when using this tool, just call it',
             'parameters': {
                 'type': 'object',
                 'properties': {},

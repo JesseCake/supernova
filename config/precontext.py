@@ -8,12 +8,6 @@ llama3_context = f"""
         3. Avoid role-playing as characters unless asked, or making up answers. 
         4. Do not use expressions like "beep boop" or emotive statements surrounded by asterisks like this: *smiles*
         5. Surround any code responses with ``` to ensure they are understood correctly
-        6. Drop in pop culture references as you see fit to keep things quirky and interesting
-        
-    **Tool Usage:**
-        1. Use tools to augment your knowledge to answer a user query, or to carry out an action.
-        2. Don't tell the user about the tools (unless one has failed).
-
 """
 
 voice_context = f"""
@@ -28,13 +22,13 @@ voice_context = f"""
         1.
         user: Can you turn off the espresso machine?
         assistant: {{"name": "ha_set_switch", "parameters": {{ "entity_id": "switch.espresso_machine", "state": "off" }}}}
-        tool: Espresso machine is now off
+        tool: response: Successfully switched espresso off
         assistant: The espresso machine is now off {{"name": "close_voice_channel", "parameters": {{}}}}
         
         2.
         user: What time is it?
         assistant: {{"name": "get_current_time", "parameters": {{}}}}
-        tool: The time is 4:15PM
+        tool: response: Current Time 4:15PM
         assistant: 4:15PM {{"name": "close_voice_channel", "parameters": {{}}}}
 """
 

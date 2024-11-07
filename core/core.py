@@ -6,6 +6,7 @@ import ollama
 import queue
 from datetime import datetime
 import os
+import math
 
 # wikipedia search
 import wikipedia
@@ -58,6 +59,7 @@ class CoreProcessor:
             'open_website': self.open_website,
             'home_automation_action': self.home_automation_action,
             'check_weather': self.check_weather,
+            'perform_math_operation': self.perform_math_operation,
         }
 
     def create_session(self, session_id):
@@ -110,7 +112,7 @@ class CoreProcessor:
         return pre_context
 
     def process_input(self, input_text, session_id, is_voice=False):
-        #print("STARTING NEW INPUT")
+        # print("STARTING NEW INPUT")
 
         # Retrieve the session-specific data - NOT SURE IF NEEDED NOW:
         session = self.get_session(session_id)
@@ -175,31 +177,32 @@ class CoreProcessor:
                         function_to_call = self.available_functions[tool['name']]
                         function_response = function_to_call(tool_args=tool, session=session)
 
+                        # debugging:
+                        print(f"core: Function response: {function_response}")
+
                         if conversation_history:
-                            conversation_history.append(
-                                {
+                            conversation_history.append({
                                     'role': 'tool',
                                     'content': function_response
-                                }
-                            )
+                            })
 
                     except Exception as e:
-                        conversation_history.append(
-                            {
+                        print(f"Error in tool call: {e}")
+                        conversation_history.append({
                                 'role': 'tool',
                                 'content': f'Error with tool, or bad use of tool: {e}',
-                            }
-                        )
+                        })
 
                 # update the prompt for next spin around for tool call response routines:
                 prompt = self.update_prompt(conversation_history)
+
             else:
                 break
 
-        # if we break out of loop, set that we've finished to other threads:
-        #self.send_whole_response(None, session)
+        # if we break out of loop, set that we've finished to calling thread:
+        #self.send_whole_response(self.end_of_message, session)
         self.response_finished(session)
-        session['response_finished'].set()
+        #session['response_finished'].set()
 
         # print('\ncore: Finishing processing input and response')
 
@@ -282,7 +285,7 @@ class CoreProcessor:
             'content': full_pre_context,
         }
 
-        print(f"DEBUGGING SYSTEM: \n{system_section['content']}")
+        #print(f"DEBUGGING SYSTEM: \n{system_section['content']}")
 
         return system_section
 
@@ -313,10 +316,14 @@ class CoreProcessor:
             tools_json = json.dumps(tools, indent=2)
             prompt_text += (
                 "<|start_header_id|>tools<|end_header_id|>\n"
-                f"When you receive a tool call response, use the output to format an answer to the original user question or to further call other tools.\n"
+                f"When you receive a tool call response, use the output to format an answer to the original user question or to further call other tools.\n\n"
                 f"Available functions:\n{tools_json}\n\n"
-                "Given the previous functions, if required to assist the user, please respond with a JSON for a function call with its proper arguments that best answers the given prompt. "
-                'Respond in the format {"name": function name, "parameters": dictionary of argument name and its value}. Do not use variables.\n<|eot_id|>\n\n'
+                "Given the previous functions, **ONLY IF REQUIRED** to assist the user, please respond with a JSON for a function call with its proper arguments that best answers the given prompt. "
+                "\n1. Do not use these functions unnecessarily for things that can be done yourself (eg simple maths or conversions). "
+                "2. Do not discuss the tools, just use them or not as required"
+                "3. Do not refer to or tell the user about using tools (unless one has failed)."
+                "4. Do not offer tools that do not relate to the users request\n\n"
+                'Respond in the format {"name": function name, "parameters": dictionary of argument names and value}. Do not use variables. \n<|eot_id|>\n\n'
             )
 
         # Add conversation history without metadata
@@ -346,10 +353,10 @@ class CoreProcessor:
             backtick_buffer = ""
 
             if raw_mode:
-                print("starting to process RAW mode...")
+                #print("starting to process RAW mode...")
                 combined_prompt = self.format_raw_prompt(system=prompt_system, tools=prompt_tools, messages=prompt_text)
-                print("Created full prompt from scratch...")
-                print(f"Full prompt:\n\n{combined_prompt}")
+                #print("Created full prompt from scratch...")
+                #print(f"Full prompt:\n\n{combined_prompt}")
 
                 # Send raw text input to Ollama
                 response_stream = self.ollama_client.generate(
@@ -412,11 +419,10 @@ class CoreProcessor:
                                 except json.JSONDecodeError:
                                     pass
 
-                    if not json_collecting:
+                    if not json_collecting and not inside_code_block:
                         # send the non-tool call response chunk back to the response thread live:
                         # print(f'{response_content}', end='')
                         response_queue.put(response_content)
-
 
             # return the full response when finished for chat history, along with tool calls to process:
             return full_response, tool_calls
@@ -440,7 +446,40 @@ class CoreProcessor:
         self.send_whole_response("Checking Time", session)
         now = datetime.now()
         now_time = now.strftime('%I:%M%p')
-        return json.dumps({'current_time': now_time})
+        return json.dumps({'response: ': f'current time: {now_time}'})
+
+    def perform_math_operation(self, tool_args, session):
+        self.send_whole_response("Calculating!", session)
+
+        operation = tool_args.get('parameters').get('operation')
+        number1 = float(tool_args.get('parameters').get('number1'))
+        number2 = float(tool_args.get('parameters').get('number2'))
+
+        try:
+            if operation == "addition":
+                result = number1 + number2
+            elif operation == "subtraction":
+                result = number1 - number2
+            elif operation == "multiplication":
+                result = number1 * number2
+            elif operation == "division":
+                if number2 == 0:
+                    return json.dumps({"response": "Division by zero is undefined."})
+                result = number1 / number2
+            elif operation == "power":
+                result = math.pow(number1, number2)
+            elif operation == "square_root":
+                if number1 < 0:
+                    return json.dumps({"response": "Square root of a negative number is undefined in real numbers."})
+                result = math.sqrt(number1)
+            else:
+                return json.dumps({"response": f"Operation '{operation}' is not supported."})
+
+            print(f"core: calculated result = {result}")
+            return json.dumps({"response": f"Result of {operation}: {result}"})
+
+        except Exception as e:
+            return json.dumps({"response": f"An error occurred: {str(e)}"})
 
     def perform_search(self, tool_args, session):
         query = tool_args.get('parameters').get('query')
@@ -448,7 +487,7 @@ class CoreProcessor:
         num_responses = int(tool_args.get('parameters').get('number', 10))
 
         if source == 'web':
-            self.send_whole_response(f"Performing Web Search: '{query}'", session)
+            self.send_whole_response(f"Performing Google Search: '{query}'", session)
             return self._perform_web_search(query, num_responses)
 
         elif source == 'wikipedia':
@@ -469,8 +508,7 @@ class CoreProcessor:
                 results.append({'error': 'no results found, probably web search tool failure'})
             else:
                 # Add instruction for the LLM at the beginning of results
-                results.insert(0, {
-                    'instruction': 'If more information is required, open the websites of interest from the following results.'})
+                results.insert(0, {'instruction': 'If more information is required, open the websites of interest from the following results.'})
 
         except Exception as e:
             return json.dumps({'web_search_error': f'Error in web search: {e}'})
@@ -510,32 +548,6 @@ class CoreProcessor:
 
         return json.dumps({'wikipedia_search_results': results})
 
-
-    '''def web_search(self, tool_args, session):
-        query = tool_args.get('parameters').get('query')
-        num_responses = int(tool_args.get('parameters').get('number', 10))
-        self.send_whole_response(f"Performing Web Search: '{query}'", session)
-
-        try:
-            # Using the Google search function to get results
-            results = []
-            for url in search(query, num=num_responses, stop=10, pause=2, country='au'):
-                results.append({'link': url})
-
-            if not results:
-                results.append({'error': 'no results found, probably web search tool failure'})
-            else:
-                # Add instruction for the LLM at the beginning of results
-                results.insert(0, {
-                    'instruction': 'If more information is required, open the websites of interest from the following results.'})
-
-        except Exception as e:
-            # Debugging:
-            # print(f"ERROR WEB SEARCH CALL: {e}")
-            return json.dumps({'web_search_error': f'Error in web search: {e}'})
-
-        return json.dumps({'web_search_results': results})'''
-
     def open_website(self, tool_args, session, max_retries=3):
         web_session = HTMLSession()
         url = tool_args.get('parameters').get('url')
@@ -553,43 +565,6 @@ class CoreProcessor:
         self.send_whole_response(f"Opened Website: {url}", session)
         return json.dumps({'web_link_error': f'Failed to open web link after {max_retries} attempts'})
 
-    '''def wikipedia_search(self, tool_args, session):
-        query = tool_args.get('parameters').get('query')
-        self.send_whole_response(f"Performing research on Wikipedia on subject: {query}", session)
-
-        search_results = wikipedia.search(query)
-
-        results = []
-
-        if search_results:
-            for title in search_results:
-                try:
-                    summary = wikipedia.summary(title, sentences=2)
-                    page = wikipedia.page(title)
-
-                    result = {
-                        "title": title,
-                        "summary": summary,
-                        "url": page.url
-                    }
-                    results.append(result)
-                except wikipedia.DisambiguationError as e:
-                    results.append({
-                        "title": title,
-                        "summary": "Disambiguation page, multiple meanings exist",
-                        "url": None
-                    })
-                except wikipedia.PageError:
-                    results.append({
-                        "title": title,
-                        "summary": "Page does not exist.",
-                        "url": None
-                    })
-        else:
-            results.append('No results, try another search term')
-
-        return json.dumps({'wikipedia_search_results': f'{results}'})'''
-
     def home_automation_action(self, tool_args, session):
         action_type = tool_args.get('parameters').get('action_type')
         entity_id = tool_args.get('parameters').get('entity_id')
@@ -599,61 +574,31 @@ class CoreProcessor:
             if action_type == "set_switch":
                 state = tool_args.get('parameters').get('state')
                 switch = self.home_assistant.get_domain("switch")
-                self.send_whole_response(f"Set switch {switch} to {state}", session)
+                self.send_whole_response(f"Setting switch {entity_id} to {state}", session)
 
                 if state == "on":
-                    switch.turn_on(entity_id=entity_id)
+                    switch.turn_on(entity_id=f"switch.{entity_id}")
                 else:
-                    switch.turn_off(entity_id=entity_id)
+                    switch.turn_off(entity_id=f"switch.{entity_id}")
 
-                return json.dumps({'home_automation_action': f'Successfully switched {entity_id} {state}'})
+                return json.dumps({'response: ': f'Successfully switched {entity_id} {state}'})
 
             elif action_type == "activate_scene":
-                self.send_whole_response(f"Activated Scene '{entity_id}'", session)
+                self.send_whole_response(f"Activating Scene '{entity_id}'", session)
                 scene_id = f"scene.{entity_id}"
                 scene = self.home_assistant.get_domain("scene")
                 scene.turn_on(entity_id=scene_id)
 
-                return json.dumps({'home_automation_action': f'Successfully activated scene {scene_id}'})
+                return json.dumps({'response': f'Successfully activated scene {scene_id}'})
 
             else:
-                return json.dumps({'home_automation_action': 'Error: Invalid action type specified. Choose "set_switch" or "activate_scene".'})
+                return json.dumps({'response': 'Error: Invalid action type specified. Choose "set_switch" or "activate_scene".'})
 
         except Exception as e:
             self.send_whole_response(f"Error in tool! {e}", session)
             return json.dumps(
                 {'home_automation_action': f'Error performing {action_type} on {entity_id}: {str(e)}'})
 
-    '''def ha_set_switch(self, tool_args, session):
-        self.send_whole_response("Setting switch in Home Assistant", session)
-        entity_id = tool_args.get('parameters').get('entity_id')
-        state = tool_args.get('parameters').get('state')
-
-        switch = self.home_assistant.get_domain("switch")
-
-        try:
-            if state == "on":
-                switch.turn_on(entity_id=entity_id)
-            else:
-                switch.turn_off(entity_id=entity_id)
-
-            return json.dumps({'set switch': f'successfully switched {entity_id} {state}'})
-
-        except Exception as e:
-            return json.dumps({'set switch error': f'Error in switching {entity_id} {state}'})
-
-    def ha_activate_scene(self, tool_args, session):
-        self.send_whole_response("Activating Scene in Home Assistant", session)
-        scene_id = tool_args.get('parameters').get('scene_id')
-        scene = self.home_assistant.get_domain("scene")
-        scene_id = f"scene.{scene_id}"
-
-        try:
-            scene.turn_on(entity_id=scene_id)
-            return json.dumps({'activate scene': f'Successfully activated {scene_id}'})
-        except Exception as e:
-            return json.dumps({'activate scene error': f'Failed to activate {scene_id}: {str(e)}'})
-'''
     def ha_get_available_switches_and_scenes(self):
         """For adding to the end of your pre-context"""
         # Retrieve all states from Home Assistant

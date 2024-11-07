@@ -104,7 +104,7 @@ class VoiceInterface:
                     print('RESPONSE FINISHED')
                     break
                 else:
-                    print(f"{response_chunk}", end="")
+                    # print(f"{response_chunk}", end="")
                     assistant_response += response_chunk
 
                     if sentence_endings.search(assistant_response):

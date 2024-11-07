@@ -11,6 +11,8 @@ class WebInterface:
 
     def run(self):
         def process_message(message, history):
+            # print("web: starting to process message")
+
             if history is None:
                 history = []
 
@@ -35,16 +37,24 @@ class WebInterface:
             assistant_response = ""
 
             # Stream response chunks incrementally
-            while not session['response_finished'].is_set() or not session['response_queue'].empty():
-                response_chunk = session['response_queue'].get()
-                # print(f'{response_chunk}', end='')
+            #while not session['response_finished'].is_set() or not session['response_queue'].empty():
+            while True:
+                if not session['response_queue'].empty():
+                    response_chunk = session['response_queue'].get()
+                    if response_chunk is None:
+                        # print('web: response finished')
+                        break
+                    else:
+                        # print(f'{response_chunk}', end='')
 
-                assistant_response += response_chunk
+                        assistant_response += response_chunk
 
-                # Yield the history as ChatMessage objects (Gradio will convert them properly)
-                yield ChatMessage(role="assistant", content=assistant_response)
+                        # Yield the history as ChatMessage objects (Gradio will convert them properly)
+                        yield ChatMessage(role="assistant", content=assistant_response)
 
                 time.sleep(0.05)
+
+            # print(f"web: broke out of queue")
 
             # Final yield of the complete history
             return history
