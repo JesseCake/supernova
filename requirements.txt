@@ -22,3 +22,4 @@ streamlit~=1.38.0
 pydantic~=2.7.4
 fastapi~=0.112.4
 gradio~=5.0.0b1
+websocket-client~=1.8.0
