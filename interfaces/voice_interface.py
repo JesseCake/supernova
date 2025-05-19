@@ -91,19 +91,14 @@ class VoiceInterface:
         process_thread.start()
 
         session = self.core_processor.get_session(self.session_id)  # get the session object from the core to interact with
-        assistant_response = ""
+
+        # buffer for complete sentences:
+        buffer = ""
 
         # Define sentence-ending punctuation
-        sentence_endings = re.compile(r'([.,!?])')
+        sentence_endings = re.compile(r'(?<=[.!?])\s+')
 
-        # Pattern to detect if a string starts with a digit (used for lookahead so we only speak when we're not halfway through a number)
-        starts_with_digit = re.compile(r'^\s*\d')
-
-        # Flag to determine if we are waiting to confirm if punctuation is part of a number
-        waiting_for_number = False
-
-        # Stream response chunks incrementally
-        #while not session['response_finished'].is_set():
+        # Stream response chunks incrementally so that we respond more quickly
         while True:
             if not session['response_queue'].empty():
                 response_chunk = session['response_queue'].get()
@@ -111,29 +106,19 @@ class VoiceInterface:
                     # print('RESPONSE FINISHED')
                     break
                 else:
-                    # print(f"{response_chunk}", end="")
-                    assistant_response += response_chunk
+                    buffer += response_chunk
 
-                    if waiting_for_number:
-                        # Check if the current chunk starts with a number (continuation of a number)
-                        if starts_with_digit.search(response_chunk):
-                            # If it starts with a number, continue accumulating
-                            waiting_for_number = False  # Reset flag, we've resolved the lookahead
-                        else:
-                            # If it does not start with a number, speak the text accumulated so far
-                            self.speak_text(assistant_response)
-                            assistant_response = ""
-                            waiting_for_number = False  # Reset flag after speaking
-                    else:
-                        if sentence_endings.search(assistant_response):
-                            # Set flag to wait and see if the next chunk starts with a number
-                            waiting_for_number = True
-
+                    # only split text up for speaking on complete sentences
+                    sentences = sentence_endings.split(buffer)
+                    for sent in sentences[:-1]:  # All but last (could be incomplete)
+                        if sent.strip():
+                            self.speak_text(sent.strip())
+                    buffer = sentences[-1]  # Keep any incomplete sentence in buffer
 
 
         # After loop, ensure all remaining text is spoken
-        if assistant_response:
-            self.speak_text(assistant_response.strip())
+        if buffer.strip():
+            self.speak_text(buffer.strip())
 
         if session['close_voice_channel'].is_set():
             print("voice: Closing voice channel")
@@ -161,7 +146,7 @@ class VoiceInterface:
                             close_channel = self.contact_core(result_text)
 
                             if close_channel:
-                                print(f"Closing voice channel")
+                                print(f"Transcribe: Closing voice channel")
                                 self.close_channel()
                             else:
                                 # generate tone to let us know speaking is finished (but conversation continues):
@@ -178,7 +163,8 @@ class VoiceInterface:
     def handle_response(self, response):
         # Split the response into segments by both periods and commas,
         # this keeps things nimble and fast speaking while generating
-        segments = re.split(r'[.,]', response)
+        #segments = re.split(r'[.,]', response)
+        segments = re.split(r'(?<=[.!?])\s+', response)
         for segment in segments:
             clean_segment = segment.strip()
             if clean_segment:
@@ -190,6 +176,7 @@ class VoiceInterface:
             self.pause_audio_stream()
             logging.info("Starting speaking")
             try:
+                #print(f"[VOICE DEBUG] Speech sent to TTS: {text}")
                 audio = self.tts.tts(text, speed=self.speech_speed, speaker=self.speech_speaker)
                 audio_data = np.array(audio, dtype=np.float32)
 
@@ -199,8 +186,6 @@ class VoiceInterface:
                     self.output_stream.write(audio_data[start:end].tobytes())
                     time.sleep(0.01)
 
-                # self.output_stream.stop_stream()
-                # self.output_stream.close()
             except Exception as e:
                 logging.error(f"Error during speaking: {e}")
             finally:

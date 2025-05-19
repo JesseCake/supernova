@@ -38,7 +38,7 @@ class CoreProcessor:
 
         #self.model = "llama3.1:8b"
         self.model = "llama3.2"
-        self.ollama_client = ollama.Client(host='http://192.168.20.200:11434')
+        self.ollama_client = ollama.Client(host='http://jetson.lan:11434')
         self.pre_context = precontext.llama3_context
         self.voice_pre_context = precontext.voice_context
         self.current_conversation = None
@@ -112,7 +112,7 @@ class CoreProcessor:
         return pre_context
 
     def process_input(self, input_text, session_id, is_voice=False):
-        # print("STARTING NEW INPUT")
+        #print(f"[DEBUG] process_input called: session_id={session_id}, input_text={input_text!r}, is_voice={is_voice}")
 
         # Retrieve the session-specific data - NOT SURE IF NEEDED NOW:
         session = self.get_session(session_id)
@@ -160,6 +160,7 @@ class CoreProcessor:
         # print(f"PROMPT TOOLS=\n\n {prompt_tools}")
 
         while True:
+            #print(f"[DEBUG] Sending prompt to LLM: prompt={prompt}, system_message={system_message}, tools={prompt_tools}")
             full_response, tool_calls = self.send_to_ollama(prompt_text=prompt, prompt_system=system_message, prompt_tools=prompt_tools, session=session, raw_mode=True)
 
             if full_response:
@@ -193,6 +194,11 @@ class CoreProcessor:
                                 'role': 'tool',
                                 'content': f'Error with tool, or bad use of tool: {e}',
                         })
+                
+                # leave the loop if close conversation is called:
+                if any(tool.get("name") == "close_voice_channel" for tool in tool_calls):
+                    #print("[DEBUG] Detected close_voice_channel in tool_calls; breaking loop.")
+                    break
 
                 # update the prompt for next spin around for tool call response routines:
                 prompt = self.update_prompt(conversation_history)
@@ -318,17 +324,26 @@ class CoreProcessor:
             #prompt_text += "Available functions:\n" + json.dumps(tools, indent=2) + "\n"
             #prompt_text += 'Given the previous functions, if required to assist the user, please respond with a JSON for a function call with its proper arguments that best answers the given prompt. Respond in the format {"name": function name, "parameters": dictionary of argument name and its value}. Do not use variables.\n\n'
             tools_json = json.dumps(tools, indent=2)
-            prompt_text += (
-                "<|start_header_id|>tools<|end_header_id|>\n"
-                f"When you receive a tool call response, use the output to format an answer to the original user question or to further call other tools.\n\n"
-                f"Available functions:\n{tools_json}\n\n"
-                "Given the previous functions, **ONLY IF REQUIRED** to assist the user, please respond with a JSON for a function call with its proper arguments that best answers the given prompt. "
-                "\n1. Do not use these functions unnecessarily for things that can be done yourself (eg simple maths or conversions). "
-                "2. Do not discuss the tools, just use them or not as required"
-                "3. Do not refer to or tell the user about using tools (unless one has failed)."
-                "4. Do not offer tools that do not relate to the users request\n\n"
-                'Respond in the format {"name": function name, "parameters": dictionary of argument names and value}. Do not use variables. \n<|eot_id|>\n\n'
-            )
+            prompt_text += f"""
+            <|start_header_id|>tools<|end_header_id|>
+            When required to answer user queries, use the following tools. You do not have to use them every time.
+
+            Available tools:
+            {tools_json}
+
+            When you receive a message from the 'tool' role, it will be a JSON object like {{"response": "..."}}.
+            Always extract the value from the 'response' key and use it directly to answer the user's question, unless further tool action is required.
+            Important: Do not reuse values from the example.
+            
+            Instructions:
+            1. Do not use these functions unnecessarily for things that can be done in text yourself (eg simple maths or conversions).
+            2. Do not discuss the tools; just use them or not as required
+            3. Do not refer to or tell the user about using tools (unless one has failed).
+            4. Do not offer tools that do not relate to the users request
+            
+            If you need to use a tool, respond in the format {{"name": function name, "parameters": dictionary of argument names and value}}. Do not use variables.
+            <|eot_id|>
+            """
 
         # Add conversation history without metadata
         for message in messages:
@@ -450,7 +465,7 @@ class CoreProcessor:
         self.send_whole_response("Checking Time", session)
         now = datetime.now()
         now_time = now.strftime('%I:%M%p')
-        return json.dumps({'response: ': f'current time: {now_time}'})
+        return json.dumps({'response': f'current time: {now_time}'})
 
     def perform_math_operation(self, tool_args, session):
         self.send_whole_response("Calculating!", session)
@@ -572,20 +587,20 @@ class CoreProcessor:
     def home_automation_action(self, tool_args, session):
         action_type = tool_args.get('parameters').get('action_type')
         entity_id = tool_args.get('parameters').get('entity_id')
-        self.send_whole_response(f"Performing '{action_type}' action in Home Assistant", session)
+        #self.send_whole_response(f"Performing '{action_type}' action in Home Assistant", session)
 
         try:
             if action_type == "set_switch":
                 state = tool_args.get('parameters').get('state')
                 switch = self.home_assistant.get_domain("switch")
-                self.send_whole_response(f"Setting switch {entity_id} to {state}", session)
+                self.send_whole_response(f"{entity_id} {state}", session)
 
                 if state == "on":
                     switch.turn_on(entity_id=f"switch.{entity_id}")
                 else:
                     switch.turn_off(entity_id=f"switch.{entity_id}")
 
-                return json.dumps({'response: ': f'Successfully switched {entity_id} {state}'})
+                return json.dumps({'response': f'Successfully switched {entity_id} {state}'})
 
             elif action_type == "activate_scene":
                 self.send_whole_response(f"Activating Scene '{entity_id}'", session)
