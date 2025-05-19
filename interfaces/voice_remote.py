@@ -23,15 +23,23 @@ class VoiceRemoteInterface(AsyncEventHandler):
         self.sentence_endings = re.compile(r'(?<=[.!?])\s+')
 
     async def handle_event(self, event: Event) -> bool:
+        print("received packet:", end="")
         if AudioStart.is_type(event.type):
+            print("start")
             self.current_audio = []
 
         elif AudioChunk.is_type(event.type):
-            # Transcribe the audio
-            audio_np = np.frombuffer(message.audio, dtype=np.float32)
-            self.current_audio.append(audio_np)
+            print("chunk")
+            # Gather the audio
+            if event.payload is not None:
+                audio_np = np.frombuffer(event.payload, dtype=np.int16)
+                audio_np = audio_np.astype(np.float32) / 32767.0
+                self.current_audio.append(audio_np)
+            else:
+                print("[remotevoice] Warning: received audio chunk with no payload!")
 
         elif AudioStop.is_type(event.type):
+            print("stop")
             if not self.current_audio:
                 return
             # Concatenate all audio chunks
@@ -70,6 +78,9 @@ class VoiceRemoteInterface(AsyncEventHandler):
             if buffer.strip():
                 await self.speak_text(buffer.strip(), writer)
         
+        else:
+            print(f"Event type: {event.type}")
+
         return True  # return False to close the connection
 
     async def speak_text(self, text):
