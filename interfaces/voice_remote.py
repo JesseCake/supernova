@@ -27,6 +27,9 @@ class VoiceRemoteInterface(AsyncEventHandler):
         if AudioStart.is_type(event.type):
             print("start")
             self.current_audio = []
+            print("trying to send back audio")
+            #await self.writer.write(AudioStart(rate=16000, width=2, channels=1, format="s16le"))
+            await self.speak_text("I'm here")
 
         elif AudioChunk.is_type(event.type):
             print("chunk")
@@ -87,28 +90,31 @@ class VoiceRemoteInterface(AsyncEventHandler):
         """Generate TTS audio from text and stream to the Wyoming client."""
         if text.strip():
             # Generate audio using your TTS engine
-            audio = self.tts.tts(text, speed=self.speech_speed, speaker=self.speech_speaker)
-            audio_data = np.array(audio, dtype=np.float32)
+            audio_f32 = self.tts.tts(text, speed=self.speech_speed, speaker=self.speech_speaker)
 
-            # Resample to 16kHz
-            duration = len(audio_np) / 22050  # the default samplerate of the tts
-            num_samples = int(duration * 16000)
-            audio_np = resample(audio_np, num_samples)
+            # resample → 16 kHz float32
+            num_samples = int(len(audio_f32) * 16000 / 22050)
+            audio_f32_16k = resample(audio_f32, num_samples)
 
-            # Convert to int16 bit
-            audio_int16 = np.clip(audio_np, -1.0, 1.0)
-            audio_int16 = (audio_int16 * 32767).astype(np.int16)
+            # normalise audio before converting to int16
+            peak = np.max(np.abs(audio_f32_16k))
+            if peak > 0:
+                audio_f32_16k /= peak
+
+            # float → int16 little-endian
+            audio_int16 = (np.clip(audio_f32_16k, -1.0, 1.0) * 32767).astype(np.int16)
 
             # Send AudioStart
-            await writer.write(AudioStart(rate=16000, width=2, channels=1, format="s16le"))
+            await self.write_event(AudioStart(rate=16000, width=2, channels=1).event())
 
-            chunk_size = 4096  # Wyoming default is 4096, can adjust as needed
-            for start in range(0, len(audio_data), chunk_size):
-                end = start + chunk_size
-                chunk = audio_data[start:end].tobytes()
-                await writer.write(AudioChunk(audio=chunk))
+            chunk_samples = 1024  # Wyoming default is 4096, can adjust as needed
+            for start in range(0, len(audio_int16), chunk_samples):
+                end = start + chunk_samples
+                chunk = audio_int16[start:end].tobytes()
+                await self.write_event(AudioChunk(audio=chunk, rate=16000, width=2, channels=1).event())
+                # print("sent chunk")
 
             # Send AudioStop to indicate we're done
-            await writer.write(AudioStop())
+            await self.write_event(AudioStop().event())
         else:
             print("[remote] Skipped speaking due to empty text.")
