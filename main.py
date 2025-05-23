@@ -33,4 +33,3 @@ if __name__ == "__main__":
     # Start the web interface
     #web_interface = WebInterface(core_processor)
     #web_interface.run()
-
