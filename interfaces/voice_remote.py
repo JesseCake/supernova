@@ -42,7 +42,7 @@ class VoiceRemoteInterface(AsyncEventHandler):
 
         # voice activity detection and transcription:
         self.listening_rate = 16000
-        self.vad_detector = VoiceActivityDetector(threshold=0.5, frame_rate=self.listening_rate)
+        self.vad_detector = VoiceActivityDetector(threshold=0.3, frame_rate=self.listening_rate)
         self.frames_np = np.array([], dtype=np.float32)
 
         # TTS:
@@ -76,7 +76,6 @@ class VoiceRemoteInterface(AsyncEventHandler):
             await self.handover_channel()
 
         elif AudioChunk.is_type(event.type):
-            #print("chunk")
             # Gather the audio
             if event.payload is not None:
                 audio_frame = np.frombuffer(event.payload, dtype=np.int16)
@@ -84,15 +83,11 @@ class VoiceRemoteInterface(AsyncEventHandler):
                 audio_frame = audio_frame.astype(np.float32) / 32768.0  # convert to float32 (needed?)
                 #print("FLOAT32 Max value:", np.max(audio_frame), "Min value:", np.min(audio_frame))
 
-                #debugging audio:
-                #print("Save shape:", audio_np.shape, "dtype:", audio_np.dtype)
-                #print("Max value:", np.max(audio_np), "Min value:", np.min(audio_np))
-                #save_or_append_audio("debug_audio.wav", audio_frame, self.rate)
-
                 if self.vad_detector(audio_frame=audio_frame):
                     #self.current_audio.append(audio_frame)
                     self.add_frames(audio_frame)
                     self.recording = True
+                    # TODO: add a filter to allow more vacant frames before we send for transcription
                 elif self.recording:
                     print("vad detected silence: sending to transcriber")
                     await self.transcribe_audio()
