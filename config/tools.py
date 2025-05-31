@@ -132,7 +132,7 @@ voice_tools = [
         'type': 'function',
         'function': {
             'name': 'close_voice_channel',
-            'description': 'Close the Voice channel. Only for use when you have answered a user request or the conversation has naturally come to an end. Do not say "the conversation has ended" when using this tool, just call it',
+            'description': 'Close the Voice channel. Only for use after you have answered a user query. Do not say "the conversation has ended" when using this tool, just use it',
             'parameters': {
                 'type': 'object',
                 'properties': {},

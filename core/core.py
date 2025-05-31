@@ -530,9 +530,9 @@ class CoreProcessor:
                 results.insert(0, {'instruction': 'If more information is required, open the websites of interest from the following results.'})
 
         except Exception as e:
-            return json.dumps({'web_search_error': f'Error in web search: {e}'})
+            return json.dumps({'response': f'Error in web search: {e}'})
 
-        return json.dumps({'web_search_results': results})
+        return json.dumps({'response': results})
 
     def _perform_wikipedia_search(self, query):
         search_results = wikipedia.search(query)
@@ -565,7 +565,7 @@ class CoreProcessor:
         else:
             results.append({'error': 'No results, try another search term'})
 
-        return json.dumps({'wikipedia_search_results': results})
+        return json.dumps({'response': results})
 
     def open_website(self, tool_args, session, max_retries=3):
         web_session = HTMLSession()
@@ -576,13 +576,13 @@ class CoreProcessor:
                 response = web_session.get(url)
                 response.html.render()
                 soup = BeautifulSoup(response.html.html, 'html.parser')
-                return json.dumps({'web_link_results': soup.get_text()})
+                return json.dumps({'response': soup.get_text()})
             except requests.exceptions.RequestException as e:
                 time.sleep(2)
             except Exception as e:
-                return json.dumps({'web_link_error': f'Unexpected error for {url}: {e}'})
+                return json.dumps({'response': f'Unexpected error for {url}: {e}'})
         self.send_whole_response(f"Opened Website: {url}", session)
-        return json.dumps({'web_link_error': f'Failed to open web link after {max_retries} attempts'})
+        return json.dumps({'response': f'Failed to open web link after {max_retries} attempts'})
 
     def home_automation_action(self, tool_args, session):
         action_type = tool_args.get('parameters').get('action_type')
@@ -611,12 +611,12 @@ class CoreProcessor:
                 return json.dumps({'response': f'Successfully activated scene {scene_id}'})
 
             else:
-                return json.dumps({'response': 'Error: Invalid action type specified. Choose "set_switch" or "activate_scene".'})
+                return json.dumps({'response': 'Error: Invalid action type specified. Use "set_switch" or "activate_scene" with this tool.'})
 
         except Exception as e:
-            self.send_whole_response(f"Error in tool! {e}", session)
+            # self.send_whole_response(f"Error in tool! {e}", session)
             return json.dumps(
-                {'home_automation_action': f'Error performing {action_type} on {entity_id}: {str(e)}'})
+                {'response': f'Error performing {action_type} on {entity_id}: {str(e)}. Consider the names of the entities you are trying to control.'})
 
     def ha_get_available_switches_and_scenes(self):
         """For adding to the end of your pre-context"""

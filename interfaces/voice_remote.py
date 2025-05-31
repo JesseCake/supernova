@@ -10,31 +10,14 @@ import re
 import uuid
 import time 
 import threading
-from scipy.signal import resample # not great
 import resampy
-import logging
-
-#for debugging audio:
-import os
-import soundfile as sf
-
-def save_or_append_audio(filename, audio_int16, rate):
-    if os.path.exists(filename):
-        # Read existing audio
-        existing_audio, _ = sf.read(filename, dtype='int16')
-        # Concatenate
-        combined_audio = np.concatenate((existing_audio, audio_int16))
-    else:
-        combined_audio = audio_int16
-
-    # Write full audio back
-    sf.write(filename, combined_audio, rate, subtype='PCM_16')
+#import logging
 
 # Setup logging
-logging.basicConfig(level=logging.INFO)
+#logging.basicConfig(level=logging.INFO)
 
 class VoiceRemoteInterface(AsyncEventHandler):
-    def __init__(self, reader, writer, core_processor, model_path='tiny.en', **kwargs):
+    def __init__(self, reader, writer, core_processor, **kwargs):
         super().__init__(reader, writer, **kwargs)
         self.core_processor = core_processor
 
@@ -42,18 +25,27 @@ class VoiceRemoteInterface(AsyncEventHandler):
 
         # voice activity detection and transcription:
         self.listening_rate = 16000
+        print("Loading VAD model...", end="")
         self.vad_detector = VoiceActivityDetector(threshold=0.3, frame_rate=self.listening_rate)
         self.frames_np = np.array([], dtype=np.float32)
+        print("done")
 
         # TTS:
         self.speaking_rate = 16000
-        self.tts_sample_rate = 22050  # built into the model so must use
-        self.tts = TTS("tts_models/en/vctk/vits", progress_bar=False, )
-        self.model_path = model_path
-        self.transcriber = WhisperModel(model_path)
+        self.tts_sample_rate = 24000 # built into the model so must use, was using 22050
+        print("Loading TTS model...", end="")
+        self.tts = TTS("tts_models/en/vctk/vits", progress_bar=False)
         self.speech_speed = 1.0
-        self.speech_speaker = 'p376'
+        self.speech_speaker = 'p376' #'p330' #original: 'p376'
         self.sentence_endings = re.compile(r'(?<=[.!?])\s+')
+        print("done")
+        
+
+        # Speech to text:
+        print("Loading Whisper model...", end="")
+        self.model_path = 'tiny.en'
+        self.transcriber = WhisperModel(model_size_or_path=self.model_path)
+        print("done")
         
         self.recording = False
         self.close_channel_phrase = "finish conversation"
@@ -278,7 +270,7 @@ class VoiceRemoteInterface(AsyncEventHandler):
                 segments, _ = self.transcriber.transcribe(self.frames_np)
                 if segments:
                     result_text = " ".join([segment.text for segment in segments])
-                    logging.info(f"Transcription result: {result_text}")
+                    print(f"Transcription result: {result_text}")
                     if self.close_channel_phrase in result_text.lower():
                         await self.close_channel()
                     else:
@@ -294,11 +286,11 @@ class VoiceRemoteInterface(AsyncEventHandler):
                             # Handover the channel to the person speaking
                             await self.handover_channel()
                 else:
-                    logging.info("No transcription result.")
+                    print("No transcription result.")
             except Exception as e:
-                logging.error(f"Error during transcription: {e}")
+                print(f"Error during transcription: {e}")
             finally:
                 self.frames_np = np.array([], dtype=np.float32)
         else:
-            logging.info("No audio data to transcribe")
+            print("No audio data to transcribe")
 
