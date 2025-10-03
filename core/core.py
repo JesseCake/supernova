@@ -470,7 +470,7 @@ class CoreProcessor:
                     prompt=combined_prompt,
                     stream=True,
                     raw=True,
-                    keep_alive=-1,  # no timeout so we keep alive
+                    keep_alive="48h",  # no timeout so we keep alive
                     options={
                         "stop": ["<end_of_turn>"],
                     }
