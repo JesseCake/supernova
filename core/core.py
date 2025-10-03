@@ -10,7 +10,6 @@ import math
 
 # wikipedia search
 import wikipedia
-from TTS.tts.layers.xtts.zh_num2words import create_system
 
 # google search
 from googlesearch import search
@@ -37,8 +36,9 @@ class CoreProcessor:
         #self.response_finished = threading.Event()  # To signal when the response is complete
 
         #self.model = "llama3.1:8b"
-        self.model = "llama3.2"
-        self.ollama_client = ollama.Client(host='http://jetson.lan:11434')
+        #self.model = "llama3.2"
+        self.model = "gemma3:4b"
+        self.ollama_client = ollama.Client(host='http://localhost:11434')
         self.pre_context = precontext.llama3_context
         self.voice_pre_context = precontext.voice_context
         self.current_conversation = None
@@ -298,8 +298,81 @@ class CoreProcessor:
         #print(f"DEBUGGING SYSTEM: \n{system_section['content']}")
 
         return system_section
+    
+    def format_raw_prompt_gemma(self, system, messages, tools=None):
+        """
+        Build a raw prompt that matches Ollama's Gemma 3 template:
 
-    def format_raw_prompt(self, system, messages, tools=None):
+        user  -> <start_of_turn>user\n{content}<end_of_turn>\n
+        model -> <start_of_turn>model\n{content}[<end_of_turn>\n if not last]
+        system -> treated as a user turn at the top
+        """
+        parts = []
+
+        # 1) System (Gemma has no dedicated system header; treat as a user turn)
+        sys_text = ""
+        if isinstance(system, dict):
+            sys_text = (system.get("content") or "").strip()
+        elif isinstance(system, str):
+            sys_text = system.strip()
+
+        # Append tools to system text (Gemma has no dedicated header)
+        if tools:
+            tools_json = json.dumps(tools, indent=2)
+            sys_text += (
+                "\n\n---\nTOOLS\n"
+                "You may use tools when helpful. Available tools (JSON schema):\n"
+                f"{tools_json}\n\n"
+                "Tool calling rules:\n"
+                '• If you decide to use a tool, reply with a SINGLE JSON object exactly like\n'
+                '  {"name":"<function_name>","parameters":{"arg1":<val>,"arg2":<val>}}\n'
+                "• Do not add extra keys, explanations, or backticks.\n"
+                "• When a message arrives from role 'tool', it will be JSON like {\"response\":\"...\"}.\n"
+                "  Use that value to continue the task or (if needed) call another tool.\n"
+                "• Only call one tool per message.\n"
+            )
+
+        if sys_text:
+            parts.append("<start_of_turn>user\n")
+            parts.append(sys_text)
+            parts.append("<end_of_turn>\n")
+
+        # 2) Conversation
+        n = len(messages)
+        for i, msg in enumerate(messages):
+            last = (i == n - 1)
+            role = msg.get("role")
+            content = (msg.get("content") or "").rstrip()
+
+            if role in ("user", "system"):
+                parts.append("<start_of_turn>user\n")
+                parts.append(content)
+                parts.append("<end_of_turn>\n")
+                if last:
+                    # After the last user/system turn, open the model header to begin generation
+                    parts.append("<start_of_turn>model\n")
+
+            elif role == "assistant":
+                parts.append("<start_of_turn>model\n")
+                parts.append(content)
+                if not last:
+                    parts.append("<end_of_turn>\n")
+
+            elif role == "tool":
+                # Gemma template doesn't define a tool role. If you must include tool output,
+                # feed it back as a user turn.
+                parts.append("<start_of_turn>user\n")
+                parts.append(content)
+                parts.append("<end_of_turn>\n")
+                if last:
+                    parts.append("<start_of_turn>model\n")
+
+            else:
+                raise ValueError(f"Unsupported role for Gemma template: {role!r}")
+
+        return "".join(parts)
+
+    def format_raw_prompt_llama(self, system, messages, tools=None):
         """
         Creates a minimal prompt text for the LLM, focusing on essential content and omitting internal metadata.
 
@@ -373,7 +446,7 @@ class CoreProcessor:
 
             if raw_mode:
                 #print("starting to process RAW mode...")
-                combined_prompt = self.format_raw_prompt(system=prompt_system, tools=prompt_tools, messages=prompt_text)
+                combined_prompt = self.format_raw_prompt_gemma(system=prompt_system, tools=prompt_tools, messages=prompt_text)
                 #print("Created full prompt from scratch...")
                 #print(f"Full prompt:\n\n{combined_prompt}")
 
@@ -383,7 +456,10 @@ class CoreProcessor:
                     prompt=combined_prompt,
                     stream=True,
                     raw=True,
-                    keep_alive="2h"
+                    keep_alive=-1,  # no timeout so we keep alive
+                    options={
+                        "stop": ["<end_of_turn>"],
+                    }
                 )
 
             else:

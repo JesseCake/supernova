@@ -1,13 +1,60 @@
-numpy~=1.22.0
-#pyaudio~=0.2.14
+# --- core numerics ---
+numpy>=1.26,<1.27
+
+# --- audio / voice ---
+# pyaudio~=0.2.14       # enable if you actually need it
+resampy~=0.4.3
+coqui-tts  #>=0.24  # (or just coqui-tts)
+
+# --- LLM / ASR ---
 ollama~=0.3.1
-#simpleaudio~=1.0.4
-TTS~=0.22.0
 functions~=0.7.0
-onnxruntime~=1.18.1
+onnxruntime~=1.18.1    # CPU-only on Jetson via pip; ok if you just need CPU
 ctranslate2~=4.3.1
 faster-whisper~=1.0.3
-torch~=2.3.1
+
+# --- torch (Jetson GPU wheel) ---
+# ON JETSON: install NVIDIA’s wheel that matches JP 6.1 exactly:
+torch @ https://developer.download.nvidia.cn/compute/redist/jp/v61/pytorch/torch-2.5.0a0+872d972e41.nv24.08.17622132-cp310-cp310-linux_aarch64.whl
+# torchaudio -> build from source after torch is installed:
+    #sudo apt-get update
+    # ffmpeg (for I/O backends)
+    #sudo apt-get install -y ffmpeg libavformat-dev libavcodec-dev libavutil-dev libavdevice-dev libavfilter-dev
+    # optional: sox (torchaudio can bundle its own, but system dev libs are fine)
+    #sudo apt-get install -y sox libsox-dev libsox-fmt-all
+    # python build tools
+    #pip install -U pip setuptools wheel cmake ninja
+    #TORCH_MAJMIN=$(python - <<'PY'
+    #import torch; print(".".join(torch.__version__.split(".",2)[:2]))
+    #PY
+    #)
+
+    #git clone https://github.com/pytorch/audio torchaudio-src
+    #cd torchaudio-src
+    ## pick a tag that matches your Torch (fallback to main if the tag doesn't exist)
+    #git fetch --tags
+    #git checkout "v${TORCH_MAJMIN}.0" || git checkout main
+
+    # Helpful arch hint for Orin/Xavier; safe to set even if not strictly needed
+    #export TORCH_CUDA_ARCH_LIST="7.2;8.7"   # Xavier=7.2, Orin=8.7
+    ## Enable CUDA/FFMPEG and build bundled sox if system sox is missing
+    #export USE_CUDA=1
+    #export USE_FFMPEG=0
+    #export BUILD_TORIO=0
+    #export BUILD_SOX=1
+    #export MAX_JOBS=1
+    #export CMAKE_BUILD_PARALLEL_LEVEL=1
+    #export CMAKE_CUDA_FLAGS="${CMAKE_CUDA_FLAGS} -include cfloat"
+
+    #controversially: we'll add an import to allow it to actually build (assuming the torchaudio source is in torchaudio-src/):
+    #sed -i '1i #include <cfloat>' torchaudio-src/src/libtorchaudio/cuctc/src/ctc_prefix_decoder_kernel_v2.cu
+
+    ## Build against the already-installed torch (no isolation, verbose)
+    #pip install -v --no-use-pep517 --no-build-isolation .
+
+
+
+# --- web / misc ---
 requests~=2.32.3
 tokenizers~=0.19.1
 beautifulsoup4~=4.12.3
@@ -23,5 +70,3 @@ pydantic~=2.7.4
 fastapi~=0.112.4
 gradio~=5.0.0b1
 websocket-client~=1.8.0
-wyoming~=1.6.1
-resampy~=0.4.3
