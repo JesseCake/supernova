@@ -84,13 +84,13 @@ class VoiceRemoteInterface:
         self.writer.write(pack_frame(tag, text.encode('utf-8')))
         await self.writer.drain()
 
-    async def send_pcm_int16(self, tag: bytes, audio_int16: np.ndarray, chunk_samples: int = 1024):
+    async def send_pcm_int16(self, tag: bytes, audio_int16: np.ndarray, chunk_samples: int = 8192):
         mv = memoryview(audio_int16.tobytes())
         # 2 bytes per sample
         step = chunk_samples * 2
         for i in range(0, len(mv), step):
             self.writer.write(pack_frame(tag, mv[i:i + step].tobytes()))
-            await self.writer.drain()
+        await self.writer.drain()
 
     async def send_beep(self, freq=800, duration=0.15, volume=0.2):
         sr = self.speaking_rate
@@ -123,18 +123,16 @@ class VoiceRemoteInterface:
         session = self.core_processor.get_session(self.session_id)
         buffer = ""
         while True:
-            if not session['response_queue'].empty():
-                chunk = session['response_queue'].get()
-                if chunk is None:
-                    break
-                buffer += chunk
-                sentences = self.sentence_endings.split(buffer)
-                for sent in sentences[:-1]:
-                    if sent.strip():
-                        await self._speak_text(sent.strip())
-                buffer = sentences[-1]
-            else:
-                await asyncio.sleep(0.01)
+            # block in a thread so the event loop sleeps until a chunk arrives
+            chunk = await asyncio.to_thread(session['response_queue'].get)
+            if chunk is None:
+                break
+            buffer += chunk
+            sentences = self.sentence_endings.split(buffer)
+            for sent in sentences[:-1]:
+                if sent.strip():
+                    await self._speak_text(sent.strip())
+            buffer = sentences[-1]
 
         if buffer.strip():
             await self._speak_text(buffer.strip())
@@ -233,7 +231,7 @@ class VoiceRemoteInterface:
                         await self._transcribe_buffer()
                         self.recording = False
                         self.last_voice_ts = None
-                        
+
                 else:
                     # ignore unknown tags for forward-compat
                     pass

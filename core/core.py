@@ -31,18 +31,11 @@ class CoreProcessor:
     def __init__(self):
         self.sessions = {}
 
-        #self.input_queue = queue.Queue()  # Input queue for receiving data
-        #self.response_queue = queue.Queue()  # Response queue for sending results
-        #self.response_finished = threading.Event()  # To signal when the response is complete
-
-        #self.model = "llama3.1:8b"
-        #self.model = "llama3.2"
         self.model = "gemma3:4b"
         self.ollama_client = ollama.Client(host='http://localhost:11434')
         self.pre_context = precontext.llama3_context
         self.voice_pre_context = precontext.voice_context
         self.current_conversation = None
-        # self.tools = tools.general_tools
 
         # for weather forecasts:
         self.weather_api_key = self.get_weather_key()
@@ -51,6 +44,7 @@ class CoreProcessor:
         self.ha_key = self.get_ha_key()
         self.ha_url = 'http://192.168.20.3:8123/api'
         self.home_assistant = HAClient(self.ha_url, self.ha_key)
+        self._ha_cache = {"stamp": 0.0, "text": ""}
 
         self.available_functions = {
             'close_voice_channel': self.close_voice_channel,
@@ -109,10 +103,12 @@ class CoreProcessor:
                     return line.split('=')[1].strip().strip('"')
 
     def add_ha_to_pre_context(self, pre_context):
-        """Adds the available Home Assistant connections to the pre-context"""
-        new_context_info = self.ha_get_available_switches_and_scenes()
-        pre_context += f"\n{new_context_info}"
-        return pre_context
+        # we only do this once every 30 seconds so we're not chewing time with each response:
+        now = time.time()
+        if now - self._ha_cache["stamp"] > 30:  # refresh every 30s
+            self._ha_cache["text"] = self.ha_get_available_switches_and_scenes()
+            self._ha_cache["stamp"] = now
+        return pre_context + f"\n{self._ha_cache['text']}"
 
     def add_voice_to_pre_context(self, pre_context):
         """Adds the voice commands to pre-context"""
