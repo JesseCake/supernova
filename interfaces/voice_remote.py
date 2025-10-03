@@ -163,7 +163,8 @@ class VoiceRemoteInterface:
         if close:
             await self._close_channel()
         else:
-            await self.send_beep(800, 0.10, 0.2)
+            #await self.send_beep(800, 0.10, 0.2)
+            pass
 
     async def _speak_text(self, text: str):
         if not text.strip():
@@ -181,7 +182,7 @@ class VoiceRemoteInterface:
     async def _open_channel(self):
         # Wake acknowledgement then "ready"
         await self._speak_text("I'm here")
-        await self.send_beep(300, 0.20, 0.2)
+        #await self.send_beep(300, 0.20, 0.2)
         # Tell client to start streaming speech now
         self.writer.write(pack_frame(b'RDY0'))
         await self.writer.drain()

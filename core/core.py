@@ -86,6 +86,14 @@ class CoreProcessor:
             for line in file:
                 if line.startswith("HA_API_KEY"):
                     return line.split('=')[1].strip().strip('"')
+                
+    def _wrap_tool_result(self, name, payload):
+        return json.dumps({
+            "tool_result": {
+                "name": name,
+                "content": payload
+            }
+        })
 
     def get_weather_key(self):
         """Pulls the Weather API key from file"""
@@ -323,13 +331,17 @@ class CoreProcessor:
                 "\n\n---\nTOOLS\n"
                 "You may use tools when helpful. Available tools (JSON schema):\n"
                 f"{tools_json}\n\n"
-                "Tool calling rules:\n"
-                '• If you decide to use a tool, reply with a SINGLE JSON object exactly like\n'
-                '  {"name":"<function_name>","parameters":{"arg1":<val>,"arg2":<val>}}\n'
-                "• Do not add extra keys, explanations, or backticks.\n"
-                "• When a message arrives from role 'tool', it will be JSON like {\"response\":\"...\"}.\n"
-                "  Use that value to continue the task or (if needed) call another tool.\n"
-                "• Only call one tool per message.\n"
+                "Tool-calling protocol:\n"
+                "1) To call a tool, reply with EXACTLY one JSON object on a single line:\n"
+                '   {"name":"<function_name>","parameters":{...}}\n'
+                "   - No backticks, no surrounding text, no extra keys.\n"
+                "2) After a tool runs, its result will arrive as a USER turn wrapped like:\n"
+                "   <TOOL_RESULT>\n"
+                '   {"tool_result":{"name":"<function_name>","content":{...}}}\n'
+                "   </TOOL_RESULT>\n"
+                "   - Read and use the JSON at tool_result.content.\n"
+                "3) If another tool is needed, repeat step (1). Otherwise, answer the user.\n"
+                "4) Only call ONE tool per message.\n"
             )
 
         if sys_text:
@@ -362,8 +374,10 @@ class CoreProcessor:
                 # Gemma template doesn't define a tool role. If you must include tool output,
                 # feed it back as a user turn.
                 parts.append("<start_of_turn>user\n")
-                parts.append(content)
-                parts.append("<end_of_turn>\n")
+                parts.append("<TOOL_RESULT>\n")
+                parts.append(content.strip())  # this is the JSON from _wrap_tool_result(...)
+                parts.append("\n</TOOL_RESULT>")
+                parts.append("\n<end_of_turn>\n")
                 if last:
                     parts.append("<start_of_turn>model\n")
 
@@ -541,7 +555,8 @@ class CoreProcessor:
         self.send_whole_response("Checking Time", session)
         now = datetime.now()
         now_time = now.strftime('%I:%M%p')
-        return json.dumps({'response': f'current time: {now_time}'})
+        #return json.dumps({'response': f'current time: {now_time}'})
+        return self._wrap_tool_result("get_current_time", {"text": f"current time: {now_time}"})
 
     def perform_math_operation(self, tool_args, session):
         self.send_whole_response("Calculating!", session)
@@ -559,22 +574,27 @@ class CoreProcessor:
                 result = number1 * number2
             elif operation == "division":
                 if number2 == 0:
-                    return json.dumps({"response": "Division by zero is undefined."})
+                    #return json.dumps({"response": "Division by zero is undefined."})
+                    return self._wrap_tool_result("perform_math_operation", {"text": "Division by zero is undefined."})
                 result = number1 / number2
             elif operation == "power":
                 result = math.pow(number1, number2)
             elif operation == "square_root":
                 if number1 < 0:
-                    return json.dumps({"response": "Square root of a negative number is undefined in real numbers."})
+                    #return json.dumps({"response": "Square root of a negative number is undefined in real numbers."})
+                    return self._wrap_tool_result("perform_math_operation", {"text": "Square root of a negative number is undefined in real numbers."})
                 result = math.sqrt(number1)
             else:
-                return json.dumps({"response": f"Operation '{operation}' is not supported."})
+                #return json.dumps({"response": f"Operation '{operation}' is not supported."})
+                return self._wrap_tool_result("perform_math_operation", {"text": f"Operation '{operation}' is not supported."})
 
             print(f"core: calculated result = {result}")
-            return json.dumps({"response": f"Result of {operation}: {result}"})
+            #return json.dumps({"response": f"Result of {operation}: {result}"})
+            return self._wrap_tool_result("perform_math_operation", {"text": f"Result of {operation}: {result}"})
 
         except Exception as e:
-            return json.dumps({"response": f"An error occurred: {str(e)}"})
+            #return json.dumps({"response": f"An error occurred: {str(e)}"})
+            return self._wrap_tool_result("perform_math_operation", {"text": f"An error occurred: {str(e)}"})
 
     def perform_search(self, tool_args, session):
         query = tool_args.get('parameters').get('query')
@@ -582,15 +602,18 @@ class CoreProcessor:
         num_responses = int(tool_args.get('parameters').get('number', 10))
 
         if source == 'web':
-            self.send_whole_response(f"Performing Google Search: '{query}'", session)
-            return self._perform_web_search(query, num_responses)
+            self.send_whole_response(f"Performing Google Search on '{query}'", session)
+            #return self._perform_web_search(query, num_responses)
+            return self._wrap_tool_result("perform_search", {"results": self._perform_web_search(query, num_responses)})
 
         elif source == 'wikipedia':
-            self.send_whole_response(f"Performing research on Wikipedia on subject: {query}", session)
-            return self._perform_wikipedia_search(query)
+            self.send_whole_response(f"Performing research on Wikipedia on subject {query}", session)
+            #return self._perform_wikipedia_search(query)
+            return self._wrap_tool_result("perform_search", {"results": self._perform_wikipedia_search(query)})
 
         else:
-            return json.dumps({'error': 'Invalid source specified. Choose "web" or "wikipedia".'})
+            #return json.dumps({'error': 'Invalid source specified. Choose "web" or "wikipedia".'})
+            return self._wrap_tool_result("perform_search", {"text": 'Invalid source specified. Choose "web" or "wikipedia".'})
 
     def _perform_web_search(self, query, num_responses):
         try:
@@ -603,7 +626,8 @@ class CoreProcessor:
                 results.append({'error': 'no results found, probably web search tool failure'})
             else:
                 # Add instruction for the LLM at the beginning of results
-                results.insert(0, {'instruction': 'If more information is required, open the websites of interest from the following results.'})
+                #results.insert(0, {'instruction': 'If more information is required, open the websites of interest from the following results.'})
+                pass
 
         except Exception as e:
             return json.dumps({'response': f'Error in web search: {e}'})
@@ -652,13 +676,16 @@ class CoreProcessor:
                 response = web_session.get(url)
                 response.html.render()
                 soup = BeautifulSoup(response.html.html, 'html.parser')
-                return json.dumps({'response': soup.get_text()})
+                #return json.dumps({'response': soup.get_text()})
+                return self._wrap_tool_result("open_website", {"text": soup.get_text()})
             except requests.exceptions.RequestException as e:
                 time.sleep(2)
             except Exception as e:
-                return json.dumps({'response': f'Unexpected error for {url}: {e}'})
+                #return json.dumps({'response': f'Unexpected error for {url}: {e}'})
+                return self._wrap_tool_result("open_website", {"text": f'Unexpected error for {url}: {e}'})
         self.send_whole_response(f"Opened Website: {url}", session)
-        return json.dumps({'response': f'Failed to open web link after {max_retries} attempts'})
+        #return json.dumps({'response': f'Failed to open web link after {max_retries} attempts'})
+        return self._wrap_tool_result("open_website", {"text": f'Failed to open web link after {max_retries} attempts'})
 
     def home_automation_action(self, tool_args, session):
         action_type = tool_args.get('parameters').get('action_type')
@@ -676,7 +703,8 @@ class CoreProcessor:
                 else:
                     switch.turn_off(entity_id=f"switch.{entity_id}")
 
-                return json.dumps({'response': f'Successfully switched {entity_id} {state}'})
+                #return json.dumps({'response': f'Successfully switched {entity_id} {state}'})
+                return self._wrap_tool_result("home_automation_action", {"text": f'Successfully switched {entity_id} {state}'})
 
             elif action_type == "activate_scene":
                 self.send_whole_response(f"Activating Scene '{entity_id}'", session)
@@ -684,15 +712,17 @@ class CoreProcessor:
                 scene = self.home_assistant.get_domain("scene")
                 scene.turn_on(entity_id=scene_id)
 
-                return json.dumps({'response': f'Successfully activated scene {scene_id}'})
+                #return json.dumps({'response': f'Successfully activated scene {scene_id}'})
+                return self._wrap_tool_result("home_automation_action", {"text": f'Successfully activated scene {scene_id}'})
 
             else:
-                return json.dumps({'response': 'Error: Invalid action type specified. Use "set_switch" or "activate_scene" with this tool.'})
+                #return json.dumps({'response': 'Error: Invalid action type specified. Use "set_switch" or "activate_scene" with this tool.'})
+                return self._wrap_tool_result("home_automation_action", {"text": 'Error: Invalid action type specified. Use "set_switch" or "activate_scene" with this tool.'})
 
         except Exception as e:
             # self.send_whole_response(f"Error in tool! {e}", session)
-            return json.dumps(
-                {'response': f'Error performing {action_type} on {entity_id}: {str(e)}. Consider the names of the entities you are trying to control.'})
+            #return json.dumps({'response': f'Error performing {action_type} on {entity_id}: {str(e)}. Consider the names of the entities you are trying to control.'})
+            return self._wrap_tool_result("home_automation_action", {"text": f'Error performing {action_type} on {entity_id}: {str(e)}. Consider the names of the entities you are trying to control.'})
 
     def ha_get_available_switches_and_scenes(self):
         """For adding to the end of your pre-context"""
@@ -792,11 +822,12 @@ class CoreProcessor:
                         'forecast': forecast_data
                     }
                     # self.send_whole_response(f"Forecast Result: {result}", session)
-                    return json.dumps({'check_weather': result})
+                    #return json.dumps({'check_weather': result})
+                    return self._wrap_tool_result("check_weather", {"forecast": result})
 
                 else:
-                    return json.dumps(
-                        {'check_weather': f"Failed to fetch forecast data: {weather_data.get('message', 'Unknown error')}"})
+                    #return json.dumps({'check_weather': f"Failed to fetch forecast data: {weather_data.get('message', 'Unknown error')}"})
+                    return self._wrap_tool_result("check_weather", {"text": f"Failed to fetch forecast data: {weather_data.get('message', 'Unknown error')}"})
 
             else:
                 # Get the current weather
@@ -820,14 +851,16 @@ class CoreProcessor:
                         'description': weather_desc
                     }
                     # self.send_whole_response(f"Current Result: {result}", session)
-                    return json.dumps({'check_weather': result})
+                    #return json.dumps({'check_weather': result})
+                    return self._wrap_tool_result("check_weather", {"current_weather": result})
 
                 else:
-                    return json.dumps(
-                        {'check_weather': f"Failed to fetch weather data: {weather_data.get('message', 'Unknown error')}"})
+                    #return json.dumps({'check_weather': f"Failed to fetch weather data: {weather_data.get('message', 'Unknown error')}"})
+                    return self._wrap_tool_result("check_weather", {"text": f"Failed to fetch weather data: {weather_data.get('message', 'Unknown error')}"})
 
         except Exception as e:
-            return json.dumps({'check_weather': f"Error fetching weather data: {str(e)}"})
+            #return json.dumps({'check_weather': f"Error fetching weather data: {str(e)}"})
+            return self._wrap_tool_result("check_weather", {"text": f"Error fetching weather data: {str(e)}"})
 
 
 
