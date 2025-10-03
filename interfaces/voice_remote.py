@@ -59,11 +59,13 @@ class VoiceRemoteInterface:
         self.tts_sample_rate = 22050
 
         # ASR / VAD
-        self.vad_detector = VoiceActivityDetector(threshold=0.7, frame_rate=self.listening_rate)
+        self.vad_detector = VoiceActivityDetector(threshold=0.5, frame_rate=self.listening_rate)
         self.transcriber = WhisperModel(model_size_or_path='tiny.en')
         self.frames_np = np.array([], dtype=np.float32)
         self.recording = False
         self.close_channel_phrase = "finish conversation"
+        self.last_voice_ts = None  # Timestamp of last received voice activity (so we can tune how long to wait before taking action)
+        self.vad_timeout = 0.7  # Seconds of silence to wait before considering utterance complete
 
         # TTS
         device = "cuda"
@@ -200,24 +202,38 @@ class VoiceRemoteInterface:
         self.reader, self.writer = reader, writer
         addr = writer.get_extra_info('peername')
         print(f"[voice_remote] satellite connected: {addr}")
+
+        #reset state
+        self.recording = False
+        self.last_voice_ts = None
+
         try:
             while True:
                 ftype, payload = await read_frame(reader)
                 if ftype in (b'OPEN', b'WAKE'):
                     await self._open_channel()
+
                 elif ftype == b'AUD0':
                     audio_frame = np.frombuffer(payload, dtype=np.int16).astype(np.float32) / 32768.0
                     if self.vad_detector(audio_frame=audio_frame):
+                        # Detected voice activity:
                         if not self.recording:
                             self.recording = True
+                        self.last_voice_ts = time.monotonic()  # mark latest speech
                         self._add_frames(audio_frame)
                     elif self.recording:
-                        await self._transcribe_buffer()
-                        self.recording = False
+                        # if we've had the threshold of silence, consider utterance complete:
+                        if self.last_voice_ts is not None and (time.monotonic() - self.last_voice_ts) > self.vad_timeout:
+                            await self._transcribe_buffer()
+                            self.recording = False
+                            self.last_voice_ts = None
+
                 elif ftype == b'STOP':
                     if self.recording:
                         await self._transcribe_buffer()
                         self.recording = False
+                        self.last_voice_ts = None
+                        
                 else:
                     # ignore unknown tags for forward-compat
                     pass
