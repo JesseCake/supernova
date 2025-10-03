@@ -55,8 +55,8 @@ class VoiceRemoteInterface:
 
         # Audio IO config
         self.listening_rate = listening_rate
-        self.speaking_rate = 44100
-        self.tts_sample_rate = 24000
+        self.speaking_rate = 16000
+        self.tts_sample_rate = 22050
 
         # ASR / VAD
         self.vad_detector = VoiceActivityDetector(threshold=0.7, frame_rate=self.listening_rate)
