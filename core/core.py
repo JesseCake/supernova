@@ -77,6 +77,7 @@ class CoreProcessor:
             'response_finished': threading.Event(),
             'close_voice_channel': threading.Event(),  # for flagging channel close from functions in voice mode
             'cancel_event': threading.Event(),  # for cancelling current processing - tells LLM to stop!
+            'ollama_stream': None,  # to hold the current ollama stream object so we can kill it if interrupting
         }
 
     def _flush_queue(self, q: queue.Queue):
@@ -239,11 +240,24 @@ class CoreProcessor:
         session['cancel_event'].set()
         # Drop any text already queued to speak
         self._flush_queue(session['response_queue'])
-        # Unblock the speaker loop immediately
-        #try:
-        #    session['response_queue'].put_nowait(None)
-        #except Exception:
-        #    pass
+
+        # hard abort the current ollama stream if present:
+        stream = session.get('ollama_stream')
+        if stream is not None:
+            try:
+                close = getattr(stream, "close", None)
+                if callable(close):
+                    close()
+            except Exception as e:
+                print(f"[core] Error closing ollama stream: {e}")
+            finally:
+                session['ollama_stream'] = None
+
+        # drop any already-buffered text so the TTS side stops immediately:
+        self._flush_queue(session['response_queue'])
+
+        return
+
 
     
     def process_input(self, input_text, session_id, is_voice=False):
