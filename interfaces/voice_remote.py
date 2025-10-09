@@ -40,6 +40,7 @@ class VoiceRemoteInterface:
     Client frames -> server:
       - b"WAKE" or b"OPEN": no payload. Ask server to acknowledge.
       - b"AUD0": int16 mono 16k PCM chunk.
+      - b"INT0": no payload. Interrupt (cancel) any current TTS and accept new AUD0 immediately.
       - b"STOP": no payload. End-of-utterance / flush.
 
     Server frames -> client:
@@ -60,7 +61,7 @@ class VoiceRemoteInterface:
 
         # ASR / VAD
         self.vad_detector = VoiceActivityDetector(threshold=0.5, frame_rate=self.listening_rate)
-        self.transcriber = WhisperModel(model_size_or_path='tiny.en')
+        self.transcriber = WhisperModel(model_size_or_path='base.en')  # originally we started with tiny.en
         self.frames_np = np.array([], dtype=np.float32)
         self.recording = False
         self.close_channel_phrase = "finish conversation"
@@ -84,6 +85,13 @@ class VoiceRemoteInterface:
         # Connection state
         self.reader: Optional[asyncio.StreamReader] = None
         self.writer: Optional[asyncio.StreamWriter] = None
+        # interruption event to interrupt TTS playback if needed
+        self.interrupt_event = asyncio.Event()   # when set: abort any ongoing TTS send
+        self._last_int0_ts = 0.0                 # debug/telemetry only
+        self._speak_task: Optional[asyncio.Task] = None
+
+        # Half-duplex RX gate: when True we ignore AUD0/VAD
+        self.rx_paused = False 
 
     # ------------------ protocol helpers ------------------
     async def send_text(self, tag: bytes, text: str):
@@ -95,8 +103,19 @@ class VoiceRemoteInterface:
         # 2 bytes per sample
         step = chunk_samples * 2
         for i in range(0, len(mv), step):
-            self.writer.write(pack_frame(tag, mv[i:i + step].tobytes()))
-        await self.writer.drain()
+
+            # >>> NEW: honor barge-in
+            if self.interrupt_event.is_set():
+                break
+            
+            try:
+                self.writer.write(pack_frame(tag, mv[i:i + step].tobytes()))
+            except Exception as e:
+                print(f"[voice_remote] send_pcm_int16 write error: {e}")
+                break
+        
+            await self.writer.drain()
+            await asyncio.sleep(0)  # cooperative yield to allow interrupt
 
     async def send_beep(self, freq=800, duration=0.15, volume=0.6):
         sr = self.speaking_rate
@@ -106,6 +125,16 @@ class VoiceRemoteInterface:
         audio_int16 = (tone * 32767).astype(np.int16)
         await self.send_pcm_int16(b'BEEP', audio_int16)
 
+    def _interrupt_now(self):
+        """Raise the barge-in flag; any send loops will stop at next chunk."""
+        self._last_int0_ts = time.monotonic()
+        self.interrupt_event.set()
+
+    def _clear_interrupt(self):
+        """Lower the barge-in flag so future TTS can proceed."""
+        if self.interrupt_event.is_set():
+            self.interrupt_event.clear()
+
     # ------------------ core plumbing ------------------
     def _add_frames(self, frame_np: np.ndarray):
         if self.frames_np.size == 0:
@@ -114,13 +143,13 @@ class VoiceRemoteInterface:
             self.frames_np = np.concatenate((self.frames_np, frame_np), axis=0)
 
     async def _contact_core(self, input_text: str) -> bool:
-        print(f"[debug] start new session..")
+        #print(f"[debug] start new session..")
         if self.session_id is None:
             self.session_id = str(uuid.uuid4())
             self.core_processor.create_session(self.session_id)
 
             # send immediate response so we know we're live
-            print(f"[debug] sending 'Working' TTS")
+            #print(f"[debug] sending 'Working' TTS")
             await self._speak_text("Working")
 
         # Kick processing in a thread so we can stream out TTS
@@ -135,6 +164,10 @@ class VoiceRemoteInterface:
 
         session = self.core_processor.get_session(self.session_id)
         buffer = ""
+
+        # keep the server side half duplex RX gate closed until we finish TTS
+        self.rx_paused = True
+
         while True:
             # block in a thread so the event loop sleeps until a chunk arrives
             chunk = await asyncio.to_thread(session['response_queue'].get)
@@ -148,12 +181,26 @@ class VoiceRemoteInterface:
                 sent = sent.strip().replace("*", "")  # remove * which would be read out loud
                 if sent.strip():
                     #print(f"[voice_debug] speaking sentence: {sent.strip()}")
+                    #Barge in check:
+                    if self.interrupt_event.is_set():
+                        # drop buffered text; exit early so we pivot to the user's barge-in
+                        buffer = ""
+                        break
                     await self._speak_text(sent.strip())
             buffer = sentences[-1]
+
+        if self.interrupt_event.is_set():
+            # drop buffered text; exit early so we pivot to the user's barge-in
+            buffer = ""
 
         if buffer.strip():
             #print(f"[voice_debug] speaking final buffer: {buffer.strip()}")
             await self._speak_text(buffer.strip())
+
+        # speaking is finished:
+        self.rx_paused = False
+        self.writer.write(pack_frame(b'RDY0'))  # optional - aligns with client
+        await self.writer.drain()
 
         return session['close_voice_channel'].is_set()
 
@@ -177,12 +224,17 @@ class VoiceRemoteInterface:
             await self._close_channel()
             return
 
-        close = await self._contact_core(text)
-        if close:
-            await self._close_channel()
-        else:
-            #await self.send_beep(800, 0.10, 0.2)
+        
+        if self._speak_task and not self._speak_task.done():
             pass
+        self._speak_task = asyncio.create_task(self._contact_core(text))
+
+        #close = await self._contact_core(text)
+        #if close:
+        #    await self._close_channel()
+        #else:
+        #    #await self.send_beep(800, 0.10, 0.2)
+        #    pass
 
     async def _speak_text(self, text: str):
         if not text.strip():
@@ -230,11 +282,16 @@ class VoiceRemoteInterface:
                     await self._open_channel()
 
                 elif ftype == b'AUD0':
+                    if self.rx_paused:
+                        continue  # ignore incoming audio while we're speaking or processing
+
                     audio_frame = np.frombuffer(payload, dtype=np.int16).astype(np.float32) / 32768.0
                     if self.vad_detector(audio_frame=audio_frame):
                         # Detected voice activity:
                         if not self.recording:
                             self.recording = True
+                            # NEW: first speech after interrup -> allow future TTS again
+                            self._clear_interrupt()
                         self.last_voice_ts = time.monotonic()  # mark latest speech
                         self._add_frames(audio_frame)
                     elif self.recording:
@@ -243,6 +300,35 @@ class VoiceRemoteInterface:
                             await self._transcribe_buffer()
                             self.recording = False
                             self.last_voice_ts = None
+
+                elif ftype == b'INT0':
+                    # Client requests immediate stop of any TTS (barge-in).
+                    print(f"[voice_remote] received INT0 (barge-in)")
+                    self._interrupt_now()
+
+                    # optional: cancel the task wrapper (the code inside checks interrupt_event anyway)
+                    if self._speak_task and not self._speak_task.done():
+                        # don't hard cancel mid-CPU; just let it hit its interrupt checks
+                        pass
+
+                    # tell the Core to stop generating and stop enqueueing
+                    if self.session_id is not None:
+                        try:
+                            self.core_processor.cancel_active_response(self.session_id)  # ← NEW
+                        except Exception as e:
+                            print(f"[voice_remote] cancel error: {e}")
+
+                    # Reset partial-ASR capture so the next speech is a clean utterance.
+                    self.frames_np = np.array([], dtype=np.float32)
+                    self.recording = False
+                    self.last_voice_ts = None
+
+                    # re-arm listening:
+                    self.rx_paused = False
+                    self.writer.write(pack_frame(b'RDY0'))  # ready for more audio
+
+                    # Optional UX cue:
+                    # await self.send_beep(1000, 0.06, 0.3)
 
                 elif ftype == b'STOP':
                     if self.recording:

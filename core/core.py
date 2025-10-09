@@ -76,7 +76,15 @@ class CoreProcessor:
             'response_queue': queue.Queue(),
             'response_finished': threading.Event(),
             'close_voice_channel': threading.Event(),  # for flagging channel close from functions in voice mode
+            'cancel_event': threading.Event(),  # for cancelling current processing - tells LLM to stop!
         }
+
+    def _flush_queue(self, q: queue.Queue):
+        try:
+            with q.mutex:
+                q.queue.clear()
+        except Exception:
+            pass
     
     def get_session(self, session_id):
         return self.sessions.get(session_id)
@@ -223,17 +231,33 @@ class CoreProcessor:
         pre_context += self.voice_pre_context()
         return pre_context
 
-    def process_input(self, input_text, session_id, is_voice=False):
-        print(f"[DEBUG] process_input called: session_id={session_id}, input_text={input_text!r}, is_voice={is_voice}")
+    def cancel_active_response(self, session_id: str):
+        session = self.get_session(session_id)
+        if not session:
+            return
+        # Signal the streaming loop to stop
+        session['cancel_event'].set()
+        # Drop any text already queued to speak
+        self._flush_queue(session['response_queue'])
+        # Unblock the speaker loop immediately
+        try:
+            session['response_queue'].put_nowait(None)
+        except Exception:
+            pass
 
+    
+    def process_input(self, input_text, session_id, is_voice=False):
         # Retrieve the session-specific data - NOT SURE IF NEEDED NOW:
         session = self.get_session(session_id)
         if session is None:
+            print(f"Session ID {session_id} not found, creating new session...", end='')
             self.create_session(session_id)
             session = self.get_session(session_id)
+            print(f"done: session ID {session_id}")
 
         # clear the response_finished event at the start:
         session['response_finished'].clear()
+        session['cancel_event'].clear()
 
         # as well as close_voice_channel event flag if relevant
         if is_voice:
@@ -553,6 +577,7 @@ class CoreProcessor:
         (full_response: str, tool_message: dict|None, tool_name: str|None)
         """
         response_queue = session['response_queue']
+        cancel_event = session['cancel_event']
 
         try:
             full_response = ""
@@ -596,6 +621,14 @@ class CoreProcessor:
             for chunk in response_stream:
                 #debugging responses:
                 #print(f"{chunk}")
+
+                # new cancel logic if interrupted:
+                if cancel_event and cancel_event.is_set():
+                    # add that the user interrupted:
+                    print(f"[core] response cancelled by user")
+                    full_response += "\n[User interrupted]\n"
+                    # stop streaming further tokens
+                    break
 
                 if raw_mode is True:
                     response_content = chunk.get('response', '')
@@ -641,7 +674,7 @@ class CoreProcessor:
                                 try:
                                     # try to parse the accumulated JSON (after normalizing quotes which is a problem sometimes):
                                     tool_call = json.loads(_normalize_possible_json(json_accumulator.strip()))
-                                    print(f"\n[DEBUG] Detected JSON: {tool_call}\n")
+                                    #print(f"\n[DEBUG] Detected JSON: {tool_call}\n")
 
                                 except json.JSONDecodeError:
                                     tool_call = None
