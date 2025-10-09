@@ -250,13 +250,20 @@ class VoiceRemoteInterface:
         await self.send_pcm_int16(b'TTS0', audio_int16)
 
     async def _open_channel(self):
-        # Wake acknowledgement then "ready"
+        print(f"[voice_remote] satellite opened channel")
+        
+
         await self._speak_text("I'm here")
         #await self.send_beep(300, 0.20, 0.2)
         # Tell client to start streaming speech now
+        await self.writer.drain()
+
+        # Wake acknowledgement then "ready"
         self.writer.write(pack_frame(b'RDY0'))
         await self.writer.drain()
 
+        self.rx_paused = False  # open the RX gate
+        
     async def _close_channel(self):
         self.session_id = None
         for _ in range(3):
@@ -282,13 +289,16 @@ class VoiceRemoteInterface:
                     await self._open_channel()
 
                 elif ftype == b'AUD0':
+                    #print(f"[voice_remote] received AUD0 ({len(payload)} bytes)")
                     if self.rx_paused:
+                        #print(f"[voice_remote] RX paused, ignoring AUD0")
                         continue  # ignore incoming audio while we're speaking or processing
 
                     audio_frame = np.frombuffer(payload, dtype=np.int16).astype(np.float32) / 32768.0
                     if self.vad_detector(audio_frame=audio_frame):
                         # Detected voice activity:
                         if not self.recording:
+                            #print(f"[voice_remote] VAD detected speech, start recording")
                             self.recording = True
                             # NEW: first speech after interrup -> allow future TTS again
                             self._clear_interrupt()
@@ -297,6 +307,7 @@ class VoiceRemoteInterface:
                     elif self.recording:
                         # if we've had the threshold of silence, consider utterance complete:
                         if self.last_voice_ts is not None and (time.monotonic() - self.last_voice_ts) > self.vad_timeout:
+                            #print(f"[voice_remote] VAD timeout, end of utterance: transcribing..")
                             await self._transcribe_buffer()
                             self.recording = False
                             self.last_voice_ts = None
