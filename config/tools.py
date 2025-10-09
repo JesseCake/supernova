@@ -11,13 +11,13 @@ general_tools = [
         'type': 'function',
         'function': {
             'name': 'perform_search',
-            'description': 'Perform a search on Google or Wikipedia. (do not use for simple calculation you can do yourself)',
+            'description': 'Perform a search on the Web or Wikipedia, then use results to answer the user (do not use for simple calculation you can do yourself)',
             'parameters': {
                 'type': 'object',
                 'properties': {
                     'query': {
                         'type': 'string',
-                        'description': 'The query to search with.'
+                        'description': 'Search query.'
                     },
                     'source': {
                         'type': 'string',
@@ -122,6 +122,53 @@ general_tools = [
                 "dependencies": {
                     "number2": ["addition", "subtraction", "multiplication", "division", "power"]
                 }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_behaviour",
+            "description": "Add a concise, enforceable behaviour rule that will be appended to the system prompt for future turns.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "rule": {
+                        "type": "string",
+                        "description": "Short imperative rule, e.g. 'For voice, keep replies ≤ 10 words.'"
+                    }
+                },
+                "required": ["rule"],
+                "additionalProperties": False
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "remove_behaviour",
+            "description": "Remove a previously added behaviour rule (exact text match).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "rule": {
+                        "type": "string",
+                        "description": "Exact rule text to remove."
+                    }
+                },
+                "required": ["rule"],
+                "additionalProperties": False
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_behaviour",
+            "description": "List all active behaviour rules that will be appended to the system message.",
+            "parameters": {
+                "type": "object",
+                "properties": {}
             }
         }
     },

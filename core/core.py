@@ -25,6 +25,7 @@ from homeassistant_api import Client as HAClient
 
 # our precontext and tools info:
 from config import precontext, tools
+import tempfile
 
 
 class CoreProcessor:
@@ -36,6 +37,14 @@ class CoreProcessor:
         self.pre_context = precontext.llama3_context
         self.voice_pre_context = precontext.voice_context
         self.current_conversation = None
+
+        # for self edited behaviour rules:
+        self._behaviour_lock = threading.Lock()
+        self._behaviour_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                        "../config/behaviour_overrides.json")
+        self._behaviour_mtime = 0.0
+        self.behaviour_overrides = {"global": []}
+        self._load_behaviour_overrides(force=True)
 
         # for weather forecasts:
         self.weather_api_key = self.get_weather_key()
@@ -54,6 +63,9 @@ class CoreProcessor:
             'home_automation_action': self.home_automation_action,
             'check_weather': self.check_weather,
             'perform_math_operation': self.perform_math_operation,
+            'update_behaviour': self.update_behaviour,
+            'remove_behaviour': self.remove_behaviour,
+            'list_behaviour': self.list_behaviour,
         }
 
     def create_session(self, session_id):
@@ -65,8 +77,104 @@ class CoreProcessor:
             'response_finished': threading.Event(),
             'close_voice_channel': threading.Event(),  # for flagging channel close from functions in voice mode
         }
+    
     def get_session(self, session_id):
         return self.sessions.get(session_id)
+    
+    def _load_behaviour_overrides(self, force=False):
+        """Load overrides from disk; if not force, only reload when mtime changed."""
+        try:
+            st = os.stat(self._behaviour_path)
+            mtime = st.st_mtime
+        except FileNotFoundError:
+            if force:
+                self.behaviour_overrides = {"global": []}
+                self._behaviour_mtime = 0.0
+            return
+
+        if not force and mtime == self._behaviour_mtime:
+            return  # up-to-date
+
+        try:
+            with open(self._behaviour_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            rules = data.get("global", [])
+            # sanitize: strings only, de-dupe, cap lengths/count
+            seen, out = set(), []
+            for r in rules:
+                if isinstance(r, str):
+                    r = r.strip()[:200]
+                    if r and r not in seen:
+                        seen.add(r); out.append(r)
+            self.behaviour_overrides = {"global": out[:20]}
+            self._behaviour_mtime = mtime
+            print(f"[behaviour] reloaded {len(out)} rule(s)")
+        except Exception as e:
+            print(f"[behaviour] load error: {e}")
+
+    def _save_behaviour_overrides(self):
+        os.makedirs(os.path.dirname(self._behaviour_path), exist_ok=True)
+        payload = {"global": self.behaviour_overrides.get("global", [])[:20]}
+
+        # atomic write
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(self._behaviour_path), prefix=".beh.tmp.")
+
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, ensure_ascii=False)
+            os.replace(tmp, self._behaviour_path)
+            # update cached mtime to avoid immediate re-read
+            try:
+                self._behaviour_mtime = os.stat(self._behaviour_path).st_mtime
+            except Exception:
+                pass
+        finally:
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except Exception:
+                pass
+
+    def update_behaviour(self, tool_args, session):
+        rule = ((tool_args.get("parameters") or {}).get("rule") or "").strip()
+        if not rule:
+            return self._wrap_tool_result("update_behaviour", {"text":"No rule provided"})
+        rule = rule[:200]
+        with self._behaviour_lock:
+            lst = self.behaviour_overrides.setdefault("global", [])
+            if rule not in lst:
+                lst.append(rule)
+                self._save_behaviour_overrides()
+        self.send_whole_response("Added Behaviour Rule.", session)
+        return self._wrap_tool_result("update_behaviour", {"text": "Rule added"})
+
+    def remove_behaviour(self, tool_args, session):
+        rule = ((tool_args.get("parameters") or {}).get("rule") or "").strip()
+        with self._behaviour_lock:
+            lst = self.behaviour_overrides.setdefault("global", [])
+            if rule in lst:
+                lst.remove(rule)
+                self._save_behaviour_overrides()
+                msg = "Rule removed"
+            else:
+                msg = "Rule not found"
+        self.send_whole_response("Removed Behaviour Rule.", session)
+        return self._wrap_tool_result("remove_behaviour", {"text": msg})
+
+    def list_behaviour(self, tool_args, session):
+        """Return all active behavior rules that will be appended to the system message."""
+        with self._behaviour_lock:
+            rules = self.behaviour_overrides.get("global", [])
+
+        if not rules:
+            message = "No behaviour rules are currently active."
+        else:
+            # Build a friendly summary for voice/text
+            message = "Current behaviour rules:\n" + "\n".join(f"- {r}" for r in rules)
+
+        # Send it as a streaming/queued response so the voice interface can read it
+        self.send_whole_response("Listing behaviour rules", session)
+        return self._wrap_tool_result("list_behaviour", {"rules": rules})
 
     def get_ha_key(self):
         """Pulls the Home Assistant API key from file"""
@@ -270,6 +378,10 @@ class CoreProcessor:
         return prompt
 
     def create_system_message(self, voice=False):
+        # pick up external/tool edits before building system text
+        with self._behaviour_lock:
+            self._load_behaviour_overrides(force=False)
+
         full_pre_context = self.pre_context
 
         if voice:
@@ -277,6 +389,11 @@ class CoreProcessor:
 
         # we add this each time so we have up to date info from Home Assistant:
         full_pre_context = self.add_ha_to_pre_context(full_pre_context)
+
+        # append behaviour block if present
+        rules = self.behaviour_overrides.get("global", [])
+        if rules:
+            full_pre_context += "\n\n[BEHAVIOUR_OVERRIDES]\n" + "\n".join(f"- {r}" for r in rules)
 
         system_section = {
             'role': 'system',
@@ -503,6 +620,11 @@ class CoreProcessor:
                         #    backtick_buffer = ""  # this way we only accumulate on consecutive backticks
 
                         # receiving json:
+                        def _normalize_possible_json(s: str) -> str:
+                            # Replace Unicode curly quotes / apostrophes with ASCII - sometimes a problem
+                            return (s.replace('\u201c', '"').replace('\u201d', '"')   # “ ”
+                                    .replace('\u2018', "'").replace('\u2019', "'")) # ‘ ’
+
                         if char == '{':
                             if not json_collecting:
                                 json_collecting = True
@@ -517,7 +639,8 @@ class CoreProcessor:
                             if json_brackets == 0:
                                 tool_call = None
                                 try:
-                                    tool_call = json.loads(json_accumulator.strip())
+                                    # try to parse the accumulated JSON (after normalizing quotes which is a problem sometimes):
+                                    tool_call = json.loads(_normalize_possible_json(json_accumulator.strip()))
                                     print(f"\n[DEBUG] Detected JSON: {tool_call}\n")
 
                                 except json.JSONDecodeError:
