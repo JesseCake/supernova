@@ -116,7 +116,7 @@ class CoreProcessor:
         return pre_context
 
     def process_input(self, input_text, session_id, is_voice=False):
-        #print(f"[DEBUG] process_input called: session_id={session_id}, input_text={input_text!r}, is_voice={is_voice}")
+        print(f"[DEBUG] process_input called: session_id={session_id}, input_text={input_text!r}, is_voice={is_voice}")
 
         # Retrieve the session-specific data - NOT SURE IF NEEDED NOW:
         session = self.get_session(session_id)
@@ -165,55 +165,39 @@ class CoreProcessor:
 
         while True:
             #print(f"[DEBUG] Sending prompt to LLM: prompt={prompt}, system_message={system_message}, tools={prompt_tools}")
-            full_response, tool_calls = self.send_to_ollama(prompt_text=prompt, prompt_system=system_message, prompt_tools=prompt_tools, session=session, raw_mode=True)
+            full_response, tool_msg, tool_name = self.send_to_ollama(
+                prompt_text=prompt, 
+                prompt_system=system_message, 
+                prompt_tools=prompt_tools, 
+                session=session, 
+                raw_mode=True,
+                available_functions=self.available_functions
+                )
 
+            # We then record the outputs and actions in the conversation history:
             if full_response:
                 conversation_history.append({
                     'role': 'assistant',
                     'content': full_response
                 })
 
-            if tool_calls:
-                # Debugging:
-                # print(f"TOOL CALLS RECEIVED: {tool_calls}")
+            if tool_msg:
+                # add tool output to history and loop again
+                conversation_history.append(tool_msg)
 
-                for tool in tool_calls:
-                    try:
-                        function_to_call = self.available_functions[tool['name']]
-                        function_response = function_to_call(tool_args=tool, session=session)
-
-                        if function_response is not None:
-                            # debugging:
-                            print(f"core: Function response: {function_response}")
-
-                            if conversation_history:
-                                conversation_history.append({
-                                        'role': 'tool',
-                                        'content': function_response
-                                })
-
-                    except Exception as e:
-                        print(f"Error in tool call: {e}")
-                        conversation_history.append({
-                                'role': 'tool',
-                                'content': f'Error with tool, or bad use of tool: {e}',
-                        })
-                
-                # leave the loop if close conversation is called:
-                if any(tool.get("name") == "close_voice_channel" for tool in tool_calls):
-                    #print("[DEBUG] Detected close_voice_channel in tool_calls; breaking loop.")
+                if tool_name == "close_voice_channel":
                     break
 
-                # update the prompt for next spin around for tool call response routines:
+                # rebuild prompt to let the model see the tool result
                 prompt = self.update_prompt(conversation_history)
+                continue
 
             else:
                 break
 
         # if we break out of loop, set that we've finished to calling thread:
-        #self.send_whole_response(self.end_of_message, session)
+        print("core: Finished processing input and response")
         self.response_finished(session)
-        #session['response_finished'].set()
 
         # print('\ncore: Finishing processing input and response')
 
@@ -440,13 +424,24 @@ class CoreProcessor:
 
         return prompt_text.strip()
 
-    def send_to_ollama(self, prompt_text, prompt_system, prompt_tools, session, raw_mode=False):
-        """Sends request to Ollama, processes return along with tool calls, streams response to message queue"""
+    def send_to_ollama(self, prompt_text, prompt_system, prompt_tools, session, raw_mode=False, available_functions=None):
+        """
+        Streams model output to response_queue. If a tool call JSON is detected,
+        immediately:
+        - push a short pre-feedback line to the queue,
+        - execute the tool here,
+        - return early with the tool message for conversation history.
+
+        Returns:
+        (full_response: str, tool_message: dict|None, tool_name: str|None)
+        """
         response_queue = session['response_queue']
 
         try:
             full_response = ""
             tool_calls = []
+            tool_message = None
+            tool_name_detected = None
 
             json_accumulator = ""
             json_collecting = False
@@ -491,38 +486,73 @@ class CoreProcessor:
                     response_content = chunk.get('message', {}).get('content', '')
 
                 #debugging responses:
-                print(f"{response_content}", end="")
+                #print(f"{response_content}", end="")
 
                 full_response += response_content
 
                 if response_content:
                     for char in response_content:
+                        # disable code blocks for now:
                         # receiving code/not receiving code:
-                        if char == '`':
-                            backtick_buffer += '`'
-                            if backtick_buffer == "```":
-                                inside_code_block = not inside_code_block
-                                backtick_buffer = "" # reset buffer
-                        else:
-                            backtick_buffer = ""  # this way we only accumulate on consecutive backticks
+                        #if char == '`':
+                        #    backtick_buffer += '`'
+                        #    if backtick_buffer == "```":
+                        #        inside_code_block = not inside_code_block
+                        #        backtick_buffer = "" # reset buffer
+                        #else:
+                        #    backtick_buffer = ""  # this way we only accumulate on consecutive backticks
 
                         # receiving json:
-                        if char == '{' and not inside_code_block:
+                        if char == '{':
                             if not json_collecting:
                                 json_collecting = True
                                 json_accumulator = ""
                             json_brackets += 1
+
                         if json_collecting:
                             json_accumulator += char
-                        if char == '}' and not inside_code_block:
+
+                        if char == '}':
                             json_brackets -= 1
                             if json_brackets == 0:
+                                tool_call = None
                                 try:
-                                    response_json = json.loads(json_accumulator.strip())
-                                    tool_calls.append(response_json)
+                                    tool_call = json.loads(json_accumulator.strip())
+                                    print(f"\n[DEBUG] Detected JSON: {tool_call}\n")
 
                                 except json.JSONDecodeError:
-                                    pass
+                                    tool_call = None
+                                    print(f"\n[DEBUG] JSON decode error for: {json_accumulator}\n")
+
+                                # reset collectors in case of other tools:
+                                json_collecting = False
+                                json_accumulator = ""
+                                
+                                if tool_call and isinstance(tool_call, dict) and "name" in tool_call:
+                                    tool_name_detected = tool_call["name"]
+                                    params = tool_call.get("parameters", {}) or {}
+                                    print(f"[DEBUG] Tool detected: {tool_name_detected} with params {params}")
+
+                                    # Execute the tool call immediately:
+                                    try:
+                                        fn = (available_functions or {}).get(tool_name_detected)
+                                        if fn is None:
+                                            print(f"core: tool {tool_name_detected} not found")
+                                            wrapped = self._wrap_tool_result(tool_name_detected, {"text": "Unknown tool"})
+                                        else:
+                                            print(f"core: executing tool {tool_name_detected} with params {params}")
+                                            wrapped = fn(tool_args=tool_call, session=session)  # your tools already return wrapped JSON
+
+                                        # 3) prepare a tool message for history
+                                        tool_message = {'role': 'tool', 'content': wrapped}
+
+                                    except Exception as e:
+                                        wrapped = self._wrap_tool_result(tool_name_detected, {"text": f"Tool error: {e}"})
+                                        tool_message = {'role': 'tool', 'content': wrapped}
+
+                                    # return early with the tool message for conversation history:
+                                    return full_response, tool_message, tool_name_detected
+
 
                     if not json_collecting and not inside_code_block:
                         # send the non-tool call response chunk back to the response thread live:
@@ -530,14 +560,14 @@ class CoreProcessor:
                         response_queue.put(response_content)
 
             # return the full response when finished for chat history, along with tool calls to process:
-            return full_response, tool_calls
+            return full_response, None, None
 
         except Exception as e:
             response_queue.put(f"\nError in processing Ollama response: {e}")
-            return f"Error in processing Ollama response: {e}", None
+            return f"Error in processing Ollama response: {e}", None, None
 
     def send_whole_response(self, response_text, session):
-        session['response_queue'].put(f"{response_text}  \n")
+        session['response_queue'].put(f"{response_text}")
 
     def response_finished(self, session):
         session['response_queue'].put(None)
@@ -548,7 +578,7 @@ class CoreProcessor:
         session['close_voice_channel'].set()
 
     def get_current_time(self, tool_args, session):
-        self.send_whole_response("Checking Time", session)
+        self.send_whole_response("Checking Time.", session)
         now = datetime.now()
         now_time = now.strftime('%I:%M%p')
         #return json.dumps({'response': f'current time: {now_time}'})
@@ -598,12 +628,12 @@ class CoreProcessor:
         num_responses = int(tool_args.get('parameters').get('number', 10))
 
         if source == 'web':
-            self.send_whole_response(f"Performing Google Search on '{query}'", session)
+            self.send_whole_response(f"Performing Google Search on '{query}'.", session)
             #return self._perform_web_search(query, num_responses)
             return self._wrap_tool_result("perform_search", {"results": self._perform_web_search(query, num_responses)})
 
         elif source == 'wikipedia':
-            self.send_whole_response(f"Performing research on Wikipedia on subject {query}", session)
+            self.send_whole_response(f"Performing research on Wikipedia on subject {query}.", session)
             #return self._perform_wikipedia_search(query)
             return self._wrap_tool_result("perform_search", {"results": self._perform_wikipedia_search(query)})
 
@@ -679,7 +709,7 @@ class CoreProcessor:
             except Exception as e:
                 #return json.dumps({'response': f'Unexpected error for {url}: {e}'})
                 return self._wrap_tool_result("open_website", {"text": f'Unexpected error for {url}: {e}'})
-        self.send_whole_response(f"Opened Website: {url}", session)
+        self.send_whole_response(f"Opened Website: {url}.", session)
         #return json.dumps({'response': f'Failed to open web link after {max_retries} attempts'})
         return self._wrap_tool_result("open_website", {"text": f'Failed to open web link after {max_retries} attempts'})
 
@@ -692,7 +722,7 @@ class CoreProcessor:
             if action_type == "set_switch":
                 state = tool_args.get('parameters').get('state')
                 switch = self.home_assistant.get_domain("switch")
-                self.send_whole_response(f"{entity_id} {state}", session)
+                self.send_whole_response(f"{entity_id} {state}.", session)
 
                 if state == "on":
                     switch.turn_on(entity_id=f"switch.{entity_id}")
@@ -703,7 +733,7 @@ class CoreProcessor:
                 return self._wrap_tool_result("home_automation_action", {"text": f'Successfully switched {entity_id} {state}'})
 
             elif action_type == "activate_scene":
-                self.send_whole_response(f"Activating Scene '{entity_id}'", session)
+                self.send_whole_response(f"Activating Scene '{entity_id}'.", session)
                 scene_id = f"scene.{entity_id}"
                 scene = self.home_assistant.get_domain("scene")
                 scene.turn_on(entity_id=scene_id)
@@ -793,11 +823,11 @@ class CoreProcessor:
         location = tool_args.get('parameters').get('location', 'Brunswick, VIC, Australia')
         #location = "Brunswick, VIC, Australia"
         forecast = tool_args.get('parameters').get('forecast', False)
-        self.send_whole_response(f"Fetching weather for {location}", session)
+        self.send_whole_response(f"Fetching weather for {location}.", session)
 
         try:
             if forecast:
-                self.send_whole_response("Fetching 5 day forecast", session)
+                self.send_whole_response("Fetching 5 day forecast.", session)
                 # Get the 5-day forecast
                 url = f"http://api.openweathermap.org/data/2.5/forecast?q={location}&appid={self.weather_api_key}&units=metric"
                 response = requests.get(url)
@@ -827,7 +857,7 @@ class CoreProcessor:
 
             else:
                 # Get the current weather
-                self.send_whole_response("Fetching current weather", session)
+                self.send_whole_response("Fetching current weather.", session)
                 url = f"http://api.openweathermap.org/data/2.5/weather?q={location}&appid={self.weather_api_key}&units=metric"
                 response = requests.get(url)
                 weather_data = response.json()

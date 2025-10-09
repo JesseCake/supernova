@@ -73,7 +73,13 @@ class VoiceRemoteInterface:
         self._tts_device = device
         self.speech_speed = 1.0
         self.speech_speaker = 'p376'
-        self.sentence_endings = re.compile(r'(?<=[.!?])\s+')
+        # Split after ., !, or ? followed by whitespace (or newline / EoS),
+        # but only if NOT immediately followed by a digit (negative lookahead)
+        self.sentence_endings = re.compile(
+            r'(?:(?<=[!?])(?:\s+|$))'        # ! or ? + (space or EoS)
+            r'|(?:(?<=\.)(?!\d)(?:\s+|$))'   # . not followed by digit + (space or EoS)
+            r'|[\r\n]+'                      # newline boundaries
+        )
 
         # Connection state
         self.reader: Optional[asyncio.StreamReader] = None
@@ -92,7 +98,7 @@ class VoiceRemoteInterface:
             self.writer.write(pack_frame(tag, mv[i:i + step].tobytes()))
         await self.writer.drain()
 
-    async def send_beep(self, freq=800, duration=0.15, volume=0.2):
+    async def send_beep(self, freq=800, duration=0.15, volume=0.6):
         sr = self.speaking_rate
         t = np.linspace(0, duration, int(sr * duration), False)
         tone = np.sin(2 * np.pi * freq * t).astype(np.float32)
@@ -108,17 +114,24 @@ class VoiceRemoteInterface:
             self.frames_np = np.concatenate((self.frames_np, frame_np), axis=0)
 
     async def _contact_core(self, input_text: str) -> bool:
+        print(f"[debug] start new session..")
         if self.session_id is None:
             self.session_id = str(uuid.uuid4())
             self.core_processor.create_session(self.session_id)
 
+            # send immediate response so we know we're live
+            print(f"[debug] sending 'Working' TTS")
+            await self._speak_text("Working")
+
         # Kick processing in a thread so we can stream out TTS
+        print(f"[debug] starting thread to process input: {input_text}")
         thread = threading.Thread(
             target=self.core_processor.process_input,
             kwargs={"input_text": input_text, "session_id": self.session_id, "is_voice": True},
             daemon=True,
         )
         thread.start()
+        #print(f"[debug] thread started, streaming response..")
 
         session = self.core_processor.get_session(self.session_id)
         buffer = ""
@@ -127,14 +140,18 @@ class VoiceRemoteInterface:
             chunk = await asyncio.to_thread(session['response_queue'].get)
             if chunk is None:
                 break
+            #else:
+            #    print(f"[voice_debug] got chunk: {chunk}")
             buffer += chunk
             sentences = self.sentence_endings.split(buffer)
             for sent in sentences[:-1]:
                 if sent.strip():
+                    #print(f"[voice_debug] speaking sentence: {sent.strip()}")
                     await self._speak_text(sent.strip())
             buffer = sentences[-1]
 
         if buffer.strip():
+            #print(f"[voice_debug] speaking final buffer: {buffer.strip()}")
             await self._speak_text(buffer.strip())
 
         return session['close_voice_channel'].is_set()
@@ -190,7 +207,7 @@ class VoiceRemoteInterface:
     async def _close_channel(self):
         self.session_id = None
         for _ in range(3):
-            await self.send_beep(300, 0.20, 0.2)
+            await self.send_beep(300, 0.20, 0.6)
             await asyncio.sleep(0.15)
         self.writer.write(pack_frame(b'CLOS'))
         await self.writer.drain()
