@@ -145,6 +145,7 @@ class VoiceRemoteInterface:
             buffer += chunk
             sentences = self.sentence_endings.split(buffer)
             for sent in sentences[:-1]:
+                sent = sent.strip().replace("*", "")  # remove * which would be read out loud
                 if sent.strip():
                     #print(f"[voice_debug] speaking sentence: {sent.strip()}")
                     await self._speak_text(sent.strip())

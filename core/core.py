@@ -11,14 +11,14 @@ import math
 # wikipedia search
 import wikipedia
 
-# google search
-from googlesearch import search
+# web search
+from ddgs import DDGS
 
 # for the web request/search sections:
 import requests
 from bs4 import BeautifulSoup
-from requests_html import HTMLSession
-import urllib.parse
+import requests
+from urllib.parse import urlparse
 
 # home assistant API link
 from homeassistant_api import Client as HAClient
@@ -628,12 +628,12 @@ class CoreProcessor:
         num_responses = int(tool_args.get('parameters').get('number', 10))
 
         if source == 'web':
-            self.send_whole_response(f"Performing Google Search on '{query}'.", session)
+            self.send_whole_response(f"Performing Web Search on '{query}'.", session)
             #return self._perform_web_search(query, num_responses)
             return self._wrap_tool_result("perform_search", {"results": self._perform_web_search(query, num_responses)})
 
         elif source == 'wikipedia':
-            self.send_whole_response(f"Performing research on Wikipedia on subject {query}.", session)
+            self.send_whole_response(f"Performing Wikipedia search on subject {query}.", session)
             #return self._perform_wikipedia_search(query)
             return self._wrap_tool_result("perform_search", {"results": self._perform_wikipedia_search(query)})
 
@@ -643,22 +643,32 @@ class CoreProcessor:
 
     def _perform_web_search(self, query, num_responses):
         try:
-            # Using the Google search function to get results
             results = []
-            for url in search(query, num=num_responses, stop=num_responses, pause=2, country='au'):
-                results.append({'link': url})
+            with DDGS() as ddgs:
+                # region="au-en" for Australian English results
+                for r in ddgs.text(
+                    query=query,
+                    region="au-en",
+                    safesearch="moderate",
+                    max_results=num_responses,
+                ):
+                    results.append({
+                        "title": r.get("title"),
+                        "snippet": r.get("body"),
+                        "link": r.get("href"),
+                    })
 
+            # Handle case where no results come back
             if not results:
-                results.append({'error': 'no results found, probably web search tool failure'})
-            else:
-                # Add instruction for the LLM at the beginning of results
-                #results.insert(0, {'instruction': 'If more information is required, open the websites of interest from the following results.'})
-                pass
+                results.append({
+                    "error": "no results found, possibly due to web search tool failure"
+                })
+
+            return json.dumps({"response": results})
 
         except Exception as e:
-            return json.dumps({'response': f'Error in web search: {e}'})
-
-        return json.dumps({'response': results})
+            # Catch any network or parsing issues
+            return json.dumps({"response": f"Error in web search: {e}"})
 
     def _perform_wikipedia_search(self, query):
         search_results = wikipedia.search(query)
@@ -694,24 +704,47 @@ class CoreProcessor:
         return json.dumps({'response': results})
 
     def open_website(self, tool_args, session, max_retries=3):
-        web_session = HTMLSession()
-        url = tool_args.get('parameters').get('url')
+        url = (tool_args.get('parameters') or {}).get('url', '')
+        # 1) normalize scheme
+        if url and not urlparse(url).scheme:
+            url = 'https://' + url  # prefer https
 
-        for attempt in range(max_retries):
+        headers = {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                        "(KHTML, like Gecko) Chrome/123.0 Safari/537.36"
+        }
+
+        last_err = None
+        for attempt in range(1, max_retries + 1):
             try:
-                response = web_session.get(url)
-                response.html.render()
-                soup = BeautifulSoup(response.html.html, 'html.parser')
-                #return json.dumps({'response': soup.get_text()})
-                return self._wrap_tool_result("open_website", {"text": soup.get_text()})
+                resp = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
+                resp.raise_for_status()
+
+                # Parse static HTML (no JS rendering) for reliability
+                soup = BeautifulSoup(resp.text, 'html.parser')
+                text = soup.get_text(separator="\n", strip=True)
+
+                # trim very large pages to keep the LLM responsive
+                max_chars = 8000
+                if len(text) > max_chars:
+                    text = text[:max_chars] + "\n...[truncated]"
+
+                # UX ping only on success
+                self.send_whole_response(f"Opened website", session)  # speaks immediately
+                return self._wrap_tool_result("open_website", {"text": text})
+
             except requests.exceptions.RequestException as e:
-                time.sleep(2)
+                last_err = e
+                # simple backoff
+                time.sleep(min(1 + attempt, 3))
             except Exception as e:
-                #return json.dumps({'response': f'Unexpected error for {url}: {e}'})
-                return self._wrap_tool_result("open_website", {"text": f'Unexpected error for {url}: {e}'})
-        self.send_whole_response(f"Opened Website: {url}.", session)
-        #return json.dumps({'response': f'Failed to open web link after {max_retries} attempts'})
-        return self._wrap_tool_result("open_website", {"text": f'Failed to open web link after {max_retries} attempts'})
+                # unexpected parser errors
+                return self._wrap_tool_result("open_website", {"text": f"Unexpected error for {url}: {e}"})
+
+        # after retries, return the reason we failed (don’t claim success)
+        return self._wrap_tool_result("open_website", {
+            "text": f"Failed to open {url} after {max_retries} attempts: {last_err}"
+        })
 
     def home_automation_action(self, tool_args, session):
         action_type = tool_args.get('parameters').get('action_type')

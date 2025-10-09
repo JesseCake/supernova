@@ -7,7 +7,7 @@ resampy~=0.4.3
 coqui-tts  #>=0.24  # (or just coqui-tts)
 
 # --- LLM / ASR ---
-ollama~=0.3.1
+ollama
 functions~=0.7.0
 onnxruntime~=1.18.1    # CPU-only on Jetson via pip; ok if you just need CPU
 ctranslate2~=4.3.1
@@ -64,6 +64,7 @@ bs4~=0.0.2
 wikipedia~=1.4.0
 HomeAssistant-API~=4.2.2.post2
 google~=3.0.0
+ddgs
 Flask~=3.0.3
 streamlit~=1.38.0
 pydantic~=2.7.4
