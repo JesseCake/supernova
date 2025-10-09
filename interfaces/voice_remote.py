@@ -198,11 +198,20 @@ class VoiceRemoteInterface:
             await self._speak_text(buffer.strip())
 
         # speaking is finished:
-        self.rx_paused = False
-        self.writer.write(pack_frame(b'RDY0'))  # optional - aligns with client
-        await self.writer.drain()
+        close = session['close_voice_channel'].is_set()
 
-        return session['close_voice_channel'].is_set()
+        if close:
+            # Reset the flag for the next turn/session
+            session['close_voice_channel'].clear()
+            # Strict single-turn close
+            await self._close_channel()
+        else:
+            # Multi-turn: re-arm capture
+            self.rx_paused = False
+            self.writer.write(pack_frame(b'RDY0'))
+            await self.writer.drain()
+
+        return close
 
     async def _transcribe_buffer(self):
         if self.frames_np.size == 0:
@@ -226,15 +235,9 @@ class VoiceRemoteInterface:
 
         
         if self._speak_task and not self._speak_task.done():
-            pass
-        self._speak_task = asyncio.create_task(self._contact_core(text))
+            await self._speak_task
 
-        #close = await self._contact_core(text)
-        #if close:
-        #    await self._close_channel()
-        #else:
-        #    #await self.send_beep(800, 0.10, 0.2)
-        #    pass
+        close = await self._contact_core(text)
 
     async def _speak_text(self, text: str):
         if not text.strip():
@@ -335,8 +338,8 @@ class VoiceRemoteInterface:
                     self.last_voice_ts = None
 
                     # re-arm listening:
-                    self.rx_paused = False
-                    self.writer.write(pack_frame(b'RDY0'))  # ready for more audio
+                    #self.rx_paused = False
+                    #self.writer.write(pack_frame(b'RDY0'))  # ready for more audio
 
                     # Optional UX cue:
                     # await self.send_beep(1000, 0.06, 0.3)

@@ -240,10 +240,10 @@ class CoreProcessor:
         # Drop any text already queued to speak
         self._flush_queue(session['response_queue'])
         # Unblock the speaker loop immediately
-        try:
-            session['response_queue'].put_nowait(None)
-        except Exception:
-            pass
+        #try:
+        #    session['response_queue'].put_nowait(None)
+        #except Exception:
+        #    pass
 
     
     def process_input(self, input_text, session_id, is_voice=False):
