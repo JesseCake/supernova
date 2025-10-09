@@ -129,7 +129,7 @@ general_tools = [
         "type": "function",
         "function": {
             "name": "update_behaviour",
-            "description": "Add a concise, enforceable behaviour rule that will be appended to the system prompt for future turns.",
+            "description": "Add a concise, enforceable behaviour rule that will be appended to the system prompt for future turns. If asked to do something differently in future, or change the way you act, this is how you do it. Keep rules short and imperative.",
             "parameters": {
                 "type": "object",
                 "properties": {
