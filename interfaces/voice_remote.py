@@ -228,9 +228,14 @@ class VoiceRemoteInterface:
             return
 
         text = " ".join([seg.text for seg in segments])
-        print(f"[voice_remote] Transcription: {text}")
+        print(f"[voice_remote] Transcription: '{text}'")
+
         if self.close_channel_phrase in text.lower():
             await self._close_channel()
+            return
+        elif ".  .  .  .  .  .  .  ." in text:
+            # ignore nonsense from bad VAD cutoff
+            print(f"[voice_remote] Ignoring bad VAD cutoff")
             return
 
         
