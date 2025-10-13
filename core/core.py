@@ -31,7 +31,7 @@ class CoreProcessor:
     def __init__(self):
         self.sessions = {}
 
-        self.model = "gemma3:4b"
+        self.model = "gemma3:12b"
         self.ollama_client = ollama.Client(host='http://localhost:11434')
         self.pre_context = precontext.llama3_context
         self.voice_pre_context = precontext.voice_context
@@ -292,7 +292,7 @@ class CoreProcessor:
             full_pre_context += self.voice_pre_context
 
         # we add this each time so we have up to date info from Home Assistant:
-        full_pre_context = self.add_ha_to_pre_context(full_pre_context)
+        #full_pre_context = self.add_ha_to_pre_context(full_pre_context)
 
         system_section = {
             'role': 'system',

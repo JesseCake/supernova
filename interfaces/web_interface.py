@@ -42,10 +42,10 @@ class WebInterface:
                 if not session['response_queue'].empty():
                     response_chunk = session['response_queue'].get()
                     if response_chunk is None:
-                        # print('web: response finished')
+                        print('web: response finished')
                         break
                     else:
-                        # print(f'{response_chunk}', end='')
+                        print(f'{response_chunk}', end='')
 
                         assistant_response += response_chunk
 
@@ -62,5 +62,5 @@ class WebInterface:
         gr.ChatInterface(
             fn=process_message,
             type="messages",
-            title="Supernova",
+            title="The Operator",
         ).launch(share=False, server_name="0.0.0.0")

@@ -7,15 +7,15 @@ resampy~=0.4.3
 coqui-tts  #>=0.24  # (or just coqui-tts)
 
 # --- LLM / ASR ---
-ollama~=0.3.1
+ollama
 functions~=0.7.0
 onnxruntime~=1.18.1    # CPU-only on Jetson via pip; ok if you just need CPU
 ctranslate2~=4.3.1
-faster-whisper~=1.0.3
+#faster-whisper~=1.0.3
 
 # --- torch (Jetson GPU wheel) ---
 # ON JETSON: install NVIDIA’s wheel that matches JP 6.1 exactly:
-torch @ https://developer.download.nvidia.cn/compute/redist/jp/v61/pytorch/torch-2.5.0a0+872d972e41.nv24.08.17622132-cp310-cp310-linux_aarch64.whl
+#torch @ https://developer.download.nvidia.cn/compute/redist/jp/v61/pytorch/torch-2.5.0a0+872d972e41.nv24.08.17622132-cp310-cp310-linux_aarch64.whl
 # torchaudio -> build from source after torch is installed:
     #sudo apt-get update
     # ffmpeg (for I/O backends)
