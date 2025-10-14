@@ -35,7 +35,7 @@ if __name__ == "__main__":
 
     # Start the context editor interface
     context_editor_app = context_create_app(
-        system_message_path="config/knowledgebase.txt",
+        system_message_path="../config/knowledgebase.txt",
         admin_token="furby",
         app_title="The Operator Precontext Editor"
     )

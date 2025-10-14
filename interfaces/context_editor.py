@@ -153,7 +153,7 @@ def create_app(
 
     # --------------------------- Routes ----------------------------
     @app.get("/")
-    @require_token
+    #@require_token
     def ui():
         APP_TITLE = current_app.config["APP_TITLE"]
         html = f"""
@@ -213,7 +213,7 @@ PUT  /api/system-message  {{ \"message\": \"...\" }}
       if(!r.ok){{ document.getElementById('status').textContent = 'Failed to load'; document.getElementById('status').className='err'; return; }}
       const j = await r.json();
       document.getElementById('editor').value = j.message || '';
-      document.getElementById('version').textContent = `Updated: ${j.meta.updated_at} · ${j.meta.bytes} bytes`;
+      document.getElementById('version').textContent = `Updated: ${{j.meta.updated_at}} · ${{j.meta.bytes}} bytes`;
       document.getElementById('status').textContent = '';
     }}
 
@@ -224,7 +224,7 @@ PUT  /api/system-message  {{ \"message\": \"...\" }}
       if(r.ok){{
         const j = await r.json();
         el.textContent = 'Saved.'; el.className = 'ok';
-        document.getElementById('version').textContent = `Updated: ${j.meta.updated_at} · ${j.meta.bytes} bytes`;
+        document.getElementById('version').textContent = `Updated: ${{j.meta.updated_at}} · ${{j.meta.bytes}} bytes`;
       }} else {{
         el.textContent = 'Save failed'; el.className = 'err';
       }}

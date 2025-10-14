@@ -101,6 +101,34 @@ class CoreProcessor:
             for line in file:
                 if line.startswith("WEATHER_API_KEY"):
                     return line.split('=')[1].strip().strip('"')
+                
+    def _kb_path(self):
+        """Absolute path to ./config/knowledgebase.txt (relative to this file)."""
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        return os.path.join(script_dir, '../config/knowledgebase.txt')
+
+    def read_knowledgebase_text(self) -> str:
+        """
+        Returns the current contents of knowledgebase.txt as a string.
+        Loads from disk on every call so edits are picked up dynamically.
+        """
+        try:
+            with open(self._kb_path(), 'r', encoding='utf-8') as f:
+                kb = f.read().strip()
+                return kb
+        except FileNotFoundError:
+            # Silently ignore if the file doesn't exist
+            return ""
+        except Exception as e:
+            # Fail soft: don't break the run if the kb can't be read
+            return f"[knowledgebase read error: {e}]"
+
+    def add_kb_to_pre_context(self, pre_context: str) -> str:
+        """Append the latest knowledgebase contents to pre_context, if any."""
+        kb = self.read_knowledgebase_text()
+        if not kb:
+            return pre_context
+        return pre_context + "\n\n---\nKnowledgebase (live):\n" + kb
 
     def add_ha_to_pre_context(self, pre_context):
         # we only do this once every 30 seconds so we're not chewing time with each response:
@@ -291,8 +319,8 @@ class CoreProcessor:
         if voice:
             full_pre_context += self.voice_pre_context
 
-        # we add this each time so we have up to date info from Home Assistant:
-        #full_pre_context = self.add_ha_to_pre_context(full_pre_context)
+        # we add this each time so we have up to date info edited on the fly
+        full_pre_context = self.add_kb_to_pre_context(full_pre_context)
 
         system_section = {
             'role': 'system',
