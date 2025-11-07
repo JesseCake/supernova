@@ -187,6 +187,9 @@ class CoreProcessor:
             prompt_tools = tools.voice_tools + tools.general_tools
         else:
             prompt_tools = tools.general_tools
+        
+        #disabling tools for now:
+        prompt_tools = None
 
         # debugging:
         # print(f"PROMPT TOOLS=\n\n {prompt_tools}")

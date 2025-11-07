@@ -4,6 +4,7 @@ from core.core import CoreProcessor
 from interfaces.web_interface import WebInterface
 #from interfaces.voice_interface import VoiceInterface
 #from interfaces.voice_remote import VoiceRemoteInterface
+from pathlib import Path
 from interfaces.context_editor import create_app as context_create_app, create_server as context_create_server
 
 
@@ -34,8 +35,9 @@ if __name__ == "__main__":
     #remote_voice_thread.join()
 
     # Start the context editor interface
+    BASE_DIR = Path(__file__).resolve().parent
     context_editor_app = context_create_app(
-        system_message_path="../config/knowledgebase.txt",
+        system_message_path=BASE_DIR / "config" / "knowledgebase.txt",
         admin_token="furby",
         app_title="The Operator Precontext Editor"
     )

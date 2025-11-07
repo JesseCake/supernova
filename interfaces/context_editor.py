@@ -79,18 +79,36 @@ def create_app(
 
     # --------------------------- Security ---------------------------
     def require_token(view_fn):
-        @wraps(view_fn)
-        def wrapper(*args, **kwargs):
-            token = current_app.config.get("ADMIN_TOKEN")
-            if token:
-                auth = request.headers.get("Authorization", "")
-                if not auth.startswith("Bearer ") or auth.split(" ", 1)[1] != token:
-                    if request.path == "/":
-                        return _render_login()
-                    return Response("Unauthorized", status=401)
-            return view_fn(*args, **kwargs)
+      @wraps(view_fn)
+      def wrapper(*args, **kwargs):
+          required = (current_app.config.get("ADMIN_TOKEN") or "").strip()
+          if required:
+              # read both
+              header = request.headers.get("Authorization", "")
+              header_token = header.split(" ", 1)[1].strip() if header.startswith("Bearer ") else ""
+              cookie_token = (request.cookies.get("auth") or "").strip()
 
-        return wrapper
+              # accept if either matches
+              if not any(t == required for t in (header_token, cookie_token)):
+                  if request.path == "/":
+                      return _render_login()
+                  return Response
+              
+          return view_fn(*args, **kwargs)
+      return wrapper
+    
+    @app.post("/login")
+    def login():
+        required = current_app.config.get("ADMIN_TOKEN")
+        data = request.get_json(silent=True) or {}
+        token = str(data.get("token") or "")
+        if not required or token != required:
+            return Response("Unauthorized", status=401)
+        resp = make_response(jsonify({"ok": True}))
+        # Cookie lets the protected "/" load. API calls can still use the header.
+        resp.set_cookie("auth", token, httponly=True, samesite="Lax")
+        return resp
+
 
     # --------------------------- Helpers ----------------------------
     def _read_message() -> str:
@@ -141,11 +159,21 @@ def create_app(
   <script>
     function save(){{
       const t = document.getElementById('token').value.trim();
-      if(!t){{alert('Token required');return;}}
-      localStorage.setItem('prompt_admin_token', t);
-      location.reload();
+      if(!t){{ alert('Token required'); return; }}
+      fetch('/login', {{
+        method:'POST',
+        headers:{{'Content-Type':'application/json'}},
+        body: JSON.stringify({{ token: t }})
+      }}).then(r=>{{
+        if(r.ok){{
+          localStorage.setItem('prompt_admin_token', t); // used by fetch() to API
+          location.href = '/'; // cookie now lets "/" pass require_token
+        }}else{{
+          alert('Bad token');
+        }}
+      }});
     }}
-  </script>
+</script>
 </body>
 </html>
 """
@@ -153,7 +181,7 @@ def create_app(
 
     # --------------------------- Routes ----------------------------
     @app.get("/")
-    #@require_token
+    @require_token
     def ui():
         APP_TITLE = current_app.config["APP_TITLE"]
         html = f"""
@@ -167,9 +195,9 @@ def create_app(
     :root {{ --border:#e5e7eb; --bg:#0b0b0b; --fg:#111827; }}
     * {{ box-sizing: border-box; }}
     body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 1.5rem; color: #111; }}
-    .wrap {{ max-width: 900px; margin: auto; }}
+    .wrap {{ width: 95%; margin: auto; padding: 1rem 2rem; }}
     .row {{ display:flex; gap:1rem; align-items:center; justify-content:space-between; flex-wrap:wrap; }}
-    textarea {{ width:100%; height: 52vh; padding: 1rem; font: 14px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; border:1px solid var(--border); border-radius: 12px; }}
+    textarea {{ width:100%; height: 52vh; padding: 1rem; font: 14px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; border:1px solid var(--border); border-radius: 12px; white-space: pre; overflow-wrap: normal; word-wrap: normal;}}
     .toolbar {{ display:flex; gap:.5rem; align-items:center; margin:.75rem 0 1.25rem; }}
     button {{ border:1px solid #111827; background:#111827; color:white; padding:.65rem 1rem; border-radius:10px; cursor:pointer; }}
     button.secondary {{ background:white; color:#111827; border-color:#cbd5e1; }}
@@ -209,7 +237,7 @@ PUT  /api/system-message  {{ \"message\": \"...\" }}
     const headers = token ? {{ 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }} : {{ 'Content-Type': 'application/json' }};
 
     async function fetchMsg(){{
-      const r = await fetch('/api/system-message', {{ headers }});
+      const r = await fetch('/api/system-message', {{ headers, credentials: 'same-origin' }});
       if(!r.ok){{ document.getElementById('status').textContent = 'Failed to load'; document.getElementById('status').className='err'; return; }}
       const j = await r.json();
       document.getElementById('editor').value = j.message || '';
@@ -219,7 +247,7 @@ PUT  /api/system-message  {{ \"message\": \"...\" }}
 
     async function save(){{
       const body = JSON.stringify({{ message: document.getElementById('editor').value }});
-      const r = await fetch('/api/system-message', {{ method: 'PUT', headers, body }});
+      const r = await fetch('/api/system-message', {{ method: 'PUT', headers, body, credentials: 'same-origin' }});
       const el = document.getElementById('status');
       if(r.ok){{
         const j = await r.json();
