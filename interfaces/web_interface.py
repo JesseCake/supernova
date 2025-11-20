@@ -3,6 +3,8 @@ from gradio import ChatMessage
 import uuid
 import time
 import threading
+import os
+import base64
 
 class WebInterface:
     def __init__(self, core_processor):
@@ -52,15 +54,83 @@ class WebInterface:
                         # Yield the history as ChatMessage objects (Gradio will convert them properly)
                         yield ChatMessage(role="assistant", content=assistant_response)
 
-                time.sleep(0.05)
+                time.sleep(0.01)
 
             # print(f"web: broke out of queue")
 
             # Final yield of the complete history
             return history
+        
+        here = os.path.dirname(os.path.abspath(__file__))
+        logo_path = os.path.join(here, "operator.png")
 
-        gr.ChatInterface(
-            fn=process_message,
-            type="messages",
-            title="The Operator",
-        ).launch(share=False, server_name="0.0.0.0")
+        # Encode the image as base64 so we can use it directly in <img src="...">
+        with open(logo_path, "rb") as f:
+            encoded = base64.b64encode(f.read()).decode("ascii")
+        img_data = f"data:image/png;base64,{encoded}"
+
+
+
+        custom_css = """
+        footer { visibility: hidden; }
+
+        /* Header */
+        .header {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 12px;
+            margin: 12px 0;
+            flex: 0 0 auto;
+        }
+
+        .header-logo {
+            height: 60px;
+        }
+
+        .header-title {
+            font-size: 1.6rem;
+            font-weight: 600;
+        }
+
+        /* Column that holds the chat should fill the viewport
+        minus ~100px for header + outer padding. Adjust if needed. */
+        #chat-col {
+            height: calc(100vh - 120px) !important;
+        }
+
+        /* Make the chatbot itself grow to fill that column */
+        #chatbot {
+            flex-grow: 1 !important;
+            height: 100% !important;
+            overflow: auto !important;
+        }
+        """
+
+        with gr.Blocks(title="NCM - The Operator", css=custom_css) as interface:
+            # Single, clean, centered header
+            gr.HTML(
+                f"""
+                <div class="header">
+                    <img class="header-logo" src="{img_data}" alt="The Operator Logo" />
+                    <span class="header-title">The Operator</span>
+                </div>
+                """,
+            )
+            with gr.Column(elem_id="chat-col"):
+                chat = gr.ChatInterface(
+                    fn=process_message,
+                    type="messages",
+                    #provide our own chatbot so we can give it an elem_id:
+                    chatbot=gr.Chatbot(
+                        elem_id="chatbot", 
+                        render=False,
+                        type="messages",
+                        ),
+                )
+        
+        interface.launch(
+            share=False, 
+            server_name="0.0.0.0", 
+            show_api=False,
+            )
