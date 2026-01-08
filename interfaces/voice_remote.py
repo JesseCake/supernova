@@ -78,7 +78,7 @@ class VoiceRemoteInterface:
         self.speaking_rate = 16000          # what we stream to the client
         self.piper_rate = 16000             # change if piper voice uses a different rate
         self.voice = PiperVoice.load(
-            "./glados_piper_medium.onnx",  # install with python3 -m piper.download_voices en_GB-northern_english_male-medium
+            "./libs/voices/glados_piper_medium.onnx",  # install with python3 -m piper.download_voices en_GB-northern_english_male-medium or just place onnx files in folder
             use_cuda=False,                 # True if you installed onnxruntime-gpu and want GPU
             )
         

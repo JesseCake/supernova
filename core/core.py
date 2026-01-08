@@ -258,8 +258,6 @@ class CoreProcessor:
 
         return
 
-
-    
     def process_input(self, input_text, session_id, is_voice=False):
         # Retrieve the session-specific data - NOT SURE IF NEEDED NOW:
         session = self.get_session(session_id)
