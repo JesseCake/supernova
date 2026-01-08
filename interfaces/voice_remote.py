@@ -9,10 +9,9 @@ from typing import Optional, Tuple
 
 import numpy as np
 import resampy
-import torch
-from TTS.api import TTS as CoquiTTS
 
-import TTS.tts
+from piper import PiperVoice, SynthesisConfig
+
 from whisper_live.vad import VoiceActivityDetector
 from whisper_live.transcriber import WhisperModel
 
@@ -56,8 +55,6 @@ class VoiceRemoteInterface:
 
         # Audio IO config
         self.listening_rate = listening_rate
-        self.speaking_rate = 16000
-        self.tts_sample_rate = 22050
 
         # ASR / VAD
         self.vad_detector = VoiceActivityDetector(threshold=0.5, frame_rate=self.listening_rate)
@@ -68,12 +65,7 @@ class VoiceRemoteInterface:
         self.last_voice_ts = None  # Timestamp of last received voice activity (so we can tune how long to wait before taking action)
         self.vad_timeout = 0.7  # Seconds of silence to wait before considering utterance complete
 
-        # TTS
-        device = "cuda"
-        self.tts = CoquiTTS(model_name="tts_models/en/vctk/vits", progress_bar=False).to(device)
-        self._tts_device = device
-        self.speech_speed = 1.0
-        self.speech_speaker = 'p376'
+        # Sentence splitting regex
         # Split after ., !, or ? followed by whitespace (or newline / EoS),
         # but only if NOT immediately followed by a digit (negative lookahead)
         self.sentence_endings = re.compile(
@@ -81,6 +73,25 @@ class VoiceRemoteInterface:
             r'|(?:(?<=\.)(?!\d)(?:\s+|$))'   # . not followed by digit + (space or EoS)
             r'|[\r\n]+'                      # newline boundaries
         )
+
+        # TTS (Piper)
+        self.speaking_rate = 16000          # what we stream to the client
+        self.piper_rate = 16000             # change if piper voice uses a different rate
+        self.voice = PiperVoice.load(
+            "./glados_piper_medium.onnx",  # install with python3 -m piper.download_voices en_GB-northern_english_male-medium
+            use_cuda=False,                 # True if you installed onnxruntime-gpu and want GPU
+            )
+        
+        self.piper_syn_config = SynthesisConfig(
+            volume=1.0,
+            length_scale=1.0,
+            noise_scale=1.0,
+            noise_w_scale=1.0,
+            normalize_audio=False,
+        )
+
+        # attempt to fix a race condition:
+        self._piper_lock = threading.Lock()
 
         # Connection state
         self.reader: Optional[asyncio.StreamReader] = None
@@ -98,7 +109,7 @@ class VoiceRemoteInterface:
         self.writer.write(pack_frame(tag, text.encode('utf-8')))
         await self.writer.drain()
 
-    async def send_pcm_int16(self, tag: bytes, audio_int16: np.ndarray, chunk_samples: int = 8192):
+    async def send_pcm_int16(self, tag: bytes, audio_int16: np.ndarray, chunk_samples: int = 1024):
         mv = memoryview(audio_int16.tobytes())
         # 2 bytes per sample
         step = chunk_samples * 2
@@ -150,6 +161,7 @@ class VoiceRemoteInterface:
 
             # send immediate response so we know we're live
             #print(f"[debug] sending 'Working' TTS")
+            self.rx_paused = True
             await self._speak_text("Working")
 
         # Kick processing in a thread so we can stream out TTS
@@ -245,20 +257,70 @@ class VoiceRemoteInterface:
         close = await self._contact_core(text)
 
     async def _speak_text(self, text: str):
-        if not text.strip():
-            return
-        tts_f32 = np.array(self.tts.tts(text, speed=self.speech_speed, speaker=self.speech_speaker), dtype=np.float32)
-        resamp = resampy.resample(tts_f32, self.tts_sample_rate, self.speaking_rate)
-        rms = np.sqrt(np.mean(resamp ** 2))
-        target_rms = 0.2
-        if rms > 0:
-            resamp *= target_rms / rms
-        resamp = np.clip(resamp * 1.2, -1.0, 1.0)
-        audio_int16 = (np.clip(resamp, -1.0, 1.0) * 32767).astype(np.int16)
-        await self.send_pcm_int16(b'TTS0', audio_int16)
+        # print(f"[voice_remote] DEBUG TTS text: '{text}'")
+
+        # Half duplex: do not listen while we speak:
+        prev_rx_paused = self.rx_paused
+        self.rx_paused = True
+        try:
+            if not text.strip():
+                return
+
+            # Clear any previous interruption so this utterance can play
+            # (you already do this on first detected speech; doing it here is safe too)
+            # self._clear_interrupt()
+
+            # Run Piper in a worker thread so the asyncio loop stays responsive
+            def synth_all_chunks():
+                with self._piper_lock:
+                    chunks = []
+                    for chunk in self.voice.synthesize(text, syn_config=self.piper_syn_config):
+                        # chunk.audio_float_array is float32 [-1,1] at voice sample rate
+                        chunks.append((chunk.sample_rate, chunk.audio_float_array.copy()))
+                    return chunks
+
+            try:
+                piper_chunks = await asyncio.to_thread(synth_all_chunks)
+            except Exception as e:
+                print(f"[voice_remote] Piper TTS error: {e}")
+                return
+
+            # Stream each sentence-chunk out as 16k int16
+            for sr, audio_f32 in piper_chunks:
+                if self.interrupt_event.is_set():
+                    return  # barge-in: stop immediately
+
+                # Ensure mono float32
+                audio_f32 = np.asarray(audio_f32, dtype=np.float32).reshape(-1)
+
+                # Resample to speaking_rate (16k)
+                if sr != self.speaking_rate:
+                    audio_f32 = resampy.resample(audio_f32, sr, self.speaking_rate)
+
+                # Match your previous loudness handling (optional)
+                rms = float(np.sqrt(np.mean(audio_f32 ** 2))) if audio_f32.size else 0.0
+                target_rms = 0.2
+                if rms > 1e-8:
+                    audio_f32 *= (target_rms / rms)
+
+                audio_f32 = np.clip(audio_f32 * 1.2, -1.0, 1.0)
+
+                audio_int16 = (audio_f32 * 32767.0).astype(np.int16)
+
+                # Send (this already checks interrupt_event each chunk)
+                await self.send_pcm_int16(b"TTS0", audio_int16, chunk_samples=8192)
+
+                # If interrupted during send_pcm_int16
+                if self.interrupt_event.is_set():
+                    return
+        finally:
+            # Restore previous RX gate state
+            self.rx_paused = prev_rx_paused
 
     async def _open_channel(self):
         print(f"[voice_remote] satellite opened channel")
+
+        self.rx_paused = True  # close the RX gate before greeting
         
 
         await self._speak_text("I'm here")
