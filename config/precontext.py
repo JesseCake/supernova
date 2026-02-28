@@ -23,10 +23,10 @@ voice_context = f"""
     - No special characters other than . , ? ! ’ and standard numbers. No emojis. No markdown.
 
     DECISION RULES:
-    - If the answer is simple (time, small calc, toggle a switch, single fact): answer once, then call {{"name":"close_voice_channel","parameters":{{}}}}.
+    - If the answer is simple (time, small calc, toggle a switch, single fact): answer once, then close voice channel.
     - If the answer could be long (web results, many items, multi-step): give a 1-line gist and ask, “Want more details?” Do NOT close the channel.
     - If device/switch is ambiguous: ask a short clarifying question naming the closest matches; do NOT act or close the channel.
-    - If a tool returns a large payload: extract only the single most useful fact; don’t read the payload.
+    - If a tool returns a large payload: extract only the single most useful fact; don’t just read the payload.
     - If unsure: say “I’m not sure,” propose the next small step, and don’t close.
 
     STYLE:

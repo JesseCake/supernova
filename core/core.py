@@ -2,7 +2,10 @@ import importlib
 import json
 import threading
 import time
-import ollama
+try:
+    import ollama
+except Exception:
+    ollama = None
 import queue
 from datetime import datetime
 import os
@@ -21,7 +24,10 @@ import requests
 from urllib.parse import urlparse
 
 # home assistant API link
-from homeassistant_api import Client as HAClient
+try:
+    from homeassistant_api import Client as HAClient
+except Exception:
+    HAClient = None
 
 # our precontext and tools info:
 from config import precontext, tools
@@ -32,7 +38,7 @@ class CoreProcessor:
     def __init__(self):
         self.sessions = {}
 
-        self.model = "gemma3:4b"
+        self.model = "gemma3:4b"  # was using 4b to fit, 12b is too big for my little Jetson
         self.ollama_client = ollama.Client(host='http://localhost:11434')
         self.pre_context = precontext.llama3_context
         self.voice_pre_context = precontext.voice_context
@@ -68,8 +74,32 @@ class CoreProcessor:
             'list_behaviour': self.list_behaviour,
         }
 
+    def _log(self, label, session=None, extra=None):
+        """Lightweight timing/log helper. Prints wallclock time and elapsed since session start when available."""
+        now = datetime.now().isoformat()
+        perf = time.perf_counter()
+        elapsed = None
+        sid = None
+        try:
+            if session is not None:
+                sid = next((k for k, v in self.sessions.items() if v is session), None)
+                start = session.get('_ts_start')
+                if start:
+                    elapsed = perf - start
+        except Exception:
+            sid = None
+
+        msg = f"[TIMESTAMP] {now} | {label}"
+        if sid is not None:
+            msg += f" | session={sid}"
+        if elapsed is not None:
+            msg += f" | elapsed={elapsed:.4f}s"
+        if extra is not None:
+            msg += f" | {extra}"
+        print(msg)
+
     def create_session(self, session_id):
-        print(f'Creating new session with ID: {session_id}')
+        self._log(f'Creating new session', extra=f"id={session_id}")
         # create a new session for each connection inbound to keep histories etc separate:
         self.sessions[session_id] = {
             'conversation_history': [],
@@ -78,6 +108,7 @@ class CoreProcessor:
             'close_voice_channel': threading.Event(),  # for flagging channel close from functions in voice mode
             'cancel_event': threading.Event(),  # for cancelling current processing - tells LLM to stop!
             'ollama_stream': None,  # to hold the current ollama stream object so we can kill it if interrupting
+            '_ts_start': time.perf_counter(),
         }
 
     def _flush_queue(self, q: queue.Queue):
@@ -222,9 +253,11 @@ class CoreProcessor:
     def add_ha_to_pre_context(self, pre_context):
         # we only do this once every 30 seconds so we're not chewing time with each response:
         now = time.time()
+        self._log("add_ha_to_pre_context start")
         if now - self._ha_cache["stamp"] > 30:  # refresh every 30s
             self._ha_cache["text"] = self.ha_get_available_switches_and_scenes()
             self._ha_cache["stamp"] = now
+        self._log("add_ha_to_pre_context end", extra=f"len={len(self._ha_cache['text'])}")
         return pre_context + f"\n{self._ha_cache['text']}"
 
     def add_voice_to_pre_context(self, pre_context):
@@ -262,10 +295,10 @@ class CoreProcessor:
         # Retrieve the session-specific data - NOT SURE IF NEEDED NOW:
         session = self.get_session(session_id)
         if session is None:
-            print(f"Session ID {session_id} not found, creating new session...", end='')
+            self._log("Session not found, creating new session...", extra=f"id={session_id}")
             self.create_session(session_id)
             session = self.get_session(session_id)
-            print(f"done: session ID {session_id}")
+            self._log("Created new session", extra=f"id={session_id}")
 
         # clear the response_finished event at the start:
         session['response_finished'].clear()
@@ -286,16 +319,20 @@ class CoreProcessor:
             conversation_history=conversation_history,
         )
 
-        conversation_history.append({
-            'role': 'user',
-            'content': input_text,
-        })
+        self._log("Prompt created", session=session, extra=f"prompt_len={len(prompt)}")
+
+        # Shouldn't be needed, this is already covered in the create_prompt function above
+        # conversation_history.append({
+        #    'role': 'user',
+        #    'content': input_text,
+        #})
 
         # Debugging: Print the formatted conversation context:
         # print(f"Generated prompt: {prompt}")
 
         # now we create the system message:
         system_message = self.create_system_message(voice=is_voice)
+        self._log("System message created", session=session)
 
         # now we construct the tools:
         if is_voice:
@@ -309,6 +346,8 @@ class CoreProcessor:
 
         while True:
             #print(f"[DEBUG] Sending prompt to LLM: prompt={prompt}, system_message={system_message}, tools={prompt_tools}")
+            self._log("Sending to Ollama Raw Mode (start)", session=session)
+            t0 = time.perf_counter()
             full_response, tool_msg, tool_name = self.send_to_ollama(
                 prompt_text=prompt, 
                 prompt_system=system_message, 
@@ -317,6 +356,8 @@ class CoreProcessor:
                 raw_mode=True,
                 available_functions=self.available_functions
                 )
+            t1 = time.perf_counter()
+            self._log("Sending to Ollama Raw Mode (end)", session=session, extra=f"dur={(t1-t0):.3f}s")
 
             # We then record the outputs and actions in the conversation history:
             if full_response:
@@ -340,7 +381,7 @@ class CoreProcessor:
                 break
 
         # if we break out of loop, set that we've finished to calling thread:
-        print("core: Finished processing input and response")
+        self._log("Finished processing input and response", session=session)
         self.response_finished(session)
 
         # print('\ncore: Finishing processing input and response')
@@ -424,7 +465,7 @@ class CoreProcessor:
             full_pre_context += self.voice_pre_context
 
         # we add this each time so we have up to date info from Home Assistant:
-        full_pre_context = self.add_ha_to_pre_context(full_pre_context)
+        #full_pre_context = self.add_ha_to_pre_context(full_pre_context)
 
         # append behaviour block if present
         rules = self.behaviour_overrides.get("global", [])
@@ -605,21 +646,27 @@ class CoreProcessor:
 
             if raw_mode:
                 #print("starting to process RAW mode...")
+                self._log("creating combined prompt", session=session)
                 combined_prompt = self.format_raw_prompt_gemma(system=prompt_system, tools=prompt_tools, messages=prompt_text)
+                self._log("done", session=session)
                 #print("Created full prompt from scratch...")
                 #print(f"Full prompt:\n\n{combined_prompt}")
 
                 # Send raw text input to Ollama
+                self._log("Sending the prompt now to Ollama in raw mode", session=session)
                 response_stream = self.ollama_client.generate(
                     model=self.model,
                     prompt=combined_prompt,
                     stream=True,
                     raw=True,
-                    keep_alive="48h",  # no timeout so we keep alive
+                    keep_alive=-1,  # no timeout so we keep alive
                     options={
                         "stop": ["<end_of_turn>"],
+                        "num_ctx": 4096,
+                        "num_gpu": -1, # force max GPU offload
                     }
                 )
+                self._log("Done", session=session)
 
             else:
                 response_stream = self.ollama_client.chat(
@@ -630,9 +677,14 @@ class CoreProcessor:
                     tools=prompt_tools
                 )
 
+            self._log("Starting to process chunks", session=session)
+            first_chunk_yet = False
             for chunk in response_stream:
                 #debugging responses:
                 #print(f"{chunk}")
+                if not first_chunk_yet:
+                    self._log("Received first chunk", session=session)
+                    first_chunk_yet = True
 
                 # new cancel logic if interrupted:
                 if cancel_event and cancel_event.is_set():
@@ -699,17 +751,20 @@ class CoreProcessor:
                                 if tool_call and isinstance(tool_call, dict) and "name" in tool_call:
                                     tool_name_detected = tool_call["name"]
                                     params = tool_call.get("parameters", {}) or {}
-                                    print(f"[DEBUG] Tool detected: {tool_name_detected} with params {params}")
+                                    self._log(f"Tool detected: {tool_name_detected}", session=session, extra=f"params={params}")
 
                                     # Execute the tool call immediately:
                                     try:
                                         fn = (available_functions or {}).get(tool_name_detected)
                                         if fn is None:
-                                            print(f"core: tool {tool_name_detected} not found")
+                                            self._log(f"core: tool not found", session=session, extra=tool_name_detected)
                                             wrapped = self._wrap_tool_result(tool_name_detected, {"text": "Unknown tool"})
                                         else:
-                                            print(f"core: executing tool {tool_name_detected} with params {params}")
+                                            self._log(f"core: executing tool", session=session, extra=tool_name_detected)
+                                            t_tool = time.perf_counter()
                                             wrapped = fn(tool_args=tool_call, session=session)  # your tools already return wrapped JSON
+                                            dt_tool = time.perf_counter() - t_tool
+                                            self._log(f"core: finished tool", session=session, extra=f"{tool_name_detected} dur={dt_tool:.3f}s")
 
                                         # 3) prepare a tool message for history
                                         tool_message = {'role': 'tool', 'content': wrapped}
@@ -810,6 +865,7 @@ class CoreProcessor:
             return self._wrap_tool_result("perform_search", {"text": 'Invalid source specified. Choose "web" or "wikipedia".'})
 
     def _perform_web_search(self, query, num_responses):
+        self._log("_perform_web_search start", extra=f"q={query} n={num_responses}")
         try:
             results = []
             with DDGS() as ddgs:
@@ -832,13 +888,16 @@ class CoreProcessor:
                     "error": "no results found, possibly due to web search tool failure"
                 })
 
+            self._log("_perform_web_search end", extra=f"found={len(results)}")
             return json.dumps({"response": results})
 
         except Exception as e:
             # Catch any network or parsing issues
+            self._log("_perform_web_search error", extra=str(e))
             return json.dumps({"response": f"Error in web search: {e}"})
 
     def _perform_wikipedia_search(self, query):
+        self._log("_perform_wikipedia_search start", extra=f"q={query}")
         search_results = wikipedia.search(query)
         results = []
 
@@ -869,6 +928,7 @@ class CoreProcessor:
         else:
             results.append({'error': 'No results, try another search term'})
 
+        self._log("_perform_wikipedia_search end", extra=f"found={len(results)}")
         return json.dumps({'response': results})
 
     def open_website(self, tool_args, session, max_retries=3):
@@ -882,6 +942,7 @@ class CoreProcessor:
                         "(KHTML, like Gecko) Chrome/123.0 Safari/537.36"
         }
 
+        self._log("open_website start", session=session, extra=url)
         last_err = None
         for attempt in range(1, max_retries + 1):
             try:
@@ -898,11 +959,13 @@ class CoreProcessor:
                     text = text[:max_chars] + "\n...[truncated]"
 
                 # UX ping only on success
+                self._log("open_website success", session=session, extra=f"chars={len(text)}")
                 self.send_whole_response(f"Opened website", session)  # speaks immediately
                 return self._wrap_tool_result("open_website", {"text": text})
 
             except requests.exceptions.RequestException as e:
                 last_err = e
+                self._log("open_website attempt failed", session=session, extra=f"attempt={attempt} err={e}")
                 # simple backoff
                 time.sleep(min(1 + attempt, 3))
             except Exception as e:
@@ -910,6 +973,7 @@ class CoreProcessor:
                 return self._wrap_tool_result("open_website", {"text": f"Unexpected error for {url}: {e}"})
 
         # after retries, return the reason we failed (don’t claim success)
+        self._log("open_website failed", session=session, extra=str(last_err))
         return self._wrap_tool_result("open_website", {
             "text": f"Failed to open {url} after {max_retries} attempts: {last_err}"
         })

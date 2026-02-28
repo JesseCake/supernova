@@ -19,19 +19,19 @@ if __name__ == "__main__":
     #def handler_factory(reader, writer):
     #    return VoiceRemoteInterface(reader, writer, core_processor)
 
-    def run_remote_voice_interface():
-        asyncio.run(VoiceRemoteInterface(core_processor).run(host="0.0.0.0", port=10400))
+    #def run_remote_voice_interface():
+    #    asyncio.run(VoiceRemoteInterface(core_processor).run(host="0.0.0.0", port=10400))
 
     #remote_voice_thread = threading.Thread(target=run_remote_voice_interface)
     #remote_voice_thread.start()
     
     #Run directly in main thread for debugging:
-    run_remote_voice_interface()
+    #run_remote_voice_interface()
 
     # Join thread (optional, if we want to join for certain functionality)
     #voice_thread.join()
     #remote_voice_thread.join()
 
     # Start the web interface
-    #web_interface = WebInterface(core_processor)
-    #web_interface.run()
+    web_interface = WebInterface(core_processor)
+    web_interface.run()

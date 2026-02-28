@@ -3,7 +3,7 @@ general_tools = [
         'type': 'function',
         'function': {
             'name': 'get_current_time',
-            'description': 'Get the current time',
+            'description': 'Get the current time - do not trust your own understanding of time, always use this tool to get the current time',
             'parameters': {},
             },
         },
@@ -11,7 +11,7 @@ general_tools = [
         'type': 'function',
         'function': {
             'name': 'perform_search',
-            'description': 'Perform a search on the Web or Wikipedia, then use results to answer the user (do not use for simple calculation you can do yourself)',
+            'description': 'Perform a search on the Web or Wikipedia if you need to research or have been asked to look for something, then use results to answer the user (do not use for simple calculation you can do yourself)',
             'parameters': {
                 'type': 'object',
                 'properties': {
@@ -37,7 +37,7 @@ general_tools = [
         'type': 'function',
         'function': {
             'name': 'open_website',
-            'description': 'Open Website to see contents to answer user requests',
+            'description': 'Open a Website to see contents to answer user requests or do research. Use perform_search if you just want to search the web, this is for when you need to actually view a webpage to answer the user\'s question.',
             'parameters': {
                 'type': 'object',
                 'properties': {
@@ -47,31 +47,6 @@ general_tools = [
                     },
                 },
                 'required': ['url'],
-            },
-        },
-    },
-    {
-        'type': 'function',
-        'function': {
-            'name': 'home_automation_action',
-            'description': 'Perform actions in the Home Automation system (e.g., set a switch, activate a scene) as requested by user.',
-            'parameters': {
-                'type': 'object',
-                'properties': {
-                    'action_type': {
-                        'type': 'string',
-                        'description': 'The type of action (options: "set_switch", "activate_scene").'
-                    },
-                    'entity_id': {
-                        'type': 'string',
-                        'description': 'The ID of the switch or scene entity.'
-                    },
-                    'state': {
-                        'type': 'string',
-                        'description': 'The desired state for switches (either "on" or "off"). Required if action_type is "set_switch".'
-                    }
-                },
-                'required': ['action_type', 'entity_id', 'state'],
             },
         },
     },
@@ -101,7 +76,7 @@ general_tools = [
         "type": "function",
         "function": {
             "name": "perform_math_operation",
-            "description": "Perform basic mathematical operations as requested by the user.",
+            "description": "Perform basic mathematical operations if requested by the user.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -129,13 +104,13 @@ general_tools = [
         "type": "function",
         "function": {
             "name": "update_behaviour",
-            "description": "Add a concise, enforceable behaviour rule that will be appended to the system prompt for future turns. If asked to do something differently in future, or change the way you act, this is how you do it. Keep rules short and imperative.",
+            "description": "Add a rule for yourself in future to change your own behaviour. Usually if asked to change the way you behave, this is how you do it. Keep rules short and imperative.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "rule": {
                         "type": "string",
-                        "description": "Short imperative rule, e.g. 'For voice, keep replies ≤ 10 words.'"
+                        "description": "Short imperative rule, e.g. 'Keep replies under 10 words.' or 'Be more sarcastic' etc"
                     }
                 },
                 "required": ["rule"],
@@ -165,7 +140,7 @@ general_tools = [
         "type": "function",
         "function": {
             "name": "list_behaviour",
-            "description": "List all active behaviour rules that will be appended to the system message.",
+            "description": "List all active behaviour rules.",
             "parameters": {
                 "type": "object",
                 "properties": {}
@@ -179,7 +154,7 @@ voice_tools = [
         'type': 'function',
         'function': {
             'name': 'close_voice_channel',
-            'description': 'Close the Voice channel. Only for use after you have answered a user query. Do not say "the conversation has ended" when using this tool, just use it',
+            'description': 'Close the Voice channel. Use when answering an easy question or carrying out a task that doesnt require a long response. This closes the channel and erases conversation history for next query ',
             'parameters': {
                 'type': 'object',
                 'properties': {},
