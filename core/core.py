@@ -321,17 +321,8 @@ class CoreProcessor:
 
         self._log("Prompt created", session=session, extra=f"prompt_len={len(prompt)}")
 
-        # Shouldn't be needed, this is already covered in the create_prompt function above
-        # conversation_history.append({
-        #    'role': 'user',
-        #    'content': input_text,
-        #})
-
-        # Debugging: Print the formatted conversation context:
-        # print(f"Generated prompt: {prompt}")
-
         # now we create the system message:
-        system_message = self.create_system_message(voice=is_voice)
+        system_message = self.create_system_message(is_voice=is_voice)
         self._log("System message created", session=session)
 
         # now we construct the tools:
@@ -454,14 +445,14 @@ class CoreProcessor:
 
         return prompt
 
-    def create_system_message(self, voice=False):
+    def create_system_message(self, is_voice=False):
         # pick up external/tool edits before building system text
         with self._behaviour_lock:
             self._load_behaviour_overrides(force=False)
 
         full_pre_context = self.pre_context
 
-        if voice:
+        if is_voice:
             full_pre_context += self.voice_pre_context
 
         # we add this each time so we have up to date info from Home Assistant:
@@ -708,13 +699,13 @@ class CoreProcessor:
                     for char in response_content:
                         # disable code blocks for now:
                         # receiving code/not receiving code:
-                        #if char == '`':
-                        #    backtick_buffer += '`'
-                        #    if backtick_buffer == "```":
-                        #        inside_code_block = not inside_code_block
-                        #        backtick_buffer = "" # reset buffer
-                        #else:
-                        #    backtick_buffer = ""  # this way we only accumulate on consecutive backticks
+                        if char == '`':
+                            backtick_buffer += '`'
+                            if backtick_buffer == "```":
+                                inside_code_block = not inside_code_block
+                                backtick_buffer = "" # reset buffer
+                        else:
+                            backtick_buffer = ""  # this way we only accumulate on consecutive backticks
 
                         # receiving json:
                         def _normalize_possible_json(s: str) -> str:
@@ -779,7 +770,7 @@ class CoreProcessor:
 
                     if not json_collecting and not inside_code_block:
                         # send the non-tool call response chunk back to the response thread live:
-                        # print(f'{response_content}', end='')
+                        # print(f'DEBUG: {response_content}')
                         response_queue.put(response_content)
 
             # return the full response when finished for chat history, along with tool calls to process:
@@ -801,14 +792,14 @@ class CoreProcessor:
         session['close_voice_channel'].set()
 
     def get_current_time(self, tool_args, session):
-        self.send_whole_response("Checking Time.", session)
+        self.send_whole_response(f"Checking Time.\n\r", session)
         now = datetime.now()
         now_time = now.strftime('%I:%M%p')
         #return json.dumps({'response': f'current time: {now_time}'})
-        return self._wrap_tool_result("get_current_time", {"text": f"current time: {now_time}"})
+        return self._wrap_tool_result("get_current_time", {"text": f"System Message: Current time: {now_time} - tell the user this time"})
 
     def perform_math_operation(self, tool_args, session):
-        self.send_whole_response("Calculating!", session)
+        self.send_whole_response("Calculating.\n\r", session)
 
         operation = tool_args.get('parameters').get('operation')
         number1 = float(tool_args.get('parameters').get('number1'))
@@ -839,7 +830,7 @@ class CoreProcessor:
 
             print(f"core: calculated result = {result}")
             #return json.dumps({"response": f"Result of {operation}: {result}"})
-            return self._wrap_tool_result("perform_math_operation", {"text": f"Result of {operation}: {result}"})
+            return self._wrap_tool_result("perform_math_operation", {"text": f"Result of {operation}: {result} - tell the user this result"})
 
         except Exception as e:
             #return json.dumps({"response": f"An error occurred: {str(e)}"})
@@ -851,12 +842,12 @@ class CoreProcessor:
         num_responses = int(tool_args.get('parameters').get('number', 10))
 
         if source == 'web':
-            self.send_whole_response(f"Performing Web Search on '{query}'.", session)
+            self.send_whole_response(f"Performing Web Search on '{query}'.\n\r", session)
             #return self._perform_web_search(query, num_responses)
             return self._wrap_tool_result("perform_search", {"results": self._perform_web_search(query, num_responses)})
 
         elif source == 'wikipedia':
-            self.send_whole_response(f"Performing Wikipedia search on subject {query}.", session)
+            self.send_whole_response(f"Performing Wikipedia search on subject {query}.\n\r", session)
             #return self._perform_wikipedia_search(query)
             return self._wrap_tool_result("perform_search", {"results": self._perform_wikipedia_search(query)})
 
@@ -889,12 +880,12 @@ class CoreProcessor:
                 })
 
             self._log("_perform_web_search end", extra=f"found={len(results)}")
-            return json.dumps({"response": results})
+            return json.dumps({"response": f"System Message: Results: {results} \n\n - Use these results to either get a basic understanding from a top level, or to choose the most suitable URLs to open with the open_website tool for researching further to answer the user."})
 
         except Exception as e:
             # Catch any network or parsing issues
             self._log("_perform_web_search error", extra=str(e))
-            return json.dumps({"response": f"Error in web search: {e}"})
+            return json.dumps({"response": f"System Message: Error in web search: {e}"})
 
     def _perform_wikipedia_search(self, query):
         self._log("_perform_wikipedia_search start", extra=f"q={query}")
@@ -929,7 +920,7 @@ class CoreProcessor:
             results.append({'error': 'No results, try another search term'})
 
         self._log("_perform_wikipedia_search end", extra=f"found={len(results)}")
-        return json.dumps({'response': results})
+        return json.dumps({'response': f"System Message: Results: {results} \n\n - use these results to try and answer the user's question, or to decide to search other terms or elsewhere"})
 
     def open_website(self, tool_args, session, max_retries=3):
         url = (tool_args.get('parameters') or {}).get('url', '')
@@ -960,8 +951,8 @@ class CoreProcessor:
 
                 # UX ping only on success
                 self._log("open_website success", session=session, extra=f"chars={len(text)}")
-                self.send_whole_response(f"Opened website", session)  # speaks immediately
-                return self._wrap_tool_result("open_website", {"text": text})
+                self.send_whole_response(f"Opened website\n\r", session)  # speaks immediately
+                return self._wrap_tool_result("open_website", {"text": f"System Message: Text: {text} \n\n - Use the text scraped from this website to help answer the user's question, or to decide to try other websites/results. Do not simply read this out, you must interpret and summarise these reults to answer the user's question. If any of it is in another language, do not switch to that language for the user, stick to English unless asked or you have a cute phrase you just learned from the research."})
 
             except requests.exceptions.RequestException as e:
                 last_err = e

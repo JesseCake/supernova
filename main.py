@@ -6,7 +6,7 @@ from interfaces.web_interface import WebInterface
 from interfaces.voice_remote import VoiceRemoteInterface
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  
     # Initialize core processor
     core_processor = CoreProcessor()
 
@@ -15,17 +15,17 @@ if __name__ == "__main__":
     #voice_thread = threading.Thread(target=voice_interface.run)
     #voice_thread.start()
 
-    # Start the remote voice interface
+    # Start the remote voice interface - wait is this used anymore?
     #def handler_factory(reader, writer):
     #    return VoiceRemoteInterface(reader, writer, core_processor)
 
-    #def run_remote_voice_interface():
-    #    asyncio.run(VoiceRemoteInterface(core_processor).run(host="0.0.0.0", port=10400))
+    def run_remote_voice_interface():
+        asyncio.run(VoiceRemoteInterface(core_processor).run(host="0.0.0.0", port=10400))
 
-    #remote_voice_thread = threading.Thread(target=run_remote_voice_interface)
-    #remote_voice_thread.start()
+    remote_voice_thread = threading.Thread(target=run_remote_voice_interface)
+    remote_voice_thread.start()
     
-    #Run directly in main thread for debugging:
+    #Run directly in main thread for debugging (don't use this for production):
     #run_remote_voice_interface()
 
     # Join thread (optional, if we want to join for certain functionality)

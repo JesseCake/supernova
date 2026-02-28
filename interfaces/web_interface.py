@@ -1,63 +1,51 @@
 import gradio as gr
-from gradio import ChatMessage
 import uuid
-import time
 import threading
+
 
 class WebInterface:
     def __init__(self, core_processor):
         self.core_processor = core_processor
-        self.session_id = None  # store the session ID here
+        self.session_id = None  # one session per browser tab/process
 
     def run(self):
         def process_message(message, history):
-            # print("web: starting to process message")
+            """
+            For gr.ChatInterface(type="messages"):
+            - Gradio manages `history`.
+            - This function should yield/return ONLY the assistant message
+              (as a dict {'role','content'} or ChatMessage), NOT the full history list.
+            """
 
-            if history is None:
-                history = []
-
-            # initialise session if not already done:
+            # Initialise session if not already done
             if self.session_id is None:
                 self.session_id = str(uuid.uuid4())
                 self.core_processor.create_session(self.session_id)
 
-            # Add user message using ChatMessage dataclass
-            history.append(ChatMessage(role="user", content=message))
-
-            # Run the input processing in a separate thread
-            process_thread = threading.Thread(
+            # Kick off the core processing in a background thread
+            t = threading.Thread(
                 target=self.core_processor.process_input,
-                kwargs={"input_text": message, "session_id": self.session_id, "is_voice":False}
+                kwargs={"input_text": message, "session_id": self.session_id, "is_voice": False},
+                daemon=True,
             )
-            process_thread.start()
-
+            t.start()
 
             session = self.core_processor.get_session(self.session_id)
 
             assistant_response = ""
 
-            # Stream response chunks incrementally
-            #while not session['response_finished'].is_set() or not session['response_queue'].empty():
+            # Stream chunks from the core processor
             while True:
-                if not session['response_queue'].empty():
-                    response_chunk = session['response_queue'].get()
-                    if response_chunk is None:
-                        # print('web: response finished')
-                        break
-                    else:
-                        # print(f'{response_chunk}', end='')
+                chunk = session["response_queue"].get()  # blocking
+                if chunk is None:
+                    break
 
-                        assistant_response += response_chunk
+                assistant_response += chunk
 
-                        # Yield the history as ChatMessage objects (Gradio will convert them properly)
-                        yield ChatMessage(role="assistant", content=assistant_response)
+                # IMPORTANT: yield a SINGLE assistant message (dict), not history
+                yield {"role": "assistant", "content": assistant_response}
 
-                time.sleep(0.05)
-
-            # print(f"web: broke out of queue")
-
-            # Final yield of the complete history
-            return history
+            # Just exit (no `return history` in a generator)
 
         gr.ChatInterface(
             fn=process_message,

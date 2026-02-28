@@ -17,11 +17,11 @@ general_tools = [
                 'properties': {
                     'query': {
                         'type': 'string',
-                        'description': 'Search query.'
+                        'description': 'Search query. Required'
                     },
                     'source': {
                         'type': 'string',
-                        'description': 'The source to search (options: "web", "wikipedia").'
+                        'description': 'The source to search (options: "web", "wikipedia"). Required.'
                     },
                     'number': {
                         'type': 'integer',
@@ -43,7 +43,7 @@ general_tools = [
                 'properties': {
                     'url': {
                         'type': 'string',
-                        'description': 'The full URL of the web page to view contents of'
+                        'description': 'The full URL of the web page to view contents of. Required'
                     },
                 },
                 'required': ['url'],
@@ -82,7 +82,7 @@ general_tools = [
                 "properties": {
                     "operation": {
                         "type": "string",
-                        "description": "The type of mathematical operation (options: 'addition', 'subtraction', 'multiplication', 'division', 'power', 'square_root')."
+                        "description": "The type of mathematical operation (options: 'addition', 'subtraction', 'multiplication', 'division', 'power', 'square_root'). Required."
                     },
                     "number1": {
                         "type": "number",
@@ -110,7 +110,7 @@ general_tools = [
                 "properties": {
                     "rule": {
                         "type": "string",
-                        "description": "Short imperative rule, e.g. 'Keep replies under 10 words.' or 'Be more sarcastic' etc"
+                        "description": "Short imperative rule, e.g. 'Keep replies under 10 words.' or 'Be more sarcastic' etc. Required."
                     }
                 },
                 "required": ["rule"],
@@ -128,7 +128,7 @@ general_tools = [
                 "properties": {
                     "rule": {
                         "type": "string",
-                        "description": "Exact rule text to remove."
+                        "description": "Exact rule text to remove. Required."
                     }
                 },
                 "required": ["rule"],
@@ -154,7 +154,7 @@ voice_tools = [
         'type': 'function',
         'function': {
             'name': 'close_voice_channel',
-            'description': 'Close the Voice channel. Use when answering an easy question or carrying out a task that doesnt require a long response. This closes the channel and erases conversation history for next query ',
+            'description': 'Close the Voice channel. Use when answering an easy question or carrying out a task that doesnt require a long response. This closes the channel and erases conversation history for next query. Also use if the user just says "thanks" or "that\'s it" or similar after a response, as that means they want to end the voice interaction.',
             'parameters': {
                 'type': 'object',
                 'properties': {},
