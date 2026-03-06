@@ -3,7 +3,7 @@ general_tools = [
         'type': 'function',
         'function': {
             'name': 'get_current_time',
-            'description': 'Get the current time - do not trust your own understanding of time, always use this tool to get the current time',
+            'description': 'Get the current time - do not trust your own understanding of time, always use this tool to get the current time, though you should have the current time always updated in your system message at the top.',
             'parameters': {},
             },
         },
@@ -11,7 +11,7 @@ general_tools = [
         'type': 'function',
         'function': {
             'name': 'perform_search',
-            'description': 'Perform a search on the Web or Wikipedia if you need to research or have been asked to look for something, then use results to answer the user (do not use for simple calculation you can do yourself)',
+            'description': 'Perform a search on the Web or Wikipedia if you need to research or have been asked to look for something, then use results to answer the user (do not use for simple calculation you can do yourself). Use the "web" source for general web search and "wikipedia" for more specific factual queries that are likely to be well-covered by Wikipedia.',
             'parameters': {
                 'type': 'object',
                 'properties': {
@@ -54,13 +54,13 @@ general_tools = [
         'type': 'function',
         'function': {
             'name': 'check_weather',
-            'description': 'Fetch the current weather or forecast information for a location.',
+            'description': 'Fetch the current weather or forecast information for a location. Use this when asked about the weather, or if you think it is relevant in the scope of another query or task. Use the default location if just asked about the weather rather than asking for a location.',
             'parameters': {
                 'type': 'object',
                 'properties': {
                     'location': {
                         'type': 'string',
-                        'description': 'The name of the location (e.g., city) to get the weather for. Use commas and state initials, country name to ensure correct city. Default is here at home: "Brunswick, VIC, Australia". For queries without a place name, leave as default',
+                        'description': 'Optional. Use this if the user is giving a location, otherwise leave as default. If using, use commas and state initials, country name to ensure correct city. Default is here at home: "Brunswick, VIC, Australia".',
                         'default': 'Brunswick, VIC, Australia'
                     },
                     'forecast': {
@@ -70,13 +70,14 @@ general_tools = [
                     },
                 },
             },
+            'required' : [],
         },
     },
     {
         "type": "function",
         "function": {
             "name": "perform_math_operation",
-            "description": "Perform basic mathematical operations if requested by the user.",
+            "description": "Perform basic mathematical operations if requested by the user. Use this for calculations you don't feel confident doing yourself, or seem terribly important that could cause harm if incorrect.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -104,7 +105,7 @@ general_tools = [
         "type": "function",
         "function": {
             "name": "update_behaviour",
-            "description": "Add a rule for yourself in future to change your own behaviour. Usually if asked to change the way you behave, this is how you do it. Keep rules short and imperative.",
+            "description": "Add a rule for yourself in future to change your own behaviour. Use this if asked to change the way you behave or have responded. Keep rules short and instructional.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -140,7 +141,7 @@ general_tools = [
         "type": "function",
         "function": {
             "name": "list_behaviour",
-            "description": "List all active behaviour rules.",
+            "description": "List all active behaviour rules available to you. Useful to check what rules you have in place or have forgotten, so you can either update or add new ones to address a shortfall.",
             "parameters": {
                 "type": "object",
                 "properties": {}

@@ -468,6 +468,10 @@ class CoreProcessor:
         if rules:
             full_pre_context += "\n\n[BEHAVIOUR_OVERRIDES]\n" + "\n".join(f"- {r}" for r in rules)
 
+        # we'll add the current time to the system message so the model can use it if needed without calling the tool:
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        full_pre_context += f"\n\nCurrent time: {now}"
+
         system_section = {
             'role': 'system',
             'content': full_pre_context,
@@ -1079,18 +1083,23 @@ class CoreProcessor:
 
         # Return the formatted JSON to the LLM
         return json.dumps(response)
+    
 
     def check_weather(self, tool_args, session):
         location = tool_args.get('parameters').get('location', 'Brunswick, VIC, Australia')
         #location = "Brunswick, VIC, Australia"
         forecast = tool_args.get('parameters').get('forecast', False)
-        self.send_whole_response(f"Fetching weather for {location}.", session)
+        self.send_whole_response(f"Fetching weather for {location}. ", session)
 
         try:
             if forecast:
-                self.send_whole_response("Fetching 5 day forecast.", session)
+                self.send_whole_response("Fetching 5 day forecast. \n\r", session)
                 # Get the 5-day forecast
-                url = f"http://api.openweathermap.org/data/2.5/forecast?q={location}&appid={self.weather_api_key}&units=metric"
+                if location == "Brunswick, VIC, Australia":
+                    # Forecast weather by coordinates (problems with weather pulled from wrong location):
+                    url = f"http://api.openweathermap.org/data/2.5/forecast?lat=-37.7746&lon=144.9631&appid={self.weather_api_key}&units=metric"
+                else:
+                    url = f"http://api.openweathermap.org/data/2.5/forecast?q={location}&appid={self.weather_api_key}&units=metric"
                 response = requests.get(url)
                 weather_data = response.json()
 
@@ -1118,8 +1127,12 @@ class CoreProcessor:
 
             else:
                 # Get the current weather
-                self.send_whole_response("Fetching current weather.", session)
-                url = f"http://api.openweathermap.org/data/2.5/weather?q={location}&appid={self.weather_api_key}&units=metric"
+                self.send_whole_response("(current)\n\r", session)
+                if location == "Brunswick, VIC, Australia":
+                    # Current weather by coordinates (problems with weather pulled from wrong location):
+                    url = f"http://api.openweathermap.org/data/2.5/weather?lat=-37.7746&lon=144.9631&appid={self.weather_api_key}&units=metric"
+                else:
+                    url = f"http://api.openweathermap.org/data/2.5/weather?q={location}&appid={self.weather_api_key}&units=metric"
                 response = requests.get(url)
                 weather_data = response.json()
 
@@ -1137,16 +1150,15 @@ class CoreProcessor:
                         'humidity': humidity,
                         'description': weather_desc
                     }
-                    # self.send_whole_response(f"Current Result: {result}", session)
-                    #return json.dumps({'check_weather': result})
+                    # Debugging:
+                    #self.send_whole_response(f"Raw tool result: {result}", session)
+
                     return self._wrap_tool_result("check_weather", {"current_weather": result})
 
                 else:
-                    #return json.dumps({'check_weather': f"Failed to fetch weather data: {weather_data.get('message', 'Unknown error')}"})
                     return self._wrap_tool_result("check_weather", {"text": f"Failed to fetch weather data: {weather_data.get('message', 'Unknown error')}"})
 
         except Exception as e:
-            #return json.dumps({'check_weather': f"Error fetching weather data: {str(e)}"})
             return self._wrap_tool_result("check_weather", {"text": f"Error fetching weather data: {str(e)}"})
 
 
