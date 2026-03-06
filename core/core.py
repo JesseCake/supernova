@@ -38,7 +38,7 @@ class CoreProcessor:
     def __init__(self):
         self.sessions = {}
 
-        self.model = "gemma3:4b"  # was using 4b to fit, 12b is too big for my little Jetson
+        self.model = "gemma3:12b"  # was using 4b to fit, 12b is too big for my little Jetson
         self.ollama_client = ollama.Client(host='http://localhost:11434')
         self.pre_context = precontext.llama3_context
         self.voice_pre_context = precontext.voice_context
