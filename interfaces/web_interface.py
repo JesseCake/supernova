@@ -10,13 +10,6 @@ class WebInterface:
 
     def run(self):
         def process_message(message, history):
-            """
-            For gr.ChatInterface(type="messages"):
-            - Gradio manages `history`.
-            - This function should yield/return ONLY the assistant message
-              (as a dict {'role','content'} or ChatMessage), NOT the full history list.
-            """
-
             # Initialise session if not already done
             if self.session_id is None:
                 self.session_id = str(uuid.uuid4())
@@ -47,8 +40,35 @@ class WebInterface:
 
             # Just exit (no `return history` in a generator)
 
-        gr.ChatInterface(
-            fn=process_message,
-            type="messages",
-            title="Supernova",
-        ).launch(share=False, server_name="0.0.0.0")
+        def clear_chat_history():
+            self.core_processor.clear_history(self.session_id)
+            return []
+
+        with gr.Blocks(title="Supernova", css="""
+            html, body, .gradio-container { height: 100% !important; }
+            #chatbot { height: calc(100vh - 200px) !important; }
+        """) as demo:
+            gr.Markdown("# Supernova")
+
+            chatbot = gr.Chatbot(type="messages", height=600, elem_id="chatbot")
+
+            chat = gr.ChatInterface(
+                fn=process_message,
+                type="messages",
+                chatbot=chatbot,
+            )
+
+            clear_btn = gr.Button("Clear History", variant="secondary")
+            clear_btn.click(
+                fn=clear_chat_history,
+                inputs=None,
+                outputs=chatbot,
+            )
+
+        demo.launch(share=False, server_name="0.0.0.0")
+
+        #gr.ChatInterface(
+        #    fn=process_message,
+        #    type="messages",
+        #    title="Supernova",
+        #).launch(share=False, server_name="0.0.0.0")

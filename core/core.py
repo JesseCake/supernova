@@ -120,6 +120,11 @@ class CoreProcessor:
     
     def get_session(self, session_id):
         return self.sessions.get(session_id)
+
+    def clear_history(self, session_id):
+        session = self.get_session(session_id)
+        if session is not None:
+            session['conversation_history'] = []
     
     def _load_behaviour_overrides(self, force=False):
         """Load overrides from disk; if not force, only reload when mtime changed."""
