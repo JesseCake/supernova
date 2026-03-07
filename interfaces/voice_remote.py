@@ -57,7 +57,7 @@ class VoiceRemoteInterface:
         self.listening_rate = listening_rate
 
         # ASR / VAD
-        self.vad_detector = VoiceActivityDetector(threshold=0.5, frame_rate=self.listening_rate)
+        self.vad_detector = VoiceActivityDetector(threshold=0.7, frame_rate=self.listening_rate)
         self.transcriber = WhisperModel(model_size_or_path='base.en')  # originally we started with tiny.en
         self.frames_np = np.array([], dtype=np.float32)
         self.recording = False
@@ -228,6 +228,14 @@ class VoiceRemoteInterface:
     async def _transcribe_buffer(self):
         if self.frames_np.size == 0:
             return
+
+        # Reject buffers that are too short — Whisper hallucinates badly on fragments
+        min_samples = int(0.75 * self.listening_rate)  # 0.75s minimum
+        if self.frames_np.size < min_samples:
+            print(f"[voice_remote] Ignoring short buffer ({self.frames_np.size} samples, need {min_samples})")
+            self.frames_np = np.array([], dtype=np.float32)
+            return
+
         try:
             segments, _ = self.transcriber.transcribe(self.frames_np)
             self.frames_np = np.array([], dtype=np.float32)
