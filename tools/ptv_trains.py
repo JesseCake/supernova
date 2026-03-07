@@ -167,6 +167,8 @@ def format_departures(departures: list[dict], stop_name: str, walk_minutes: int 
         delay_str = f", running {d['delay_s']//60} minutes late" if d["delay_s"] > 60 else ""
         rt_str = "" if d["realtime"] else " (scheduled)"
         lines.append(f"  {d['time']} — in {mins_str}{delay_str}{rt_str} to {d['headsign']}")
+    # add instruction here to tell user the next 2 trains:
+    lines.append("\nIt's best to tell the user the next 2 trains, and warn if the next train is leaving in less than the time it takes to walk to the station.\n")
     return "\n".join(lines)
 
 
