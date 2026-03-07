@@ -1118,7 +1118,7 @@ class CoreProcessor:
                     }
 
                     #debug return:
-                    print(f"[check_weather] forecast result: \n{json.dumps(result, indent=2)}")
+                    #print(f"[check_weather] forecast result: \n{json.dumps(result, indent=2)}")
 
                     return self._wrap_tool_result("check_weather", {"forecast": result})
 
@@ -1146,9 +1146,9 @@ class CoreProcessor:
 
                     result = {
                         'location': location,
-                        'temperature': temp,
-                        'feels_like': feels_like,
-                        'humidity': humidity,
+                        'temperature': f"{temp}°C",
+                        'feels_like': f"{feels_like}°C",
+                        'humidity': f"{humidity}%",
                         'description': weather_desc
                     }
                     # Debugging:
