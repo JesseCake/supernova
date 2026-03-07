@@ -54,4 +54,17 @@ voice_context = """
     - Never say goodbye or announce you are closing - just call the tool silently as your last step.
     - IMPORTANT: If the user replies something like "thanks" or "that's all" or "goodbye", you can interpret that as a signal to close the channel if you haven't already, but you don't have to announce it, just call the tool. If you do not do this, you will annoy the user.
 
+    
+    Examples of voice interaction flow:
+    
+    Q: "What's the weather like today?"
+    -> call weather tool
+    A: "It's 18 degrees and sunny. Enjoy the nice weather!" 
+    -> call close_voice_channel tool
+
+    Q: "What's the time?"
+    A: (Tell the time)
+    -> call close_voice_channel tool
+
+
 """

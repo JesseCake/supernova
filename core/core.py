@@ -47,10 +47,8 @@ class CoreProcessor:
         self.model = config.ollama.model
         self.ollama_client = ollama.Client(host=config.ollama.host)
         self.ha_url = config.ha_url
-        self.model_type = config.ollama.model_type  # currently supports "gemma3" or "qwen3"
+        self.model_type = config.ollama.model_type  # currently supports "gemma3" or "qwen3" NOT NEEDED ANYMORE - TO REMOVE
 
-        #self.model = "gemma3:12b"  # was using 4b to fit, 12b is too big for my little Jetson
-        #self.ollama_client = ollama.Client(host='http://localhost:11434')
         self.pre_context = precontext.llama3_context
         self.voice_pre_context = precontext.voice_context
         self.current_conversation = None
@@ -452,8 +450,12 @@ class CoreProcessor:
             full_pre_context += "\n\n[BEHAVIOUR_OVERRIDES]\n" + "\n".join(f"- {r}" for r in rules)
 
         # we'll add the current time to the system message so the model can use it if needed without calling the tool:
-        now = datetime.now().strftime("%A, %d %B %Y %H:%M%p")  # includes date and day for grounding
-        full_pre_context += f"\n\nCurrent local day/date/time: {now} AEST - use this to answer any queries on time, day, or date, but list parts requested (ie if asked for time, simply give the time etc)."
+        day = datetime.now().strftime("%A")
+        date = datetime.now().strftime("%d %B %Y")  # format: 01 January 2024
+        time = datetime.now().strftime("%I:%M%p")  # format: 01:00PM
+        #now = datetime.now().strftime("%A, %d %B %Y %H:%M%p")  # includes date and day for grounding
+        timezone = "AEST"
+        full_pre_context += f"\n\nCurrent:\n Time (use these for user answers as needed): Time: {time}\nDate: {date}\nDay: {day}\nTimezone: {timezone}\n"
 
         system_section = {
             'role': 'system',
