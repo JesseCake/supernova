@@ -245,9 +245,9 @@ class VoiceRemoteInterface:
         if self.close_channel_phrase in text.lower():
             await self._close_channel()
             return
-        elif ".  .  .  .  .  .  .  ." in text:
-            # ignore nonsense from bad VAD cutoff
-            print(f"[voice_remote] Ignoring bad VAD cutoff")
+        elif re.fullmatch(r'[\s.…]+', text):
+            # sometimes whisper hallucinates noise as dots, we'll filter those out so we're not processing nonsense:
+            print(f"[voice_remote] Ignoring Whisper hallucination: '{text}'")
             return
 
         

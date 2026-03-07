@@ -74,7 +74,7 @@ class CoreProcessor:
 
         self.available_functions = {
             'close_voice_channel': self.close_voice_channel,
-            'get_current_time': self.get_current_time,
+            #'get_current_time': self.get_current_time,
             'perform_search': self.perform_search,
             'open_website': self.open_website,
             'home_automation_action': self.home_automation_action,
@@ -452,8 +452,8 @@ class CoreProcessor:
             full_pre_context += "\n\n[BEHAVIOUR_OVERRIDES]\n" + "\n".join(f"- {r}" for r in rules)
 
         # we'll add the current time to the system message so the model can use it if needed without calling the tool:
-        now = datetime.now().strftime("A%, %Y-%m-%d %H:%M:%S")  # includes date and day for grounding
-        full_pre_context += f"\n\nCurrent local day/date/time: {now} AEST"
+        now = datetime.now().strftime("%A, %d %B %Y %H:%M%p")  # includes date and day for grounding
+        full_pre_context += f"\n\nCurrent local day/date/time: {now} AEST - use this to answer any queries on time, day, or date, but list parts requested (ie if asked for time, simply give the time etc)."
 
         system_section = {
             'role': 'system',
@@ -463,199 +463,6 @@ class CoreProcessor:
         #print(f"DEBUGGING SYSTEM: \n{system_section['content']}")
 
         return system_section
-
-    def format_raw_prompt_qwen3(self, system, messages, tools=None):
-        """
-        Build a raw prompt matching Qwen3's ChatML template:
-
-        <|im_start|>system
-        {system content}<|im_end|>
-        <|im_start|>user
-        {content}<|im_end|>
-        <|im_start|>assistant
-        {content}<|im_end|>
-
-        Notes:
-        - Qwen3 uses standard ChatML (<|im_start|>/<|im_end|>), unlike Gemma's <start_of_turn>
-        - System prompt gets its own dedicated system role (no need to inject into user turn)
-        """
-        parts = []
-
-        # 1) System message — Qwen3 has a proper system role, unlike Gemma
-        sys_text = ""
-        if isinstance(system, dict):
-            sys_text = (system.get("content") or "").strip()
-        elif isinstance(system, str):
-            sys_text = system.strip()
-
-        if sys_text:
-            parts.append(f"<|im_start|>system\n{sys_text}<|im_end|>\n")
-
-        # 2) Conversation history
-        for msg in messages:
-            role = msg.get("role", "user")
-            content = (msg.get("content") or "").strip()
-
-            if role == "system":
-                # skip — already handled above
-                continue
-
-            if role == "assistant":
-                parts.append(f"<|im_start|>assistant\n{content}<|im_end|>\n")
-
-            elif role == "tool":
-                # Tool results go in as user turns
-                parts.append(f"<|im_start|>user\n<tool_response>\n{content}\n</tool_response>\n<|im_end|>\n")
-
-            else:  # user
-                # Append /no_think to the LAST user message to disable thinking mode
-                # We'll handle that after the loop — store content for now
-                parts.append(f"<|im_start|>user\n{content}<|im_end|>\n")
-
-        # 3) Prime the model to respond
-        parts.append("<|im_start|>assistant\n")
-
-        prompt = "".join(parts)
-
-        return prompt
-    
-    def format_raw_prompt_gemma(self, system, messages, tools=None):
-        """
-        Build a raw prompt that matches Ollama's Gemma 3 template:
-
-        user  -> <start_of_turn>user\n{content}<end_of_turn>\n
-        model -> <start_of_turn>model\n{content}[<end_of_turn>\n if not last]
-        system -> treated as a user turn at the top
-        """
-        parts = []
-
-        # 1) System (Gemma has no dedicated system header; treat as a user turn)
-        sys_text = ""
-        if isinstance(system, dict):
-            sys_text = (system.get("content") or "").strip()
-        elif isinstance(system, str):
-            sys_text = system.strip()
-
-        # Append tools to system text (Gemma has no dedicated header)
-        if tools:
-            tools_json = json.dumps(tools, indent=2)
-            sys_text += (
-                "\n\n---\nTOOLS\n"
-                "You may use tools when helpful. Available tools (JSON schema):\n"
-                f"{tools_json}\n\n"
-                "Tool-calling protocol:\n"
-                "1) To call a tool, reply with EXACTLY one JSON object on a single line:\n"
-                '   {"name":"<function_name>","parameters":{...}}\n'
-                "   - No backticks, no surrounding text, no extra keys.\n"
-                "2) After a tool runs, its result will arrive as a USER turn wrapped like:\n"
-                "   <TOOL_RESULT>\n"
-                '   {"tool_result":{"name":"<function_name>","content":{...}}}\n'
-                "   </TOOL_RESULT>\n"
-                "   - Read and use the JSON at tool_result.content.\n"
-                "3) If another tool is needed, repeat step (1). Otherwise, answer the user.\n"
-                "4) Only call ONE tool per message.\n"
-            )
-
-        if sys_text:
-            parts.append("<start_of_turn>user\n")
-            parts.append(sys_text)
-            parts.append("<end_of_turn>\n")
-
-        # 2) Conversation
-        n = len(messages)
-        for i, msg in enumerate(messages):
-            last = (i == n - 1)
-            role = msg.get("role")
-            content = (msg.get("content") or "").rstrip()
-
-            if role in ("user", "system"):
-                parts.append("<start_of_turn>user\n")
-                parts.append(content)
-                parts.append("<end_of_turn>\n")
-                if last:
-                    # After the last user/system turn, open the model header to begin generation
-                    parts.append("<start_of_turn>model\n")
-
-            elif role == "assistant":
-                parts.append("<start_of_turn>model\n")
-                parts.append(content)
-                if not last:
-                    parts.append("<end_of_turn>\n")
-
-            elif role == "tool":
-                # Gemma template doesn't define a tool role. If you must include tool output,
-                # feed it back as a user turn.
-                parts.append("<start_of_turn>user\n")
-                parts.append("<TOOL_RESULT>\n")
-                parts.append(content.strip())  # this is the JSON from _wrap_tool_result(...)
-                parts.append("\n</TOOL_RESULT>")
-                parts.append("\n<end_of_turn>\n")
-                if last:
-                    parts.append("<start_of_turn>model\n")
-
-            else:
-                raise ValueError(f"Unsupported role for Gemma template: {role!r}")
-
-        return "".join(parts)
-
-    def format_raw_prompt_llama(self, system, messages, tools=None):
-        """
-        THIS IS OUTDATED NOW and not used - who uses LLaMA anymore? Leaving for posterity but won't maintain.
-        Creates a minimal prompt text for the LLM, focusing on essential content and omitting internal metadata.
-
-        Parameters:
-        - system (str): The system message content.
-        - messages (list of dict): Conversation history, each dict containing 'role' and 'content'.
-        - tools (list of str): List of tool descriptions.
-
-        Returns:
-        - str: Cleaned and formatted prompt text.
-        """
-        prompt_text = ""
-
-        # Add system content
-        if system and 'content' in system:
-            #prompt_text += f"System: {system['content']}\n\n"
-            prompt_text += f"<|start_header_id|>system<|end_header_id|>\n{system['content']}\n<|eot_id|>\n\n"
-
-        # Conditionally add tools section if needed
-        if tools:
-            #prompt_text += f"When you receive a tool call response, use the output to format an answer to the original use question, or to further call other tools to do so."
-            #prompt_text += "Available functions:\n" + json.dumps(tools, indent=2) + "\n"
-            #prompt_text += 'Given the previous functions, if required to assist the user, please respond with a JSON for a function call with its proper arguments that best answers the given prompt. Respond in the format {"name": function name, "parameters": dictionary of argument name and its value}. Do not use variables.\n\n'
-            tools_json = json.dumps(tools, indent=2)
-            prompt_text += f"""
-            <|start_header_id|>tools<|end_header_id|>
-            When required to answer user queries, use the following tools. You do not have to use them every time.
-
-            Available tools:
-            {tools_json}
-
-            When you receive a message from the 'tool' role, it will be a JSON object like {{"response": "..."}}.
-            Always extract the value from the 'response' key and use it directly to answer the user's question, unless further tool action is required.
-            Important: Do not reuse values from the example.
-            
-            Instructions:
-            1. Do not use these functions unnecessarily for things that can be done in text yourself (eg simple maths or conversions).
-            2. Do not discuss the tools; just use them or not as required
-            3. Do not refer to or tell the user about using tools (unless one has failed).
-            4. Do not offer tools that do not relate to the users request
-            
-            If you need to use a tool, respond in the format {{"name": function name, "parameters": dictionary of argument names and value}}. Do not use variables.
-            <|eot_id|>
-            """
-
-        # Add conversation history without metadata
-        for message in messages:
-            role = message['role']
-            content = message['content']
-            #prompt_text += f"{role.capitalize()}: {content}\n\n"
-            prompt_text += f"<|start_header_id|>{role}<|end_header_id|>\n{content}\n<|eot_id|>\n\n"
-
-        # finally a kick to make the LLM respond:
-        prompt_text += "<|start_header_id|>assistant<|end_header_id|>"
-
-        return prompt_text.strip()
 
     def send_to_ollama(self, prompt_text, prompt_tools, session, available_functions=None):
         """

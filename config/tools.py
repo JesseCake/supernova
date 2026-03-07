@@ -2,14 +2,6 @@ general_tools = [
     {
         'type': 'function',
         'function': {
-            'name': 'get_current_time',
-            'description': 'Get the current time - do not trust your own understanding of time, always use this tool to get the current time, though you should have the current time always updated in your system message at the top.',
-            'parameters': {},
-            },
-        },
-    {
-        'type': 'function',
-        'function': {
             'name': 'perform_search',
             'description': 'Perform a search on the Web or Wikipedia if you need to research or have been asked to look for something, then use results to answer the user (do not use for simple calculation you can do yourself). Use the "web" source for general web search and "wikipedia" for more specific factual queries that are likely to be well-covered by Wikipedia.',
             'parameters': {
@@ -155,7 +147,7 @@ voice_tools = [
         'type': 'function',
         'function': {
             'name': 'close_voice_channel',
-            'description': 'Call this after answering an easy question or responding with the results of another tool call to answer a question. This keeps voice communication brief and to the point.',
+            'description': 'Call this after answering an easy question or responding with the results of another tool call to answer a question. This keeps voice communication brief and to the point. IMPORTANT: Do not ask a question when closing the voice channel, and do not ask if the user would like to close the voice channel, just close it as a final step after giving the answer or information.',
             'parameters': {
                 'type': 'object',
                 'properties': {},
