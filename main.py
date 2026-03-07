@@ -1,16 +1,24 @@
 import threading
 import asyncio
 from core.core import CoreProcessor
+
+# Config
+from config.settings import load_config
+
+# Interfaces
 from interfaces.web_interface import WebInterface
 #from interfaces.voice_interface import VoiceInterface
 from interfaces.voice_remote import VoiceRemoteInterface
 
 
 if __name__ == "__main__":  
-    # Initialize core processor
-    core_processor = CoreProcessor()
+    # Config
+    config = load_config()
 
-    # Start the voice interface (using defaults)
+    # Initialize core processor with config
+    core_processor = CoreProcessor(config)
+
+    # Start the local voice interface (using defaults)
     #voice_interface = VoiceInterface(core_processor=core_processor)
     #voice_thread = threading.Thread(target=voice_interface.run)
     #voice_thread.start()

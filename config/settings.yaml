@@ -1,0 +1,11 @@
+ollama:
+  host: "http://localhost:11434"
+  model: "gemma3:12b"
+  model_type: "gemma"   # drives message formatting: "gemma" | "llama3" | "qwen" etc.
+
+server:
+  remote_voice_host: "0.0.0.0"
+  remote_voice_port: 10400
+
+home_assistant:
+  url: "http://192.168.20.3:8123/api"

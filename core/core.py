@@ -33,13 +33,20 @@ except Exception:
 from config import precontext, tools
 import tempfile
 
+# config
+from config.settings import AppConfig
+
 
 class CoreProcessor:
-    def __init__(self):
+    def __init__(self, config: AppConfig):
         self.sessions = {}
 
-        self.model = "gemma3:12b"  # was using 4b to fit, 12b is too big for my little Jetson
-        self.ollama_client = ollama.Client(host='http://localhost:11434')
+        self.model = config.ollama.model
+        self.ollama_client = ollama.Client(host=config.ollama.host)
+        self.ha_url = config.ha_url
+
+        #self.model = "gemma3:12b"  # was using 4b to fit, 12b is too big for my little Jetson
+        #self.ollama_client = ollama.Client(host='http://localhost:11434')
         self.pre_context = precontext.llama3_context
         self.voice_pre_context = precontext.voice_context
         self.current_conversation = None
@@ -57,7 +64,7 @@ class CoreProcessor:
 
         # Home assistant integration
         self.ha_key = self.get_ha_key()
-        self.ha_url = 'http://192.168.20.3:8123/api'
+        #self.ha_url = 'http://192.168.20.3:8123/api'
         self.home_assistant = HAClient(self.ha_url, self.ha_key)
         self._ha_cache = {"stamp": 0.0, "text": ""}
 
