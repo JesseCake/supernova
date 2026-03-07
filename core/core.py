@@ -453,9 +453,9 @@ class CoreProcessor:
         day = datetime.now().strftime("%A")
         date = datetime.now().strftime("%d %B %Y")  # format: 01 January 2024
         time = datetime.now().strftime("%I:%M%p")  # format: 01:00PM
-        #now = datetime.now().strftime("%A, %d %B %Y %H:%M%p")  # includes date and day for grounding
         timezone = "AEST"
-        full_pre_context += f"\n\nCurrent:\n Time (use these for user answers as needed): Time: {time}\nDate: {date}\nDay: {day}\nTimezone: {timezone}\n"
+
+        full_pre_context += f"\n\nCurrent Time: (use these for user answers as needed)\n Time: {time}\nDate: {date}\nDay: {day}\nTimezone: {timezone}\n"
 
         system_section = {
             'role': 'system',
@@ -760,7 +760,16 @@ class CoreProcessor:
                 # UX ping only on success
                 self._log("open_website success", session=session, extra=f"chars={len(text)}")
                 self.send_whole_response(f"Opened website\n\r", session)  # speaks immediately
-                return self._wrap_tool_result("open_website", {"text": f"System Message: Text: {text} \n\n - Use the text scraped from this website to help answer the user's question, or to decide to try other websites/results. Do not simply read this out, you must interpret and summarise these reults to answer the user's question. If any of it is in another language, do not switch to that language for the user, stick to English unless asked or you have a cute phrase you just learned from the research."})
+                #return self._wrap_tool_result("open_website", {"text": f"System Message: Text: {text} \n\n - Use the text scraped from this website to help answer the user's question, or to decide to try other websites/results. Do not simply read this out, you must interpret and summarise these reults to answer the user's question. If any of it is in another language, do not switch to that language for the user, stick to English unless asked or you have a cute phrase you just learned from the research."})
+                return self._wrap_tool_result("open_website", {"text": (
+                    "SYSTEM INSTRUCTIONS (follow these before reading the content below):\n"
+                    "1. YOUR RESPONSE MUST BE IN ENGLISH ONLY. The page below may contain non-English text — do NOT reproduce, translate inline, or switch language. Summarise only in English.\n"
+                    "2. Stay focused on the user's original question. Extract only what is relevant.\n"
+                    "3. Do not read this content aloud verbatim — interpret and summarise it.\n"
+                    "4. If the page content is irrelevant or unhelpful, say so briefly and suggest trying another source.\n"
+                    f"\nPAGE CONTENT:\n{text}"
+                    "REMEMBER: ENGLISH ONLY RESPONSE, INTERPRET AND SUMMARISE, STAY FOCUSED ON USER'S ORIGINAL QUESTION"
+                )})
 
             except requests.exceptions.RequestException as e:
                 last_err = e

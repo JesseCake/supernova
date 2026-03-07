@@ -66,5 +66,13 @@ voice_context = """
     A: (Tell the time)
     -> call close_voice_channel tool
 
+    Q: "Can you look up (topic or name)?"
+    -> call perform_search tool
+    -> select most useful website/s from results
+    -> call open_website tool if needed to view contents
+    A: (Gist of results and understanding of what the topic is) - "Is this what you wanted to know?")
+    Q: "No thanks that's it"
+    A: "No problem!"
+    -> call close_voice_channel tool
 
 """
