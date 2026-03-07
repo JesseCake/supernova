@@ -15,3 +15,12 @@ server:
 
 home_assistant:
   url: "http://192.168.20.3:8123/api"
+
+ptv:
+  api_key: ""
+  stop_id: "14312"           # Anstey Station platform 1 (citybound)
+  stop_name: "Anstey Station"
+  direction: "citybound"
+  gtfs_zip_folder: "2"       # folder 2 = non-metro/regional in the GTFS zip
+  # cache_file auto-set to config/ptv_cache.json if omitted
+  walk_minutes: 7         # used in prompt formatting to give user an idea of how long to get to station before next train

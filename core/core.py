@@ -22,6 +22,7 @@ import requests
 from bs4 import BeautifulSoup
 import requests
 from urllib.parse import urlparse
+import re
 
 # for weather:
 from collections import defaultdict
@@ -34,16 +35,19 @@ except Exception:
 
 # our precontext and tools info:
 from config import precontext, tools
+from config.tools import get_tools
 import tempfile
 
 # config
 from config.settings import AppConfig
 
 
+
 class CoreProcessor:
     def __init__(self, config: AppConfig):
         self.sessions = {}
 
+        self.config = config
         self.model = config.ollama.model
         self.ollama_client = ollama.Client(host=config.ollama.host)
         self.ha_url = config.ha_url
@@ -82,6 +86,13 @@ class CoreProcessor:
             'remove_behaviour': self.remove_behaviour,
             'list_behaviour': self.list_behaviour,
         }
+
+        # conditional inclusion of ptv tool based on config presence:
+        if config.ptv:
+            from tools.ptv_trains import get_departures, format_departures
+            self._ptv_get_departures = get_departures
+            self._ptv_format_departures = format_departures
+            self.available_functions['get_train_departures'] = self.get_train_departures
 
     def _log(self, label, session=None, extra=None):
         """Lightweight timing/log helper. Prints wallclock time and elapsed since session start when available."""
@@ -337,11 +348,14 @@ class CoreProcessor:
         )
 
         # now we construct the tools:
+        base_tools = get_tools(self.config)
         if is_voice:
             # it seems order is important, putting voice close channel tool first:
-            prompt_tools = tools.voice_tools + tools.general_tools
+            #prompt_tools = tools.voice_tools + tools.general_tools
+            prompt_tools = tools.voice_tools + base_tools
         else:
-            prompt_tools = tools.general_tools
+            prompt_tools = base_tools
+            #prompt_tools = tools.general_tools
 
         while True:
             full_response, tool_msg, tool_name, chat_tool_calls = self.send_to_ollama(
@@ -647,21 +661,28 @@ class CoreProcessor:
     def perform_search(self, tool_args, session):
         query = tool_args.get('parameters').get('query')
         source = tool_args.get('parameters').get('source')
-        num_responses = int(tool_args.get('parameters').get('number', 10))
+        num_responses = int(tool_args.get('parameters').get('number', 5))  # default reduced from 10, but tool can still be called with different number via the parameters if needed
 
         if source == 'web':
             self.send_whole_response(f"Performing Web Search on '{query}'.\n\r", session)
-            #return self._perform_web_search(query, num_responses)
-            return self._wrap_tool_result("perform_search", {"results": self._perform_web_search(query, num_responses)})
+
+            return self._wrap_tool_result("perform_search", {
+                "instruction": "Use these results to answer the user's question directly if possible, or choose the most relevant URL to open with the open_website tool for further research. Respond in English only. Do not reproduce these results verbatim.",
+                "results": self._perform_web_search(query, num_responses),
+            })
 
         elif source == 'wikipedia':
             self.send_whole_response(f"Performing Wikipedia search on subject {query}.\n\r", session)
-            #return self._perform_wikipedia_search(query)
-            return self._wrap_tool_result("perform_search", {"results": self._perform_wikipedia_search(query)})
+
+            return self._wrap_tool_result("perform_search", {
+                "instruction": "Use these results to answer the user's question. Respond in English only.",
+                "results": self._perform_wikipedia_search(query),
+            })
 
         else:
-            #return json.dumps({'error': 'Invalid source specified. Choose "web" or "wikipedia".'})
-            return self._wrap_tool_result("perform_search", {"text": 'Invalid source specified. Choose "web" or "wikipedia".'})
+            return self._wrap_tool_result("perform_search", {
+                "error": "Invalid source. Choose web or wikipedia."
+            })
 
     def _perform_web_search(self, query, num_responses):
         self._log("_perform_web_search start", extra=f"q={query} n={num_responses}")
@@ -676,8 +697,8 @@ class CoreProcessor:
                     max_results=num_responses,
                 ):
                     results.append({
-                        "title": r.get("title"),
-                        "snippet": r.get("body"),
+                        "title": r.get("title")[:100],  # cap title length
+                        "snippet": r.get("body")[:200], # cap snippet length
                         "link": r.get("href"),
                     })
 
@@ -688,12 +709,12 @@ class CoreProcessor:
                 })
 
             self._log("_perform_web_search end", extra=f"found={len(results)}")
-            return json.dumps({"response": f"System Message: Results: {results} \n\n - Use these results to either get a basic understanding from a top level, or to choose the most suitable URLs to open with the open_website tool for researching further to answer the user."})
+            return results
 
         except Exception as e:
             # Catch any network or parsing issues
             self._log("_perform_web_search error", extra=str(e))
-            return json.dumps({"response": f"System Message: Error in web search: {e}"})
+            return [{"error": f"Search failed: {e}"}]
 
     def _perform_wikipedia_search(self, query):
         self._log("_perform_wikipedia_search start", extra=f"q={query}")
@@ -728,7 +749,7 @@ class CoreProcessor:
             results.append({'error': 'No results, try another search term'})
 
         self._log("_perform_wikipedia_search end", extra=f"found={len(results)}")
-        return json.dumps({'response': f"System Message: Results: {results} \n\n - use these results to try and answer the user's question, or to decide to search other terms or elsewhere"})
+        return results
 
     def open_website(self, tool_args, session, max_retries=3):
         url = (tool_args.get('parameters') or {}).get('url', '')
@@ -750,10 +771,18 @@ class CoreProcessor:
 
                 # Parse static HTML (no JS rendering) for reliability
                 soup = BeautifulSoup(resp.text, 'html.parser')
+                
+                # Remove boilerplate noise before truncating
+                for tag in soup(['script', 'style', 'nav', 'footer', 'header', 'aside']):
+                    tag.decompose()
+                
                 text = soup.get_text(separator="\n", strip=True)
 
+                # Collapse excessive blank lines
+                text = re.sub(r'\n{3,}', '\n\n', text)
+
                 # trim very large pages to keep the LLM responsive
-                max_chars = 8000
+                max_chars = 3000
                 if len(text) > max_chars:
                     text = text[:max_chars] + "\n...[truncated]"
 
@@ -979,6 +1008,26 @@ class CoreProcessor:
 
         except Exception as e:
             return self._wrap_tool_result("check_weather", {"text": f"Error fetching weather data: {str(e)}"})
+        
+    def get_train_departures(self, tool_args, session):
+        count = tool_args.get('parameters', {}).get('count', 2)
+        self.send_whole_response("Checking train times. ", session)
+        try:
+            cfg = self.config.ptv
+            print(f"[ptv] fetching departures | stop={cfg.stop_id} name={cfg.stop_name} count={count} cache={cfg.cache_file}")
+            deps = self._ptv_get_departures(
+                cfg.api_key, cfg.stop_id, cfg.stop_name, cfg.cache_file, n=count
+            )
+            print(f"[ptv] got {len(deps)} departures: {deps}")
+            result = self._ptv_format_departures(deps, cfg.stop_name, cfg.walk_minutes)
+            print(f"[ptv] formatted result: {result}")
+            return self._wrap_tool_result("get_train_departures", {"text": result})
+        except FileNotFoundError:
+            print(f"[ptv] ERROR: cache not found at {self.config.ptv.cache_file}")
+            return self._wrap_tool_result("get_train_departures", {"text": "Train timetable cache not found. Run the cache update script first."})
+        except Exception as e:
+            print(f"[ptv] ERROR: {e}")
+            return self._wrap_tool_result("get_train_departures", {"text": f"Error fetching train times: {e}"})
 
 
 

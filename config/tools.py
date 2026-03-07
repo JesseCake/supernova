@@ -155,3 +155,41 @@ voice_tools = [
         },
     },
 ]
+
+# --- Train departures tool definition (only included if ptv config present) ---
+_train_departures_tool = {
+    "type": "function",
+    "function": {
+        "name": "get_train_departures",
+        "description": (
+            "Get the next train departures from the local station. "
+            "Use when asked about trains, the next train, how long until a train, when is my next train, when is my train,"
+            "or whether to leave for the station. Returns scheduled and live departure times."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "count": {
+                    "type": "integer",
+                    "description": "Number of upcoming departures to return. Default is 2.",
+                    "default": 2,
+                }
+            },
+            "required": [],
+        },
+    },
+}
+
+
+def get_tools(config=None):
+    """
+    Return the tool list for the current session.
+    Pass an AppConfig to conditionally include optional tools.
+    """
+    tools = list(general_tools)
+    if config is not None and getattr(config, "ptv", None):
+        import os
+        cache_ok = os.path.exists(config.ptv.cache_file)
+        if cache_ok:
+            tools.append(_train_departures_tool)
+    return tools
