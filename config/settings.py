@@ -15,9 +15,16 @@ class ServerConfig:
     remote_voice_port: int
 
 @dataclass
+class InterfacesConfig:
+    voice_remote: bool = True
+    voice_local: bool = False
+    web: bool = True
+
+@dataclass
 class AppConfig:
     ollama: OllamaConfig
     server: ServerConfig
+    interfaces: InterfacesConfig
     ha_url: str
 
 def load_config(path: str = None) -> AppConfig:
@@ -28,5 +35,6 @@ def load_config(path: str = None) -> AppConfig:
     return AppConfig(
         ollama=OllamaConfig(**raw["ollama"]),
         server=ServerConfig(**raw["server"]),
+        interfaces=InterfacesConfig(**(raw.get("interfaces") or {})),
         ha_url=raw["home_assistant"]["url"],
     )

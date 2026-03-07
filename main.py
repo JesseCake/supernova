@@ -18,28 +18,29 @@ if __name__ == "__main__":
     # Initialize core processor with config
     core_processor = CoreProcessor(config)
 
-    # Start the local voice interface (using defaults)
-    #voice_interface = VoiceInterface(core_processor=core_processor)
-    #voice_thread = threading.Thread(target=voice_interface.run)
-    #voice_thread.start()
+    # Logic to set which interfaces from config to start:
 
-    # Start the remote voice interface - wait is this used anymore?
-    #def handler_factory(reader, writer):
-    #    return VoiceRemoteInterface(reader, writer, core_processor)
+    if config.interfaces.voice_local:
+        # Start the local voice interface (using defaults) - CURRENTLY NOT IN USE
+        #voice_interface = VoiceInterface(core_processor=core_processor)
+        #voice_thread = threading.Thread(target=voice_interface.run)
+        #voice_thread.start()
+        pass
 
-    def run_remote_voice_interface():
-        asyncio.run(VoiceRemoteInterface(core_processor).run(host="0.0.0.0", port=10400))
+    if config.interfaces.voice_remote:
+        # Start the remote voice interface (runs in background thread)
+        def run_remote_voice_interface():
+            asyncio.run(
+                VoiceRemoteInterface(core_processor).run(
+                    host=config.server.remote_voice_host, 
+                    port=config.server.remote_voice_port,
+                )
+            )
+        remote_voice_thread = threading.Thread(target=run_remote_voice_interface)
+        remote_voice_thread.start()
+        print(f"[main] voice_remote started on {config.server.remote_voice_host}:{config.server.remote_voice_port}")
 
-    remote_voice_thread = threading.Thread(target=run_remote_voice_interface)
-    remote_voice_thread.start()
-    
-    #Run directly in main thread for debugging (don't use this for production):
-    #run_remote_voice_interface()
-
-    # Join thread (optional, if we want to join for certain functionality)
-    #voice_thread.join()
-    #remote_voice_thread.join()
-
-    # Start the web interface
-    web_interface = WebInterface(core_processor)
-    web_interface.run()
+    if config.interfaces.web:
+        # Web interface runs in main thread (blocks)
+        web_interface = WebInterface(core_processor)
+        web_interface.run()
