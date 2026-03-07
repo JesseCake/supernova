@@ -339,6 +339,7 @@ class VoiceRemoteInterface:
         for _ in range(3):
             await self.send_beep(300, 0.20, 0.6)
             await asyncio.sleep(0.15)
+        self.rx_paused = False
         self.writer.write(pack_frame(b'CLOS'))
         await self.writer.drain()
 
@@ -389,8 +390,7 @@ class VoiceRemoteInterface:
 
                     # optional: cancel the task wrapper (the code inside checks interrupt_event anyway)
                     if self._speak_task and not self._speak_task.done():
-                        # don't hard cancel mid-CPU; just let it hit its interrupt checks
-                        pass
+                        self.rx_paused = False  # re-open RX gate immediately so we can accept new speech while stopping TTS
 
                     # tell the Core to stop generating and stop enqueueing
                     if self.session_id is not None:
@@ -420,8 +420,10 @@ class VoiceRemoteInterface:
                 else:
                     # ignore unknown tags for forward-compat
                     pass
+        
         except asyncio.IncompleteReadError:
             pass
+
         finally:
             print(f"[voice_remote] satellite disconnected: {addr}")
             try:
@@ -434,6 +436,9 @@ class VoiceRemoteInterface:
             self.session_id = None
             self.frames_np = np.array([], dtype=np.float32)
             self.recording = False
+            # added to fix loop problems:
+            self.rx_paused = False
+            self.interrupt_event.clear()
 
     async def run(self, host: str = '0.0.0.0', port: int = 10400):
         server = await asyncio.start_server(self._handle_client, host, port)
