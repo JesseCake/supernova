@@ -31,7 +31,7 @@ class WebInterface:
             while True:
                 chunk = session["response_queue"].get()  # blocking
                 if chunk is None:
-                    break
+                    return  # End of response stream
 
                 assistant_response += chunk
 
@@ -44,17 +44,19 @@ class WebInterface:
             self.core_processor.clear_history(self.session_id)
             return []
 
-        with gr.Blocks(title="Supernova", css="""
+        # we need some css to make things sit properly:
+        css = """
             html, body, .gradio-container { height: 100% !important; }
             #chatbot { height: calc(100vh - 200px) !important; }
-        """) as demo:
+        """
+
+        with gr.Blocks(title="Supernova") as demo:
             gr.Markdown("# Supernova")
 
-            chatbot = gr.Chatbot(type="messages", height=600, elem_id="chatbot")
+            chatbot = gr.Chatbot(height=600, elem_id="chatbot")
 
             chat = gr.ChatInterface(
                 fn=process_message,
-                type="messages",
                 chatbot=chatbot,
             )
 
@@ -65,10 +67,4 @@ class WebInterface:
                 outputs=chatbot,
             )
 
-        demo.launch(share=False, server_name="0.0.0.0")
-
-        #gr.ChatInterface(
-        #    fn=process_message,
-        #    type="messages",
-        #    title="Supernova",
-        #).launch(share=False, server_name="0.0.0.0")
+        demo.launch(share=False, server_name="0.0.0.0", css=css)

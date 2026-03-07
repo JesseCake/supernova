@@ -44,6 +44,7 @@ class CoreProcessor:
         self.model = config.ollama.model
         self.ollama_client = ollama.Client(host=config.ollama.host)
         self.ha_url = config.ha_url
+        self.model_type = config.ollama.model_type  # currently supports "gemma3" or "qwen3"
 
         #self.model = "gemma3:12b"  # was using 4b to fit, 12b is too big for my little Jetson
         #self.ollama_client = ollama.Client(host='http://localhost:11434')
@@ -326,16 +327,13 @@ class CoreProcessor:
         if conversation_history is None:
             conversation_history = []
 
-        prompt = self.create_prompt(
+        # now we create the system message:
+        system_message = self.create_system_message(is_voice=is_voice)
+
+        prompt = [system_message] + self.create_prompt(
             input_text=input_text,
             conversation_history=conversation_history,
         )
-
-        self._log("Prompt created", session=session, extra=f"prompt_len={len(prompt)}")
-
-        # now we create the system message:
-        system_message = self.create_system_message(is_voice=is_voice)
-        self._log("System message created", session=session)
 
         # now we construct the tools:
         if is_voice:
@@ -344,30 +342,20 @@ class CoreProcessor:
         else:
             prompt_tools = tools.general_tools
 
-        # debugging:
-        # print(f"PROMPT TOOLS=\n\n {prompt_tools}")
-
         while True:
-            #print(f"[DEBUG] Sending prompt to LLM: prompt={prompt}, system_message={system_message}, tools={prompt_tools}")
-            self._log("Sending to Ollama Raw Mode (start)", session=session)
-            t0 = time.perf_counter()
-            full_response, tool_msg, tool_name = self.send_to_ollama(
+            full_response, tool_msg, tool_name, chat_tool_calls = self.send_to_ollama(
                 prompt_text=prompt, 
-                prompt_system=system_message, 
                 prompt_tools=prompt_tools, 
                 session=session, 
-                raw_mode=True,
                 available_functions=self.available_functions
                 )
-            t1 = time.perf_counter()
-            self._log("Sending to Ollama Raw Mode (end)", session=session, extra=f"dur={(t1-t0):.3f}s")
 
-            # We then record the outputs and actions in the conversation history:
-            if full_response:
-                conversation_history.append({
-                    'role': 'assistant',
-                    'content': full_response
-                })
+            # Build assistant history entry
+            if full_response or chat_tool_calls:
+                history_entry = {'role': 'assistant', 'content': full_response or ''}
+                if chat_tool_calls:
+                    history_entry['tool_calls'] = chat_tool_calls
+                conversation_history.append(history_entry)
 
             if tool_msg:
                 # add tool output to history and loop again
@@ -389,7 +377,7 @@ class CoreProcessor:
 
         # print('\ncore: Finishing processing input and response')
 
-    def create_prompt(self, input_text, conversation_history):  # functions_json=None):
+    def create_prompt(self, input_text, conversation_history):
         """
         Creates a formatted prompt for sending to Ollama, using separate sections for system, tools, and messages.
 
@@ -402,23 +390,6 @@ class CoreProcessor:
         - str: The formatted prompt text.
         """
 
-        # right now we reload this each time so we can tweak it live, may be unnecessary in future:
-        #loadprecontext = importlib.import_module('config.precontext')
-        #importlib.reload(loadprecontext)
-
-        '''full_pre_context = self.pre_context
-
-        if voice:
-            full_pre_context += self.voice_pre_context
-
-        # we add this each time so we have up to date info from Home Assistant:
-        full_pre_context += self.add_ha_to_pre_context(full_pre_context)
-
-        system_section = {
-            'role': 'system',
-            'content': full_pre_context,
-        }'''
-
         history_section = conversation_history
 
         user_input_section = {
@@ -426,7 +397,6 @@ class CoreProcessor:
             'content': input_text
         }
 
-        #prompt = [system_section] + history_section + [user_input_section]
         prompt = history_section + [user_input_section]
         return prompt
 
@@ -464,6 +434,9 @@ class CoreProcessor:
 
         full_pre_context = self.pre_context
 
+        # hard suppress thinking (test):
+        #full_pre_context = "/no_think\n" + full_pre_context
+
         if is_voice:
             full_pre_context += self.voice_pre_context
 
@@ -487,6 +460,61 @@ class CoreProcessor:
         #print(f"DEBUGGING SYSTEM: \n{system_section['content']}")
 
         return system_section
+
+    def format_raw_prompt_qwen3(self, system, messages, tools=None):
+        """
+        Build a raw prompt matching Qwen3's ChatML template:
+
+        <|im_start|>system
+        {system content}<|im_end|>
+        <|im_start|>user
+        {content}<|im_end|>
+        <|im_start|>assistant
+        {content}<|im_end|>
+
+        Notes:
+        - Qwen3 uses standard ChatML (<|im_start|>/<|im_end|>), unlike Gemma's <start_of_turn>
+        - System prompt gets its own dedicated system role (no need to inject into user turn)
+        """
+        parts = []
+
+        # 1) System message — Qwen3 has a proper system role, unlike Gemma
+        sys_text = ""
+        if isinstance(system, dict):
+            sys_text = (system.get("content") or "").strip()
+        elif isinstance(system, str):
+            sys_text = system.strip()
+
+        if sys_text:
+            parts.append(f"<|im_start|>system\n{sys_text}<|im_end|>\n")
+
+        # 2) Conversation history
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = (msg.get("content") or "").strip()
+
+            if role == "system":
+                # skip — already handled above
+                continue
+
+            if role == "assistant":
+                parts.append(f"<|im_start|>assistant\n{content}<|im_end|>\n")
+
+            elif role == "tool":
+                # Tool results go in as user turns
+                parts.append(f"<|im_start|>user\n<tool_response>\n{content}\n</tool_response>\n<|im_end|>\n")
+
+            else:  # user
+                # Append /no_think to the LAST user message to disable thinking mode
+                # We'll handle that after the loop — store content for now
+                parts.append(f"<|im_start|>user\n{content}<|im_end|>\n")
+
+        # 3) Prime the model to respond
+        parts.append("<|im_start|>assistant\n")
+
+        prompt = "".join(parts)
+
+        return prompt
     
     def format_raw_prompt_gemma(self, system, messages, tools=None):
         """
@@ -569,6 +597,7 @@ class CoreProcessor:
 
     def format_raw_prompt_llama(self, system, messages, tools=None):
         """
+        THIS IS OUTDATED NOW and not used - who uses LLaMA anymore? Leaving for posterity but won't maintain.
         Creates a minimal prompt text for the LLM, focusing on essential content and omitting internal metadata.
 
         Parameters:
@@ -625,7 +654,7 @@ class CoreProcessor:
 
         return prompt_text.strip()
 
-    def send_to_ollama(self, prompt_text, prompt_system, prompt_tools, session, raw_mode=False, available_functions=None):
+    def send_to_ollama(self, prompt_text, prompt_tools, session, available_functions=None):
         """
         Streams model output to response_queue. If a tool call JSON is detected,
         immediately:
@@ -640,161 +669,97 @@ class CoreProcessor:
         cancel_event = session['cancel_event']
 
         try:
-            full_response = ""
+            response_content = ""
             tool_calls = []
-            tool_message = None
-            tool_name_detected = None
 
-            json_accumulator = ""
-            json_collecting = False
-            json_brackets = 0
-            inside_code_block = False  # for when we receive code
-            backtick_buffer = ""
-
-            if raw_mode:
-                #print("starting to process RAW mode...")
-                self._log("creating combined prompt", session=session)
-                combined_prompt = self.format_raw_prompt_gemma(system=prompt_system, tools=prompt_tools, messages=prompt_text)
-                self._log("done", session=session)
-                #print("Created full prompt from scratch...")
-                #print(f"Full prompt:\n\n{combined_prompt}")
-
-                # Send raw text input to Ollama
-                self._log("Sending the prompt now to Ollama in raw mode", session=session)
-                response_stream = self.ollama_client.generate(
-                    model=self.model,
-                    prompt=combined_prompt,
-                    stream=True,
-                    raw=True,
-                    keep_alive=-1,  # no timeout so we keep alive
-                    options={
-                        "stop": ["<end_of_turn>"],
-                        "num_ctx": 4096,
-                        "num_gpu": -1, # force max GPU offload
-                    }
-                )
-                self._log("Done", session=session)
-
-            else:
-                response_stream = self.ollama_client.chat(
-                    model=self.model,
-                    messages=prompt_text,
-                    stream=True,
-                    keep_alive="2h",
-                    tools=prompt_tools
-                )
+            # this uses the simpler structured chat endpoint which is easier to drive, and seems to definitely support the think flag (raw was misbehaving)
+            response_stream = self.ollama_client.chat(
+                model=self.model,
+                messages=prompt_text,
+                stream=True,
+                keep_alive=-1,
+                think=False,
+                tools=prompt_tools,
+            )
 
             self._log("Starting to process chunks", session=session)
             first_chunk_yet = False
+
             for chunk in response_stream:
-                #debugging responses:
-                #print(f"{chunk}")
                 if not first_chunk_yet:
                     self._log("Received first chunk", session=session)
                     first_chunk_yet = True
+                    # Print header for the inline token stream
+                    print(f"[STREAM] ", end="", flush=True)
 
                 # new cancel logic if interrupted:
                 if cancel_event and cancel_event.is_set():
                     # add that the user interrupted:
                     print(f"[core] response cancelled by user")
-                    full_response += "\n[User interrupted]\n"
+                    response_content += "\n[User interrupted]\n"
                     # stop streaming further tokens
                     break
 
-                if raw_mode is True:
-                    response_content = chunk.get('response', '')
-                else:
-                    response_content = chunk.get('message', {}).get('content', '')
+                # messages:
+                if chunk.message.content:
+                    # stream chunks to log:
+                    print(chunk.message.content, end="", flush=True)
 
-                #debugging responses:
-                #print(f"{response_content}", end="")
+                    response_content += chunk.message.content
+                    response_queue.put(chunk.message.content)
 
-                full_response += response_content
+                # tools:
+                if chunk.message.tool_calls:
+                    tool_calls.extend(chunk.message.tool_calls)
 
-                if response_content:
-                    for char in response_content:
-                        # disable code blocks for now:
-                        # receiving code/not receiving code:
-                        if char == '`':
-                            backtick_buffer += '`'
-                            if backtick_buffer == "```":
-                                inside_code_block = not inside_code_block
-                                backtick_buffer = "" # reset buffer
-                        else:
-                            backtick_buffer = ""  # this way we only accumulate on consecutive backticks
+            print(f"\n[STREAM END] chars={len(response_content)} tools={len(tool_calls)}", flush=True)
 
-                        # receiving json:
-                        def _normalize_possible_json(s: str) -> str:
-                            # Replace Unicode curly quotes / apostrophes with ASCII - sometimes a problem
-                            return (s.replace('\u201c', '"').replace('\u201d', '"')   # “ ”
-                                    .replace('\u2018', "'").replace('\u2019', "'")) # ‘ ’
+            if tool_calls:
+                tc = tool_calls[0]  # we only support one tool call per response for now, so just take the first if multiple come through
+                tool_name_detected = tc.function.name
+                tool_args = {
+                    'name': tool_name_detected,
+                    'parameters': dict(tc.function.arguments) if tc.function.arguments else {},
+                }
 
-                        if char == '{':
-                            if not json_collecting:
-                                json_collecting = True
-                                json_accumulator = ""
-                            json_brackets += 1
+                self._log(f"Detected tool call: {tool_name_detected}", session=session, extra=f"args={tool_args}")
 
-                        if json_collecting:
-                            json_accumulator += char
+                try:
+                    fn = (available_functions or {}).get(tool_name_detected)
+                    if fn is None:
+                        self._log(f"Tool not found", session=session, extra=tool_name_detected)
+                        wrapped = self._wrap_tool_result(tool_name_detected, {"text": "Unknown tool"})
+                    else:
+                        self._log(f"Executing tool", session=session, extra=tool_name_detected)
+                        t_tool = time.perf_counter()
+                        wrapped = fn(tool_args=tool_args, session=session)
+                        dt_tool = time.perf_counter() - t_tool
+                        self._log(f"Finished tool", session=session, extra=f"{tool_name_detected} dur={dt_tool:.3f}s")
 
-                        if char == '}':
-                            json_brackets -= 1
-                            if json_brackets == 0:
-                                tool_call = None
-                                try:
-                                    # try to parse the accumulated JSON (after normalizing quotes which is a problem sometimes):
-                                    tool_call = json.loads(_normalize_possible_json(json_accumulator.strip()))
-                                    #print(f"\n[DEBUG] Detected JSON: {tool_call}\n")
+                    # Chat mode tool result format
+                    tool_message = {
+                        'role': 'tool',
+                        'tool_name': tool_name_detected,
+                        'content': json.dumps(
+                            json.loads(wrapped).get('tool_result', {}).get('content', {})
+                        ),
+                    }
 
-                                except json.JSONDecodeError:
-                                    tool_call = None
-                                    print(f"\n[DEBUG] JSON decode error for: {json_accumulator}\n")
+                except Exception as e:
+                    tool_message = {
+                        'role': 'tool',
+                        'tool_name': tool_name_detected,
+                        'content': json.dumps({"text": f"Tool error: {e}"}),
+                    }
+                
+                return response_content, tool_message, tool_name_detected, tool_calls
 
-                                # reset collectors in case of other tools:
-                                json_collecting = False
-                                json_accumulator = ""
-                                
-                                if tool_call and isinstance(tool_call, dict) and "name" in tool_call:
-                                    tool_name_detected = tool_call["name"]
-                                    params = tool_call.get("parameters", {}) or {}
-                                    self._log(f"Tool detected: {tool_name_detected}", session=session, extra=f"params={params}")
-
-                                    # Execute the tool call immediately:
-                                    try:
-                                        fn = (available_functions or {}).get(tool_name_detected)
-                                        if fn is None:
-                                            self._log(f"core: tool not found", session=session, extra=tool_name_detected)
-                                            wrapped = self._wrap_tool_result(tool_name_detected, {"text": "Unknown tool"})
-                                        else:
-                                            self._log(f"core: executing tool", session=session, extra=tool_name_detected)
-                                            t_tool = time.perf_counter()
-                                            wrapped = fn(tool_args=tool_call, session=session)  # your tools already return wrapped JSON
-                                            dt_tool = time.perf_counter() - t_tool
-                                            self._log(f"core: finished tool", session=session, extra=f"{tool_name_detected} dur={dt_tool:.3f}s")
-
-                                        # 3) prepare a tool message for history
-                                        tool_message = {'role': 'tool', 'content': wrapped}
-
-                                    except Exception as e:
-                                        wrapped = self._wrap_tool_result(tool_name_detected, {"text": f"Tool error: {e}"})
-                                        tool_message = {'role': 'tool', 'content': wrapped}
-
-                                    # return early with the tool message for conversation history:
-                                    return full_response, tool_message, tool_name_detected
-
-
-                    if not json_collecting and not inside_code_block:
-                        # send the non-tool call response chunk back to the response thread live:
-                        # print(f'DEBUG: {response_content}')
-                        response_queue.put(response_content)
-
-            # return the full response when finished for chat history, along with tool calls to process:
-            return full_response, None, None
+            # no tools called, just return the full response for history and let the caller know no tool message:
+            return response_content, None, None, None
 
         except Exception as e:
             response_queue.put(f"\nError in processing Ollama response: {e}")
-            return f"Error in processing Ollama response: {e}", None, None
+            return f"Error in processing Ollama response: {e}", None, None, None
 
     def send_whole_response(self, response_text, session):
         session['response_queue'].put(f"{response_text}")
