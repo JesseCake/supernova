@@ -155,7 +155,7 @@ voice_tools = [
         'type': 'function',
         'function': {
             'name': 'close_voice_channel',
-            'description': 'Close the Voice channel. Use when answering an easy question or carrying out a task that doesnt require a long response. This closes the channel and erases conversation history for next query. Also use if the user just says "thanks" or "that\'s it" or similar after a response, as that means they want to end the voice interaction.',
+            'description': 'Call this after answering an easy question or responding with the results of another tool call to answer a question. This keeps voice communication brief and to the point.',
             'parameters': {
                 'type': 'object',
                 'properties': {},

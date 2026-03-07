@@ -23,6 +23,9 @@ from bs4 import BeautifulSoup
 import requests
 from urllib.parse import urlparse
 
+# for weather:
+from collections import defaultdict
+
 # home assistant API link
 try:
     from homeassistant_api import Client as HAClient
@@ -449,8 +452,8 @@ class CoreProcessor:
             full_pre_context += "\n\n[BEHAVIOUR_OVERRIDES]\n" + "\n".join(f"- {r}" for r in rules)
 
         # we'll add the current time to the system message so the model can use it if needed without calling the tool:
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        full_pre_context += f"\n\nCurrent time: {now}"
+        now = datetime.now().strftime("A%, %Y-%m-%d %H:%M:%S")  # includes date and day for grounding
+        full_pre_context += f"\n\nCurrent local day/date/time: {now} AEST"
 
         system_section = {
             'role': 'system',
@@ -758,8 +761,23 @@ class CoreProcessor:
             return response_content, None, None, None
 
         except Exception as e:
-            response_queue.put(f"\nError in processing Ollama response: {e}")
-            return f"Error in processing Ollama response: {e}", None, None, None
+            # Check if it looks like a parsing/tool error vs a connection error
+            error_str = str(e)
+            self._log(f"Ollama exception", session=session, extra=error_str)
+            
+            # If we got some tool_calls before the error, try to recover
+            if tool_calls:
+                tool_name_detected = tool_calls[0].function.name if tool_calls[0].function else "unknown"
+                tool_message = {
+                    'role': 'tool',
+                    'tool_name': tool_name_detected,
+                    'content': json.dumps({"text": f"Tool call failed: {error_str}"}),
+                }
+                return response_content, tool_message, tool_name_detected, tool_calls
+
+            # Otherwise it's a real error, put it in the queue for the user
+            response_queue.put(f"\nError: {error_str}")
+            return f"Error: {error_str}", None, None, None
 
     def send_whole_response(self, response_text, session):
         session['response_queue'].put(f"{response_text}")
@@ -1061,36 +1079,47 @@ class CoreProcessor:
         location = tool_args.get('parameters').get('location', 'Brunswick, VIC, Australia')
         #location = "Brunswick, VIC, Australia"
         forecast = tool_args.get('parameters').get('forecast', False)
-        self.send_whole_response(f"Fetching weather for {location}. ", session)
+        self.send_whole_response(f"\n\rFetching weather for {location}. ", session)
 
         try:
             if forecast:
-                self.send_whole_response("Fetching 5 day forecast. \n\r", session)
+                self.send_whole_response("(5 day forecast). \n\r", session)
                 # Get the 5-day forecast
                 if location == "Brunswick, VIC, Australia":
                     # Forecast weather by coordinates (problems with weather pulled from wrong location):
                     url = f"http://api.openweathermap.org/data/2.5/forecast?lat=-37.7746&lon=144.9631&appid={self.weather_api_key}&units=metric"
                 else:
                     url = f"http://api.openweathermap.org/data/2.5/forecast?q={location}&appid={self.weather_api_key}&units=metric"
+
                 response = requests.get(url)
                 weather_data = response.json()
 
                 if response.status_code == 200:
-                    forecast_list = weather_data['list']
-                    forecast_data = []
-                    for entry in forecast_list[:5]:  # Limit to the first 5 entries (next 15 hours)
-                        forecast_data.append({
-                            'datetime': entry['dt_txt'],
-                            'temperature': entry['main']['temp'],
-                            'description': entry['weather'][0]['description'],
-                        })
+                    # Group by day and take the midday reading for each day as the forecast (or the closest to it)
+                    days = defaultdict(list)
+                    for entry in weather_data['list']:
+                        day = entry['dt_txt'].split(' ')[0]
+                        days[day].append(entry)
 
+                    forecast_data = []
+                    for day, entries in sorted(days.items())[:5]:  # 5 days
+                        # prefer midday reading - TODO: find a better way to do this
+                        midday = next((e for e in entries if '12:00' in e['dt_txt']), entries[0])
+                        forecast_data.append({
+                            'date': datetime.strptime(day, '%Y-%m-%d').strftime('%A, %d %B'),
+                            'min_temp': f"{round(min(e['main']['temp_min'] for e in entries), 1)}°C",
+                            'max_temp': f"{round(max(e['main']['temp_max'] for e in entries), 1)}°C",
+                            'description': midday['weather'][0]['description'],
+                        })
+                    
                     result = {
-                        'location': location,
-                        'forecast': forecast_data
+                        "location": location,
+                        "days": forecast_data,
                     }
-                    # self.send_whole_response(f"Forecast Result: {result}", session)
-                    #return json.dumps({'check_weather': result})
+
+                    #debug return:
+                    print(f"[check_weather] forecast result: \n{json.dumps(result, indent=2)}")
+
                     return self._wrap_tool_result("check_weather", {"forecast": result})
 
                 else:
