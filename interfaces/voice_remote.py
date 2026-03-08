@@ -71,6 +71,7 @@ class VoiceRemoteInterface:
         self.sentence_endings = re.compile(
             r'(?:(?<=[!?])(?:\s+|$))'        # ! or ? + (space or EoS)
             r'|(?:(?<=\.)(?!\d)(?:\s+|$))'   # . not followed by digit + (space or EoS)
+            r'|(?:(?<=[,;])(?:\s+|$))'       # , or ; + (space or EoS)
             r'|[\r\n]+'                      # newline boundaries
         )
 
@@ -230,7 +231,7 @@ class VoiceRemoteInterface:
             return
 
         # Reject buffers that are too short — Whisper hallucinates badly on fragments
-        min_samples = int(0.5 * self.listening_rate)  # 0.5s minimum
+        min_samples = int(0.2 * self.listening_rate)  # 0.2s minimum
         if self.frames_np.size < min_samples:
             print(f"[voice_remote] Ignoring short buffer ({self.frames_np.size} samples, need {min_samples})")
             self.frames_np = np.array([], dtype=np.float32)
