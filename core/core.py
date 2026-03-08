@@ -75,7 +75,7 @@ class CoreProcessor:
         self._ha_cache = {"stamp": 0.0, "text": ""}
 
         self.available_functions = {
-            'close_voice_channel': self.close_voice_channel,
+            'hangup_call': self.hangup_call,
             #'get_current_time': self.get_current_time,
             'perform_search': self.perform_search,
             'open_website': self.open_website,
@@ -376,7 +376,7 @@ class CoreProcessor:
                 # add tool output to history and loop again
                 conversation_history.append(tool_msg)
 
-                if tool_name == "close_voice_channel":
+                if tool_name == "hangup_call":
                     break
 
                 # rebuild prompt to let the model see the tool result
@@ -608,7 +608,7 @@ class CoreProcessor:
     def response_finished(self, session):
         session['response_queue'].put(None)
 
-    def close_voice_channel(self, tool_args, session):
+    def hangup_call(self, tool_args, session):
         # print("TOOL: CLOSE COMMS CHANNEL")
         # self.send_whole_response("Agent closed channel", session)
         session['close_voice_channel'].set()

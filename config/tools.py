@@ -146,8 +146,8 @@ voice_tools = [
     {
         'type': 'function',
         'function': {
-            'name': 'close_voice_channel',
-            'description': 'Call this after answering an easy question or responding with the results of another tool call to answer a question. This keeps voice communication brief and to the point. IMPORTANT: Do not ask a question when closing the voice channel, and do not ask if the user would like to close the voice channel, just close it as a final step after giving the answer or information.',
+            'name': 'hangup_call',
+            'description': 'Use this after answering an easy question or responding with the results of another tool usage to answer a question. This keeps voice communication brief and to the point. IMPORTANT: Do not ask a question when hanging up the voice call, and do not ask if the user would like to hangup, just do it as a final step after giving the answer or information.',
             'parameters': {
                 'type': 'object',
                 'properties': {},

@@ -259,9 +259,13 @@ class VoiceRemoteInterface:
             print(f"[voice_remote] Ignoring Whisper hallucination: '{text}'")
             return
 
+        # Signal the client that we're now "thinking" so it can beep and turn on an indicator etc:
+        self.writer.write(pack_frame(b'THNK'))
+        await self.writer.drain()
         
         if self._speak_task and not self._speak_task.done():
             await self._speak_task
+
 
         close = await self._contact_core(text)
 
@@ -344,10 +348,8 @@ class VoiceRemoteInterface:
         self.rx_paused = False  # open the RX gate
         
     async def _close_channel(self):
+        # removed beeps from here as they are now client side for better timing
         self.session_id = None
-        for _ in range(3):
-            await self.send_beep(300, 0.20, 0.6)
-            await asyncio.sleep(0.15)
         self.rx_paused = False
         self.writer.write(pack_frame(b'CLOS'))
         await self.writer.drain()
