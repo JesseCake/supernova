@@ -3,25 +3,14 @@ general_tools = [
         'type': 'function',
         'function': {
             'name': 'perform_search',
-            'description': 'Perform a search on the Web or Wikipedia if you need to research or have been asked to look for something, then use results to answer the user (do not use for simple calculation you can do yourself). Use the "web" source for general web search and "wikipedia" for more specific factual queries that are likely to be well-covered by Wikipedia.',
+            'description': 'Perform a web search to research a topic or answer a question. Use when you need current information or have been asked to look something up.',
             'parameters': {
                 'type': 'object',
                 'properties': {
-                    'query': {
-                        'type': 'string',
-                        'description': 'Search query. Required'
-                    },
-                    'source': {
-                        'type': 'string',
-                        'description': 'The source to search (options: "web", "wikipedia"). Required.'
-                    },
-                    'number': {
-                        'type': 'integer',
-                        'description': 'Number of results to return. Default is 10.',
-                        'default': 10
-                    }
+                    'query': {'type': 'string', 'description': 'Search query. Required'},
+                    'number': {'type': 'integer', 'description': 'Number of results to return. Default is 10.', 'default': 10}
                 },
-                'required': ['query', 'source'],
+                'required': ['query'],
             },
         },
     },

@@ -35,4 +35,5 @@ voice_context = """
 
             You must NEVER end a response without either hanging up or asking a follow-up question.
             The call must always be terminated with hangup_call eventually. No exceptions.
+            Always end responses with hangup_call tool or a follow-up question, never just stop.
 """

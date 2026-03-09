@@ -11,9 +11,6 @@ from datetime import datetime
 import os
 import math
 
-# wikipedia search
-import wikipedia
-
 # web search
 from ddgs import DDGS
 
@@ -260,7 +257,7 @@ class CoreProcessor:
                 "name": name,
                 "content": payload
             }
-        })
+        }, ensure_ascii=False)  # added so that non ascii characters pass through properly
 
     def get_weather_key(self):
         """Pulls the Weather API key from file"""
@@ -663,30 +660,68 @@ class CoreProcessor:
     def perform_search(self, tool_args, session):
         query = tool_args.get('parameters').get('query')
         source = tool_args.get('parameters').get('source')
-        num_responses = int(tool_args.get('parameters').get('number', 5))  # default reduced from 10, but tool can still be called with different number via the parameters if needed
+        num_responses = int(tool_args.get('parameters').get('number', 10))  # default 10, but tool can still be called with different number via the parameters if needed
 
         if source == 'web':
             self.send_whole_response(f"Performing Web Search on '{query}'.\n\r", session)
 
-            return self._wrap_tool_result("perform_search", {
-                "instruction": "Use these results to answer the user's question directly if possible, or choose the most relevant URL to open with the open_website tool for further research. Respond in English only. Do not reproduce these results verbatim.",
-                "results": self._perform_web_search(query, num_responses),
+            result = self._wrap_tool_result("perform_search", {
+                "instruction": "Use these results to answer the user's question directly if possible, or choose the most relevant URL to open with the open_website tool for further research. Respond in English only. Do not reproduce these results verbatim. If you don't have enough info, search again and increase the number of results.",
+                "results": self._perform_searxng_web_search(query, num_responses),
             })
 
-        elif source == 'wikipedia':
-            self.send_whole_response(f"Performing Wikipedia search on subject {query}.\n\r", session)
-
-            return self._wrap_tool_result("perform_search", {
-                "instruction": "Use these results to answer the user's question. Respond in English only.",
-                "results": self._perform_wikipedia_search(query),
-            })
+            #Debug:
+            self._log("perform_search tool result", extra=f"\n{result}")
+            
+            return result
 
         else:
             return self._wrap_tool_result("perform_search", {
                 "error": "Invalid source. Choose web or wikipedia."
             })
 
-    def _perform_web_search(self, query, num_responses):
+    def _perform_searxng_web_search(self, query, num_responses):
+        # Ensure you configure the "searxng_url" setting in settings.yaml
+        self._log("_perform_web_search start", extra=f"q={query} n={num_responses}")
+        try:
+            response = requests.get(
+                self.config.searxng_url + "/search",
+                params={
+                    "q": query,
+                    "format": "json",
+                    "language": "en-AU",
+                    "safesearch": 1,
+                },
+                timeout=10,
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            results = []
+            for r in data.get("results", [])[:num_responses]:
+                title = r.get("title", "")
+                title = title.split("›")[-1].strip() if "›" in title else title
+                results.append({
+                    "title": title[:100],
+                    "snippet": r.get("content", "")[:200],
+                    "link": r.get("url"),
+                })
+
+            if not results:
+                results.append({"error": "No results found, try rephrasing the query"})
+
+            self._log("_perform_web_search end", extra=f"found={len(results)}")
+            return results
+
+        except requests.exceptions.ConnectionError:
+            self._log("_perform_web_search error", extra="SearXNG unavailable")
+            return [{"error": "Search service unavailable"}]
+        except Exception as e:
+            self._log("_perform_web_search error", extra=str(e))
+            return [{"error": f"Search failed: {e}"}]
+
+    def _perform_duckduckgo_web_search(self, query, num_responses):
+        # NO LONGER IN USE: DDG BEGAN RATE LIMITING TOO MUCH - SEE SEARXNG FUNCTION ABOVE - TO REMOVE
         self._log("_perform_web_search start", extra=f"q={query} n={num_responses}")
         try:
             results = []
@@ -700,7 +735,7 @@ class CoreProcessor:
                 ):
                     results.append({
                         "title": r.get("title")[:100],  # cap title length
-                        "snippet": r.get("body")[:200], # cap snippet length
+                        "snippet": r.get("body")[:300], # cap snippet length
                         "link": r.get("href"),
                     })
 
@@ -710,6 +745,9 @@ class CoreProcessor:
                     "error": "no results found, possibly due to web search tool failure"
                 })
 
+            # Debug:
+            #self._log("_perform_web_search results", extra=f"\n{json.dumps(results, indent=2)}")
+            
             self._log("_perform_web_search end", extra=f"found={len(results)}")
             return results
 
@@ -717,41 +755,6 @@ class CoreProcessor:
             # Catch any network or parsing issues
             self._log("_perform_web_search error", extra=str(e))
             return [{"error": f"Search failed: {e}"}]
-
-    def _perform_wikipedia_search(self, query):
-        self._log("_perform_wikipedia_search start", extra=f"q={query}")
-        search_results = wikipedia.search(query)
-        results = []
-
-        if search_results:
-            for title in search_results:
-                try:
-                    summary = wikipedia.summary(title, sentences=2)
-                    page = wikipedia.page(title)
-
-                    result = {
-                        "title": title,
-                        "summary": summary,
-                        "url": page.url
-                    }
-                    results.append(result)
-                except wikipedia.DisambiguationError:
-                    results.append({
-                        "title": title,
-                        "summary": "Disambiguation page, multiple meanings exist",
-                        "url": None
-                    })
-                except wikipedia.PageError:
-                    results.append({
-                        "title": title,
-                        "summary": "Page does not exist.",
-                        "url": None
-                    })
-        else:
-            results.append({'error': 'No results, try another search term'})
-
-        self._log("_perform_wikipedia_search end", extra=f"found={len(results)}")
-        return results
 
     def open_website(self, tool_args, session, max_retries=3):
         url = (tool_args.get('parameters') or {}).get('url', '')
@@ -791,9 +794,11 @@ class CoreProcessor:
                 # UX ping only on success
                 self._log("open_website success", session=session, extra=f"chars={len(text)}")
                 self.send_whole_response(f"Opened website\n\r", session)  # speaks immediately
-                #return self._wrap_tool_result("open_website", {"text": f"System Message: Text: {text} \n\n - Use the text scraped from this website to help answer the user's question, or to decide to try other websites/results. Do not simply read this out, you must interpret and summarise these reults to answer the user's question. If any of it is in another language, do not switch to that language for the user, stick to English unless asked or you have a cute phrase you just learned from the research."})
+
+                self._log("open_website content", session=session, extra=f"\n{'='*40}\n{text}\n{'='*40}")
+
                 return self._wrap_tool_result("open_website", {"text": (
-                    "SYSTEM INSTRUCTIONS (follow these before reading the content below):\n"
+                    "INSTRUCTIONS:\n"
                     "1. YOUR RESPONSE MUST BE IN ENGLISH ONLY. The page below may contain non-English text — do NOT reproduce, translate inline, or switch language. Summarise only in English.\n"
                     "2. Stay focused on the user's original question. Extract only what is relevant.\n"
                     "3. Do not read this content aloud verbatim — interpret and summarise it.\n"
@@ -922,7 +927,6 @@ class CoreProcessor:
 
         # Return the formatted JSON to the LLM
         return json.dumps(response)
-    
 
     def check_weather(self, tool_args, session):
         location = tool_args.get('parameters').get('location', 'Brunswick, VIC, Australia')

@@ -37,7 +37,8 @@ class AppConfig:
     server: ServerConfig
     interfaces: InterfacesConfig
     ha_url: str
-    ptv: Optional[PtvConfig] = None  # <-- this line is missing
+    ptv: Optional[PtvConfig] = None
+    searxng_url: str = "http://localhost:8888"  # default so it works without config entry
 
 def load_config(path: str = None) -> AppConfig:
     if path is None:
@@ -60,4 +61,5 @@ def load_config(path: str = None) -> AppConfig:
         interfaces=InterfacesConfig(**(raw.get("interfaces") or {})),
         ha_url=raw["home_assistant"]["url"],
         ptv=ptv,
+        searxng_url=raw.get("searxng", {}).get("url", "http://localhost:8888"),
     )
