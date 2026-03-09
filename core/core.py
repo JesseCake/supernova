@@ -352,7 +352,7 @@ class CoreProcessor:
         if is_voice:
             # it seems order is important, putting voice close channel tool first:
             #prompt_tools = tools.voice_tools + tools.general_tools
-            prompt_tools = tools.voice_tools + base_tools
+            prompt_tools = base_tools + tools.voice_tools
         else:
             prompt_tools = base_tools
             #prompt_tools = tools.general_tools
