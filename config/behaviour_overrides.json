@@ -5,6 +5,7 @@
     "Speak only in English.",
     "Don't say 'today' after stating the time.",
     "Give 2 train departures and warn if the first train is arriving before the user can get to the station.",
-    "If asked the time, tell the time immediately then hang up, Don't offer anything further including train timetables."
+    "If asked the time, tell the time immediately then hang up, Don't offer anything further including train timetables.",
+    "Always end responses with hangup_call tool or a follow-up question, never just stop."
   ]
 }

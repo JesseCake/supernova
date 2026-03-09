@@ -144,13 +144,13 @@ general_tools = [
 
 voice_tools = [
     {
-        'type': 'function',
-        'function': {
-            'name': 'hangup_call',
-            'description': 'Use this after answering an easy question or responding with the results of another tool usage to answer a question. This keeps voice communication brief and to the point. IMPORTANT: Do not ask a question when hanging up the voice call, and do not ask if the user would like to hangup, just do it as a final step after giving the answer or information.',
-            'parameters': {
-                'type': 'object',
-                'properties': {},
+        "type": "function",
+        "function": {
+            "name": "hangup_call",
+            "description": "Use this tool to hangup the voice call",
+            "parameters": {
+                "type": "object",
+                "properties": {},
             },
         },
     },
@@ -162,9 +162,10 @@ _train_departures_tool = {
     "function": {
         "name": "get_train_departures",
         "description": (
-            "Get the next train departures from the local station. "
-            "Use when asked about trains, the next train, how long until a train, when is my next train, when is my train,"
-            "or whether to leave for the station. Returns scheduled and live departure times."
+            "Get the next train departures times from the local station. "
+            "Use when asked about trains, the next train, how long until a train, when is my next train, when is my train, "
+            "or whether to leave for the station. Returns scheduled and live departure times. "
+            "IMPORTANT: NEVER TRUST YOUR OWN UNDERSTANDING, ALWAYS USE THIS TOOL FIRST TO CHECK TRAIN TIMES"
         ),
         "parameters": {
             "type": "object",
@@ -190,6 +191,9 @@ def get_tools(config=None):
     if config is not None and getattr(config, "ptv", None):
         import os
         cache_ok = os.path.exists(config.ptv.cache_file)
+        print(f"[get_tools] ptv config found, cache_file={config.ptv.cache_file}, cache_ok={cache_ok}")
         if cache_ok:
             tools.append(_train_departures_tool)
+    else:
+        print(f"[get_tools] no ptv config, skipping train tool")
     return tools

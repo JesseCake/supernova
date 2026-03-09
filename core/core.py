@@ -350,12 +350,14 @@ class CoreProcessor:
         # now we construct the tools:
         base_tools = get_tools(self.config)
         if is_voice:
-            # it seems order is important, putting voice close channel tool first:
-            #prompt_tools = tools.voice_tools + tools.general_tools
+            # order is important:
             prompt_tools = base_tools + tools.voice_tools
         else:
             prompt_tools = base_tools
-            #prompt_tools = tools.general_tools
+
+        # Debugging - print the full prompt then tools to console:
+        #print(f"DEBUG PROMPT:\n==================\n{prompt}\n\n")
+        #print(f"DEBUG TOOLS:\n==================\n{prompt_tools}\n\n")
 
         while True:
             full_response, tool_msg, tool_name, chat_tool_calls = self.send_to_ollama(
