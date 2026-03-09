@@ -7,6 +7,8 @@ Cache update (run via cron, e.g. weekly):
 
 Direct test:
     python3 ptv_trains.py --test YOUR_TOKEN
+
+YOU MUST HAVE AN API KEY - sign up at opendata.transport.vic.gov.au
 """
 
 import sys, io, csv, zipfile, json, os, requests
@@ -160,13 +162,12 @@ def format_departures(departures: list[dict], stop_name: str, walk_minutes: int 
     """Format departure list into a natural voice-friendly string."""
     if not departures:
         return f"No upcoming departures found from {stop_name}."
-    walk_str = f" ({walk_minutes} min walk to station)" if walk_minutes else ""
-    lines = [f"Next trains from {stop_name} {walk_str}:"]
+    lines = [f"Next trains from {stop_name}:"]
     for d in departures:
         mins_str = "less than a minute" if d["minutes"] == 0 else f"{d['minutes']} minute{'s' if d['minutes'] != 1 else ''}"
         delay_str = f", running {d['delay_s']//60} minutes late" if d["delay_s"] > 60 else ""
         rt_str = "" if d["realtime"] else " (scheduled)"
-        lines.append(f"  {d['time']} — in {mins_str}{delay_str}{rt_str} to {d['headsign']}")
+        lines.append(f"  {d['time']} — in {mins_str}{delay_str}{rt_str} to {d['headsign']} (takes 7 mins to walk to station)")
     # add instruction here to tell user the next 2 trains:
     lines.append("\nIt's best to tell the user the next 2 trains, and warn if the next train is leaving in less than the time it takes to walk to the station.\n")
     return "\n".join(lines)
