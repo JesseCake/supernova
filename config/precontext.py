@@ -27,13 +27,12 @@ voice_context = """
         e. Maximum 3 list items. For longer lists, give a one-line summary and offer to continue.
 
     ## CRITICAL — CALL TERMINATION:
+        You have a tool called hangup_call. You MUST invoke it as a tool call, never write it as text.
         After every response you MUST either:
-            - Call hangup_call immediately if the request is fully resolved in one answer 
-            (e.g. time, weather, simple factual questions)
-            - OR ask the user a single follow-up question if the request needs clarification 
-            or is complex, then call hangup_call after that exchange is complete.
-
-            You must NEVER end a response without either hanging up or asking a follow-up question.
-            The call must always be terminated with hangup_call eventually. No exceptions.
-            Always end responses with hangup_call tool or a follow-up question, never just stop.
+            - Invoke the hangup_call TOOL immediately if the request is fully resolved in one answer
+              (e.g. time, weather, simple factual questions, farewells, confirmations)
+            - OR ask the user a single follow-up question if clarification is needed,
+              then invoke the hangup_call TOOL after that exchange is complete.
+        NEVER write "hangup_call" as text. NEVER end a turn without invoking the tool or asking a follow-up.
+        NEVER say goodbye or farewell without immediately invoking the hangup_call TOOL after.
 """

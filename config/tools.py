@@ -151,10 +151,8 @@ _train_departures_tool = {
     "function": {
         "name": "get_train_departures",
         "description": (
-            "Get the next train departures times from the local station. "
-            "Use when asked about trains, the next train, how long until a train, when is my next train, when is my train, "
-            "or whether to leave for the station. Returns scheduled and live departure times. "
-            "IMPORTANT: NEVER TRUST YOUR OWN UNDERSTANDING, ALWAYS USE THIS TOOL FIRST TO CHECK TRAIN TIMES"
+            "Get the next train departure times from the local station. "
+            "Never give answers on train departure times without using this tool and checking results"
         ),
         "parameters": {
             "type": "object",
