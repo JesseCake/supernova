@@ -617,7 +617,7 @@ class CoreProcessor:
         now = datetime.now()
         now_time = now.strftime('%I:%M%p')
         #return json.dumps({'response': f'current time: {now_time}'})
-        return self._wrap_tool_result("get_current_time", {"text": f"System Message: Current time: {now_time} - tell the user this time"})
+        return self._wrap_tool_result("get_current_time", {"text": f"Current time: {now_time} - tell the user this time"})
 
     def perform_math_operation(self, tool_args, session):
         self.send_whole_response("Calculating.\n\r", session)
@@ -662,23 +662,17 @@ class CoreProcessor:
         source = tool_args.get('parameters').get('source')
         num_responses = int(tool_args.get('parameters').get('number', 10))  # default 10, but tool can still be called with different number via the parameters if needed
 
-        if source == 'web':
-            self.send_whole_response(f"Performing Web Search on '{query}'.\n\r", session)
+        self.send_whole_response(f"Performing Web Search on '{query}'.\n\r", session)
 
-            result = self._wrap_tool_result("perform_search", {
-                "instruction": "Use these results to answer the user's question directly if possible, or choose the most relevant URL to open with the open_website tool for further research. Respond in English only. Do not reproduce these results verbatim. If you don't have enough info, search again and increase the number of results.",
-                "results": self._perform_searxng_web_search(query, num_responses),
-            })
+        result = self._wrap_tool_result("perform_search", {
+            "instruction": "Use these results to answer the user's question directly if possible, or choose the most relevant URL to open with the open_website tool for further research. Respond in English only. Do not reproduce these results verbatim. If you don't have enough info, search again and increase the number of results.",
+            "results": self._perform_searxng_web_search(query, num_responses),
+        })
 
-            #Debug:
-            self._log("perform_search tool result", extra=f"\n{result}")
-            
-            return result
-
-        else:
-            return self._wrap_tool_result("perform_search", {
-                "error": "Invalid source. Choose web or wikipedia."
-            })
+        #Debug:
+        self._log("perform_search tool result", extra=f"\n{result}")
+        
+        return result
 
     def _perform_searxng_web_search(self, query, num_responses):
         # Ensure you configure the "searxng_url" setting in settings.yaml
