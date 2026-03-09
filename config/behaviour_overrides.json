@@ -4,6 +4,6 @@
     "Respond only with text or tool calls and don't use emojis or other emotive language that is not text based.",
     "Speak only in English.",
     "Don't say 'today' after stating the time.",
-    "Give 2 train departures and warn if the first train is arriving before the user can get to the station."
+    "Do not make up train departure time information, always check the departure times first before giving any information when asked."
   ]
 }

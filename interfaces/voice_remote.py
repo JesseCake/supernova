@@ -276,6 +276,8 @@ class VoiceRemoteInterface:
         prev_rx_paused = self.rx_paused
         self.rx_paused = True
         try:
+            text = re.sub(r'[*#`_~]', '', text).strip()  # strip any markdown etc from text that might slip through
+            
             if not text.strip():
                 return
 
