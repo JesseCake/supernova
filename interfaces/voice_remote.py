@@ -57,7 +57,7 @@ class VoiceRemoteInterface:
         self.listening_rate = listening_rate
 
         # ASR / VAD
-        self.vad_detector = VoiceActivityDetector(threshold=0.7, frame_rate=self.listening_rate)
+        self.vad_detector = VoiceActivityDetector(threshold=0.5, frame_rate=self.listening_rate)
         self.transcriber = WhisperModel(model_size_or_path='base.en')  # originally we started with tiny.en
         self.frames_np = np.array([], dtype=np.float32)
         self.recording = False
