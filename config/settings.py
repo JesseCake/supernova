@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import yaml, os
 from typing import Optional
 
@@ -20,6 +20,7 @@ class InterfacesConfig:
     voice_remote: bool = True
     voice_local: bool = False
     web: bool = True
+    asterisk: bool = False
 
 @dataclass
 class PtvConfig:
@@ -29,7 +30,15 @@ class PtvConfig:
     direction: str         = "citybound"
     gtfs_zip_folder: str   = "2"       # folder inside GTFS zip for this line
     cache_file: str        = ""        # auto-set to config dir if empty
-    walk_minutes: int         = 7         # used in prompt formatting to give user an idea of how long to get to station before next train
+    walk_minutes: int      = 7         # used in prompt formatting to give user an idea of how long to get to station before next train
+
+@dataclass
+class AsteriskConfig:
+    ari_host: str           = "127.0.0.1"
+    ari_port: int           = 8088
+    ari_user: str           = "supernova"
+    ari_password: str       = "changeme"
+    rtp_local_ip: str       = "127.0.0.1"
 
 @dataclass
 class AppConfig:
@@ -39,6 +48,7 @@ class AppConfig:
     ha_url: str
     ptv: Optional[PtvConfig] = None
     searxng_url: str = "http://localhost:8888"  # default so it works without config entry
+    asterisk: AsteriskConfig = field(default_factory=AsteriskConfig)
 
 def load_config(path: str = None) -> AppConfig:
     if path is None:
@@ -55,6 +65,13 @@ def load_config(path: str = None) -> AppConfig:
             ptv_raw["cache_file"] = os.path.join(os.path.dirname(path), "ptv_cache.json")
         ptv = PtvConfig(**{k: v for k, v in ptv_raw.items() if k in PtvConfig.__dataclass_fields__})
 
+    # Asterisk config loading
+    asterisk_raw = raw.get("asterisk") or {}
+    asterisk = AsteriskConfig(**{
+        k: v for k, v in asterisk_raw.items()
+        if k in AsteriskConfig.__dataclass_fields__
+    })
+
     return AppConfig(
         ollama=OllamaConfig(**raw["ollama"]),
         server=ServerConfig(**raw["server"]),
@@ -62,4 +79,5 @@ def load_config(path: str = None) -> AppConfig:
         ha_url=raw["home_assistant"]["url"],
         ptv=ptv,
         searxng_url=raw.get("searxng", {}).get("url", "http://localhost:8888"),
+        asterisk=asterisk,
     )

@@ -3,6 +3,7 @@ interfaces:
   voice_remote: true
   voice_local: false
   web: true
+  asterisk: true
 
 ollama:
   host: "http://localhost:11434"
@@ -29,3 +30,11 @@ ptv:
 # web search - configure to where you host searxng:
 searxng:
   url: "http://localhost:8888"
+
+# asterisk phone link - for phone connection to voice agent
+asterisk:
+  ari_host: "127.0.0.1"        # leave as-is (Asterisk is local)
+  ari_port: 8088               # leave as-is unless you changed http.conf
+  ari_user: "supernova"        # must match [supernova] section name in ari.conf
+  ari_password: "supernovaaccess" # must match password in ari.conf - yes this is a password set in github, but access is restricted in asterisk to localhost connections only so it's low risk
+  rtp_local_ip: "127.0.0.1"   # leave as-is (RTP stays local on Jetson)

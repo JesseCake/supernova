@@ -7,8 +7,15 @@ from config.settings import load_config
 
 # Interfaces
 from interfaces.web_interface import WebInterface
-#from interfaces.voice_interface import VoiceInterface
+#from interfaces.voice_interface import VoiceInterface  # DEAD NOW TO REMOVE
 from interfaces.voice_remote import VoiceRemoteInterface
+from interfaces.asterisk_interface import AsteriskInterface
+
+# Shared instances — initialised once before any interfaces start - otherwise we clash
+from whisper_live.transcriber import WhisperModel
+from whisper_live.vad import VoiceActivityDetector
+whisper_model = WhisperModel(model_size_or_path="base.en")
+vad = VoiceActivityDetector(threshold=0.5, frame_rate=16000)
 
 
 if __name__ == "__main__":  
@@ -27,11 +34,22 @@ if __name__ == "__main__":
         #voice_thread.start()
         pass
 
+    if config.interfaces.asterisk:
+        def run_asterisk_interface():
+            asyncio.run(
+                AsteriskInterface(core_processor, config, transcriber=whisper_model, vad=vad).run()
+            )
+        asterisk_thread = threading.Thread(
+            target=run_asterisk_interface, daemon=True
+        )
+        asterisk_thread.start()
+        print(f"[main] asterisk interface started, connecting to ARI at {config.asterisk.ari_host}:{config.asterisk.ari_port}")
+
     if config.interfaces.voice_remote:
         # Start the remote voice interface (runs in background thread)
         def run_remote_voice_interface():
             asyncio.run(
-                VoiceRemoteInterface(core_processor).run(
+                VoiceRemoteInterface(core_processor, transcriber=whisper_model, vad=vad).run(
                     host=config.server.remote_voice_host, 
                     port=config.server.remote_voice_port,
                 )

@@ -49,7 +49,7 @@ class VoiceRemoteInterface:
       - b"CLOS": no payload. Server is closing channel.
     """
 
-    def __init__(self, core_processor, listening_rate: int = 16000):
+    def __init__(self, core_processor, listening_rate: int = 16000, transcriber=None, vad=None):
         self.core_processor = core_processor
         self.session_id: Optional[str] = None
 
@@ -57,8 +57,8 @@ class VoiceRemoteInterface:
         self.listening_rate = listening_rate
 
         # ASR / VAD
-        self.vad_detector = VoiceActivityDetector(threshold=0.5, frame_rate=self.listening_rate)
-        self.transcriber = WhisperModel(model_size_or_path='base.en')  # originally we started with tiny.en
+        self.vad_detector = vad or VoiceActivityDetector(threshold=0.5, frame_rate=self.listening_rate)
+        self.transcriber = transcriber or WhisperModel(model_size_or_path='base.en')  # originally we started with tiny.en
         self.frames_np = np.array([], dtype=np.float32)
         self.recording = False
         self.close_channel_phrase = "finish conversation"
