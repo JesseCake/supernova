@@ -146,13 +146,13 @@ voice_tools = [
 ]
 
 # --- Train departures tool definition (only included if ptv config present) ---
-_train_departures_tool = {
+_train_departures_tools = [
+    {
     "type": "function",
     "function": {
-        "name": "get_train_departures",
+        "name": "get_next_train_departures",
         "description": (
-            "Get the next train departure times from the local station. "
-            "Never give answers on train departure times without using this tool and checking results"
+            "Get the next train departure times from the local station to the city for work or play. "
         ),
         "parameters": {
             "type": "object",
@@ -166,7 +166,33 @@ _train_departures_tool = {
             "required": [],
         },
     },
+},
+{
+    "type": "function",
+    "function": {
+        "name": "get_train_departures_by_arrival",
+        "description": (
+            "Get train departure times from the local station that will arrive in the city by a specified time today. "
+            "Use this when the user wants to arrive in the city for work or play by a certain time. "
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "arrival_time": {
+                    "type": "string",
+                    "description": "The target arrival time at Flinders Street in 24-hour HH:MM format, e.g. '09:00' or '14:30'.",
+                },
+                "count": {
+                    "type": "integer",
+                    "description": "Number of suitable departures to return. Default is 2.",
+                    "default": 2,
+                }
+            },
+            "required": ["arrival_time"],
+        },
+    },
 }
+]
 
 
 def get_tools(config=None):
@@ -180,7 +206,7 @@ def get_tools(config=None):
         cache_ok = os.path.exists(config.ptv.cache_file)
         print(f"[get_tools] ptv config found, cache_file={config.ptv.cache_file}, cache_ok={cache_ok}")
         if cache_ok:
-            tools.append(_train_departures_tool)
+            tools.extend(_train_departures_tools)
     else:
         print(f"[get_tools] no ptv config, skipping train tool")
     return tools

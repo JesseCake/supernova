@@ -86,10 +86,13 @@ class CoreProcessor:
 
         # conditional inclusion of ptv tool based on config presence:
         if config.ptv:
-            from tools.ptv_trains import get_departures, format_departures
+            from tools.ptv_trains import get_departures, format_departures, get_departures_by_arrival, MELB_TZ
             self._ptv_get_departures = get_departures
+            self._ptv_get_departures_by_arrival = get_departures_by_arrival
             self._ptv_format_departures = format_departures
-            self.available_functions['get_train_departures'] = self.get_train_departures
+            self._melb_tz = MELB_TZ
+            self.available_functions['get_next_train_departures'] = self.get_next_train_departures
+            self.available_functions['get_train_departures_by_arrival'] = self.get_train_departures_by_arrival
 
     def _log(self, label, session=None, extra=None):
         """Lightweight timing/log helper. Prints wallclock time and elapsed since session start when available."""
@@ -1009,7 +1012,7 @@ class CoreProcessor:
         except Exception as e:
             return self._wrap_tool_result("check_weather", {"text": f"Error fetching weather data: {str(e)}"})
         
-    def get_train_departures(self, tool_args, session):
+    def get_next_train_departures(self, tool_args, session):
         count = tool_args.get('parameters', {}).get('count', 2)
         self.send_whole_response("Checking train times. ", session)
         try:
@@ -1021,13 +1024,54 @@ class CoreProcessor:
             print(f"[ptv] got {len(deps)} departures: {deps}")
             result = self._ptv_format_departures(deps, cfg.stop_name, cfg.walk_minutes)
             print(f"[ptv] formatted result: {result}")
-            return self._wrap_tool_result("get_train_departures", {"text": result})
+            return self._wrap_tool_result("get_next_train_departures", {"text": result})
         except FileNotFoundError:
             print(f"[ptv] ERROR: cache not found at {self.config.ptv.cache_file}")
-            return self._wrap_tool_result("get_train_departures", {"text": "Train timetable cache not found. Run the cache update script first."})
+            return self._wrap_tool_result("get_next_train_departures", {"text": "Train timetable cache not found. Run the cache update script first."})
         except Exception as e:
             print(f"[ptv] ERROR: {e}")
-            return self._wrap_tool_result("get_train_departures", {"text": f"Error fetching train times: {e}"})
+            return self._wrap_tool_result("get_next_train_departures", {"text": f"Error fetching train times: {e}"})
+        
+    def get_train_departures_by_arrival(self, tool_args, session):
+        target_str = tool_args.get('parameters', {}).get('arrival_time')  # expects "HH:MM"
+        count = tool_args.get('parameters', {}).get('count', 3)
+        self.send_whole_response("Checking train arrival times. ", session)
+        try:
+            cfg = self.config.ptv
+            target = datetime.now(tz=self._melb_tz).replace(
+                hour=int(target_str.split(":")[0]),
+                minute=int(target_str.split(":")[1]),
+                second=0, microsecond=0
+            )
+            print(f"[ptv] fetching departures by arrival | stop={cfg.stop_id} name={cfg.stop_name} target={target_str} count={count}")
+            deps = self._ptv_get_departures_by_arrival(
+                cfg.api_key, cfg.stop_id, cfg.stop_name, cfg.cache_file, target, n=count
+            )
+            print(f"[ptv] got {len(deps)} departures: {deps}")
+            result = self._ptv_format_departures(deps, cfg.stop_name, cfg.walk_minutes)
+            print(f"[ptv] formatted result: {result}")
+            #return self._wrap_tool_result("get_train_departures_by_arrival", {"text": result})
+            # better instructions:
+            if not deps:
+                return self._wrap_tool_result("get_train_departures_by_arrival", {
+                    "text": f"No trains from {cfg.stop_name} will arrive at Flinders Street by {target_str}. Tell the user there are no suitable trains and suggest they check for a later target time or seek alternate transport."
+                })
+            return self._wrap_tool_result("get_train_departures_by_arrival", {
+                "text": result,
+                "instructions": (
+                    "For each train option, tell the user what time it departs, and how many minutes early it will arrive at Flinders Street before their target time. "
+                    "If a train arrives very close to the target time (less than 2 minutes early), warn the user it is cutting it fine. "
+                    "Important: if the train has a warning about walk time, you must tell the user they may miss this train, and give how many minutes until departure"
+                )
+            })
+        
+        except FileNotFoundError:
+            print(f"[ptv] ERROR: cache not found at {self.config.ptv.cache_file}")
+            return self._wrap_tool_result("get_train_departures_by_arrival", {"text": "Train timetable cache not found. Tell the user to run the cache update script first."})
+        
+        except Exception as e:
+            print(f"[ptv] ERROR: {e}")
+            return self._wrap_tool_result("get_train_departures_by_arrival", {"text": f"Error fetching train times: {e}"})
 
 
 
