@@ -428,6 +428,11 @@ class AsteriskInterface:
                     continue
 
                 if self.rx_paused:
+                    # attempting to keep consuming audio packets while speaking so we don't accumulate and dump on the ASR:
+                    audio_buffer = np.array([], dtype=np.float32)
+                    self.frames_np = np.array([], dtype=np.float32)
+                    self.recording = False
+                    self.last_voice_ts = None
                     continue
 
                 payload   = raw[RTP_HDR_SIZE:]
