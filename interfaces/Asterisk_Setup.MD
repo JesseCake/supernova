@@ -132,6 +132,7 @@ Full file could look like:
   acl = lan-only                  ; access control to limit to LAN
   direct_media = no               ; force all media through Asterisk — required for ARI external media
   rtp_symmetric = yes             ; send RTP to the port we receive from — good practice on LAN
+  dtmf_mode=rfc4733               ; This is important so that tones are intercepted properly for passthrough to Asterisk Agent interface to use
 
   [100-auth]
   type = auth
@@ -189,6 +190,7 @@ If nothing matches the dialled number, the catch-all _. at the bottom hangs up c
   - Dial(PJSIP/${EXTEN},30) — the 30 is seconds to ring before giving up.
     Increase if you want phones to ring longer before the call fails.
   - Everything else can be left exactly as provided.
+  - Remember, if you're anywhere other than the use, change your country code in /etc/asterisk/indications.conf to your country (here in Australia it's 'au')
 
 #### Full file contents
 Copy this exactly into /etc/asterisk/extensions.conf:
@@ -209,24 +211,29 @@ Copy this exactly into /etc/asterisk/extensions.conf:
   ; Any 3-digit extension starting with 1 rings it directly.
   ; Covers 100-199 so any phone you add in that range works automatically.
   exten => _1XX,1,Dial(PJSIP/${EXTEN},30)
-   same => n,Hangup()
+  same => n,Hangup()
 
   ; --- Agent: auto-dials to AI agent on pickup ---
-  ; HT802 is configured to dial 900 on pickup (see Part 4).
+  ; HT802 is configured to dial 900 on pickup
   ; Asterisk answers and hands the call to the Supernova ARI app.
+  ; In the app, we add the ability to hand back to next step in dialplan if user dials zero
+  ; If Supernova isn't running, we should fall into the next step anyway which will be a dialtone
   exten => 900,1,NoOp(Incoming call to Supernova AI agent)
-   same => n,Answer()
-   same => n,Stasis(supernova)
-   same => n,Hangup()
+  same => n,Answer()
+  same => n,Stasis(supernova)
+  same => n,NoOp(ARI app unavailable - failing over to dial tone)
+  same => n,Goto(internal,transfer,1)
 
-  ; --- Outside line placeholder (dial 0 prefix) ---
-  ; Not functional until a VOIP trunk is configured.
-  exten => _0.,1,NoOp(Outside line not yet configured)
-   same => n,Playback(tt-weasels)
-   same => n,Hangup()
+  ; dial tone / transfer target
+  exten => transfer,1,NoOp(Transferred from Supernova)
+  same => n,Playtones(dial)
+  same => n,WaitExten(30)
+  same => n,StopPlaytones()
+  same => n,Hangup()
 
   ; --- Catch-all: anything else hangs up cleanly ---
   exten => _.,1,Hangup()
+
 
 ---
 

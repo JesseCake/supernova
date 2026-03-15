@@ -523,8 +523,31 @@ class AsteriskInterface:
                     print(f"[asterisk] ARI connection error: {e}, retrying in 5s...")
                     await asyncio.sleep(5)
 
+    async def _transfer_to_dialplan(self, session: aiohttp.ClientSession):
+        # allows transferring to dialtone
+        print("[asterisk] DTMF 0 — transferring to dialplan")
+        channel_id = self.channel_id   # save before nulling
+        self.channel_id = None         # stop the RTP loop
+        if not channel_id:
+            return
+        try:
+            # Must remove from bridge before continuing into dialplan
+            await self._ari_delete(session, f"/channels/{channel_id}/bridge")
+            await self._ari_post(
+                session,
+                f"/channels/{channel_id}/continue",
+                context="internal",
+                extension="transfer",
+                priority=1,
+            )
+        except Exception as e:
+            print(f"[asterisk] Transfer failed: {e}")
+
     async def _handle_event(self, event: dict, session: aiohttp.ClientSession):
         etype = event.get("type")
+        # debugging message types:
+        #if etype not in ("ChannelHangupRequest",):  # filter noise
+        #    print(f"[asterisk] Event: {etype}")
 
         if etype == "StasisStart":
             channel      = event.get("channel", {})
@@ -544,6 +567,17 @@ class AsteriskInterface:
             if channel_id == self.channel_id:
                 print("[asterisk] StasisEnd — call ended by remote.")
                 self.channel_id = None
+
+        # we can dial 0 for an outside line:
+        elif etype == "ChannelDtmfReceived":
+            channel_id = event.get("channel", {}).get("id")
+            digit = event.get("digit")
+            
+            # debug:
+            print(f"[asterisk] DTMF channel_id={channel_id}, digit={digit}")
+
+            if channel_id == self.channel_id and digit == "0":
+                await self._transfer_to_dialplan(session)
 
         elif etype == "ChannelHangupRequest":
             channel_id = event.get("channel", {}).get("id")
