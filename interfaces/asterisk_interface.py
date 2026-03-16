@@ -14,7 +14,8 @@ import numpy as np
 
 from piper import PiperVoice, SynthesisConfig
 from whisper_live.vad import VoiceActivityDetector
-from whisper_live.transcriber import WhisperModel
+#from whisper_live.transcriber import WhisperModel  # WE NOW USE DIRECTLY FASTER WHISPER
+from faster_whisper import WhisperModel
 
 # ============================================================
 # AsteriskInterface
@@ -50,7 +51,7 @@ class AsteriskInterface:
         # TTS (Piper) — own instance + lock
         self._piper_lock = threading.Lock()
         self.voice = PiperVoice.load(
-            "./libs/voices/glados_piper_medium.onnx",
+            "./libs/voices/en_GB-northern_english_male-medium.onnx",
             use_cuda=False,
         )
         self.piper_syn_config = SynthesisConfig(
@@ -189,6 +190,9 @@ class AsteriskInterface:
             self.frames_np = np.concatenate((self.frames_np, frame_np))
 
     async def _transcribe_and_respond(self):
+        # debug:
+        #print(f"[asterisk] DEBUG _transcribe_and_respond called, frames={self.frames_np.size}")
+
         if self.frames_np.size == 0:
             return
 
@@ -199,7 +203,32 @@ class AsteriskInterface:
             return
 
         try:
-            segments, _ = self.transcriber.transcribe(self.frames_np)
+            #print(f"[asterisk] DEBUG calling transcriber...")
+            
+            # Debugging audio:
+            #import wave
+            #tmp = "/tmp/asterisk_debug.wav"
+            #with wave.open(tmp, 'wb') as wf:
+            #    wf.setnchannels(1)
+            #    wf.setsampwidth(2)
+            #    wf.setframerate(AGENT_RATE)
+            #    wf.writeframes((self.frames_np * 32767).astype(np.int16).tobytes())
+            #print(f"[asterisk] DEBUG audio dumped to {tmp}")
+
+            # let's adjust the inputs to the transcriber:
+            segments, info = self.transcriber.transcribe(
+                self.frames_np,
+                language="en",
+                no_speech_threshold=None,
+                log_prob_threshold=None,
+                compression_ratio_threshold=None,
+            )
+            #debugging:
+            segments = list(segments)
+            print(f"[asterisk] DEBUG {len(segments)} segments, info={info}")
+            for s in segments:
+                print(f"[asterisk] DEBUG segment: '{s.text}' no_speech_prob={s.no_speech_prob:.4f} avg_logprob={s.avg_logprob:.4f}")
+
             self.frames_np = np.array([], dtype=np.float32)
         except Exception as e:
             print(f"[asterisk] ASR error: {e}")
@@ -417,6 +446,8 @@ class AsteriskInterface:
             while self.channel_id is not None:
                 try:
                     raw = await loop.run_in_executor(None, self._rtp_sock.recv, 4096)
+                    #debug:
+                    #print(f"[asterisk] DEBUG recv {len(raw)} bytes")
                 except TimeoutError:
                     # No RTP packet in 1s — check if call is still active and loop
                     continue
@@ -452,6 +483,9 @@ class AsteriskInterface:
                 audio_buffer = audio_buffer[VAD_MIN_SAMPLES:]
 
                 if self.vad(audio_frame=chunk):
+                    # debug:
+                    #print(f"[asterisk] DEBUG VAD=True, recording={self.recording}")
+
                     if not self.recording:
                         self.recording = True
                         self.interrupt_event.clear()
@@ -461,6 +495,9 @@ class AsteriskInterface:
                     self.last_voice_ts = time.monotonic()
                     self._add_frames(chunk)
                 elif self.recording:
+                    # debug:
+                    #print(f"[asterisk] DEBUG silence, elapsed={time.monotonic() - self.last_voice_ts:.2f}s")
+
                     # Keep adding frames during brief silences so we don't lose mid-sentence gaps
                     self._add_frames(chunk)
                     if (self.last_voice_ts is not None and

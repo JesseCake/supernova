@@ -12,7 +12,8 @@ from interfaces.voice_remote import VoiceRemoteInterface
 from interfaces.asterisk_interface import AsteriskInterface
 
 # Shared instances — initialised once before any interfaces start - otherwise we clash
-from whisper_live.transcriber import WhisperModel
+#from whisper_live.transcriber import WhisperModel  # WE NOW USE THE DIRECT FASTER WHISPER
+from faster_whisper import WhisperModel
 from whisper_live.vad import VoiceActivityDetector
 whisper_model = WhisperModel(model_size_or_path="base.en")
 vad = VoiceActivityDetector(threshold=0.5, frame_rate=16000)
