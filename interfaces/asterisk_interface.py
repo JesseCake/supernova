@@ -260,7 +260,7 @@ class AsteriskInterface:
             self.session_id = str(uuid.uuid4())
             self.core_processor.create_session(self.session_id)
             self.rx_paused = True
-            await self._speak_text("Working")
+            #await self._speak_text("Working")
 
         print(f"[asterisk] Processing: {input_text}")
         thread = threading.Thread(
@@ -269,6 +269,7 @@ class AsteriskInterface:
                 "input_text": input_text,
                 "session_id": self.session_id,
                 "is_voice": False,
+                "voice_hangup": False,  # no hangup tool
             },
             daemon=True,
         )
@@ -297,6 +298,11 @@ class AsteriskInterface:
             await self._speak_text(re.sub(r'[*#`_~]', '', buffer).strip())
 
         session_obj = self.core_processor.get_session(self.session_id)
+        
+        # to fix when odd edges happen with a call picked up after hangup:
+        if session_obj is None:
+            return
+        
         close = session_obj["close_voice_channel"].is_set()
 
         if close:
@@ -377,6 +383,9 @@ class AsteriskInterface:
         self.recording     = False
         self.last_voice_ts = None
         self.rx_paused     = False
+        # adding this to try and tear down previous call if still speaking:
+        self.interrupt_event.set()  # kills any in-flight _speak_text
+        await asyncio.sleep(0.1)    # let in-flight coroutines see the event with enough time to die
         self.interrupt_event.clear()
 
         local_port = self._open_rtp_socket()
@@ -595,6 +604,13 @@ class AsteriskInterface:
             if channel_name.startswith("UnicastRTP/"):
                 return
             if not channel_id:
+                return
+            
+            # we are restricting to only accept a single call at a time, reject any new ones while a call exists 
+            # (fall into next line of extensions.conf in asterisk):
+            if self.channel_id is not None:
+                print(f"[asterisk] Rejecting call {channel_id} — already busy")
+                await self._ari_delete(session, f"/channels/{channel_id}")
                 return
 
             asyncio.create_task(self._handle_call(channel_id, session))
