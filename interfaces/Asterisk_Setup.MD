@@ -148,6 +148,18 @@ Full file could look like:
 
 ---
 
+### acl.conf
+
+This file controls access. pjsip.conf references access controls of "lan-only" which we'll define. of course you'll need to set your LAN subnet which will probably be different to mine (mine is 192.168.20.x). You must put in this file:
+
+[lan-only]
+deny = 0.0.0.0/0.0.0.0
+permit = 192.168.20.0/24
+
+
+
+---
+
 ### extensions.conf
 This file is the dialplan — it controls what happens when any number is dialled.
 The default file installed by apt is a large sample file full of examples. We replace
