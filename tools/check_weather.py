@@ -16,19 +16,19 @@ def check_weather(
     location: Annotated[str, Field(
         default="Brunswick, VIC, Australia",
         description=(
-            "Optional. The location to fetch weather for. "
+            "Optional. The location to fetch weather (temperature and conditions) for. "
             "Use commas and state initials/country name for accuracy e.g. 'Sydney, NSW, Australia'. "
             "Leave as default if the user just asks about the weather without specifying a location."
         )
     )] = "Brunswick, VIC, Australia",
     forecast: Annotated[bool, Field(
         default=False,
-        description="Set to true to get a 5-day weather forecast instead of current weather."
+        description="Set to true to get a 5-day weather forecast instead of today's current weather/temperature/conditions."
     )] = False,
 ) -> str:
     """
-    Fetch the current weather or 5-day forecast for a location.
-    Use when asked about the weather, or when weather is relevant to another query.
+    Fetch today's current weather or 5-day forecast for a location.
+    Use when asked about the weather, temperature, or conditions, or when weather is relevant to another query.
     Use the default location if no location is specified.
     """
     ...
