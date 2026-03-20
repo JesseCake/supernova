@@ -230,6 +230,10 @@ class SpeakerIdentifier:
             self._result = None
             self._done.set()
             return
+        
+        # Don't start a new thread if one is already running
+        if self._thread and self._thread.is_alive():
+            return
 
         self._result = None
         self._done.clear()
