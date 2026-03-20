@@ -7,17 +7,20 @@ import struct
 import threading
 import time
 import uuid
+import wave
+from datetime import datetime
 from typing import Optional
+import os
 
 import aiohttp
 import numpy as np
 
 from piper import PiperVoice, SynthesisConfig
 from whisper_live.vad import VoiceActivityDetector
-#from whisper_live.transcriber import WhisperModel  # WE NOW USE DIRECTLY FASTER WHISPER
 from faster_whisper import WhisperModel
 
 from core.precontext import VoiceMode
+from core.speaker_id import SpeakerIdentifier, load_profiles
 
 # ============================================================
 # AsteriskInterface
@@ -79,7 +82,7 @@ class AsteriskInterface:
         self.recording     = False
         self.last_voice_ts: Optional[float] = None
         self.vad_timeout   = 1.5
-        self.rx_paused     = False
+        self.rx_paused     = True  # start not listening so we don't hear greeting
         self.interrupt_event = asyncio.Event()
         self.close_channel_phrase = "finish conversation"
 
@@ -89,6 +92,18 @@ class AsteriskInterface:
         self._rtp_seq  = 0
         self._rtp_ts   = 0
         self._rtp_ssrc = int(uuid.uuid4()) & 0xFFFFFFFF
+
+        # Speaker identification
+        config_dir = os.path.join(os.path.dirname(__file__), '../config')
+        self._speaker_profiles = load_profiles(config_dir)
+        self._speaker_id = SpeakerIdentifier(
+            self._speaker_profiles,
+            threshold=config.speaker_id.threshold,  # threshold for positive ID
+        )
+        self._identified_speaker = None
+        # Pre-load the speaker encoder so it's ready before first utterance
+        from core.speaker_id import _get_encoder
+        _get_encoder()
 
         # ARI websocket session (aiohttp)
         self._ws_session: Optional[aiohttp.ClientSession] = None
@@ -205,17 +220,17 @@ class AsteriskInterface:
             return
 
         try:
-            #print(f"[asterisk] DEBUG calling transcriber...")
-            
-            # Debugging audio:
-            #import wave
-            #tmp = "/tmp/asterisk_debug.wav"
-            #with wave.open(tmp, 'wb') as wf:
-            #    wf.setnchannels(1)
-            #    wf.setsampwidth(2)
-            #    wf.setframerate(AGENT_RATE)
-            #    wf.writeframes((self.frames_np * 32767).astype(np.int16).tobytes())
-            #print(f"[asterisk] DEBUG audio dumped to {tmp}")
+            # Save debug audio if enabled — save before transcription clears the buffer
+            if self.config.debug.record_audio:
+                record_dir = self.config.debug.record_dir
+                os.makedirs(record_dir, exist_ok=True)
+                filename = os.path.join(record_dir, f"asterisk_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.wav")
+                with wave.open(filename, 'wb') as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(AGENT_RATE)
+                    wf.writeframes((self.frames_np * 32767).astype(np.int16).tobytes())
+                print(f"[asterisk] Saved debug audio to {filename}")
 
             # let's adjust the inputs to the transcriber:
             segments, info = self.transcriber.transcribe(
@@ -250,6 +265,11 @@ class AsteriskInterface:
         if self.close_channel_phrase in text.lower():
             await self._hangup()
             return
+        
+        # Get speaker ID result and store on self for _contact_core to pick up
+        self._identified_speaker = self._speaker_id.result(timeout=1.0)
+        if self._identified_speaker:
+            print(f"[asterisk] Speaker identified: {self._identified_speaker}")
 
         await self._contact_core(text)
 
@@ -261,6 +281,10 @@ class AsteriskInterface:
         if self.session_id is None:
             self.session_id = str(uuid.uuid4())
             self.core_processor.create_session(self.session_id)
+            # Write identified speaker into the new session immediately
+            session = self.core_processor.get_session(self.session_id)
+            if session is not None and self._identified_speaker:
+                session['speaker'] = self._identified_speaker
             self.rx_paused = True
             #await self._speak_text("Working")
 
@@ -384,6 +408,7 @@ class AsteriskInterface:
         self.recording     = False
         self.last_voice_ts = None
         self.rx_paused     = False
+        self._identified_speaker = None
         # adding this to try and tear down previous call if still speaking:
         self.interrupt_event.set()  # kills any in-flight _speak_text
         await asyncio.sleep(0.1)    # let in-flight coroutines see the event with enough time to die
@@ -499,6 +524,13 @@ class AsteriskInterface:
                     if not self.recording:
                         self.recording = True
                         self.interrupt_event.clear()
+
+                        # START speaker ID as soon as recording begins:
+                        self._speaker_id.start(
+                            get_frames=lambda: self.frames_np,
+                            is_recording=lambda: self.recording,
+                        )
+
                         # Prepend the lookback buffer so we don't lose the start of the utterance
                         if lookback.size > 0:
                             self._add_frames(lookback)

@@ -5,14 +5,18 @@ import uuid
 import re
 import time
 import threading
+import wave
+from datetime import datetime
 from typing import Optional, Tuple
 
 import numpy as np
 import resampy
+import os
 
 from piper import PiperVoice, SynthesisConfig
 
 from core.precontext import VoiceMode
+from core.speaker_id import SpeakerIdentifier, load_profiles
 
 from whisper_live.vad import VoiceActivityDetector
 from whisper_live.transcriber import WhisperModel
@@ -105,7 +109,16 @@ class VoiceRemoteInterface:
         self._speak_task: Optional[asyncio.Task] = None
 
         # Half-duplex RX gate: when True we ignore AUD0/VAD
-        self.rx_paused = False 
+        self.rx_paused = False
+
+        # Voice printing:
+        config_dir = os.path.join(os.path.dirname(__file__), '../config')
+        self._speaker_profiles = load_profiles(config_dir)
+        self._speaker_id = SpeakerIdentifier(self._speaker_profiles)
+        self._identified_speaker = None
+        # Pre-load the speaker encoder so it's ready before first utterance
+        from core.speaker_id import _get_encoder
+        _get_encoder()
 
     # ------------------ protocol helpers ------------------
     async def send_text(self, tag: bytes, text: str):
@@ -161,6 +174,11 @@ class VoiceRemoteInterface:
         if self.session_id is None:
             self.session_id = str(uuid.uuid4())
             self.core_processor.create_session(self.session_id)
+
+            # Write identified speaker into the new session immediately
+            session = self.core_processor.get_session(self.session_id)
+            if session is not None and self._identified_speaker:
+                session['speaker'] = self._identified_speaker
 
             # send immediate response so we know we're live
             #print(f"[debug] sending 'Working' TTS")
@@ -240,6 +258,18 @@ class VoiceRemoteInterface:
             return
 
         try:
+            # Save debug audio if enabled — save before transcription clears the buffer
+            if self.core_processor.config.debug.record_audio:
+                record_dir = self.core_processor.config.debug.record_dir
+                os.makedirs(record_dir, exist_ok=True)
+                filename = os.path.join(record_dir, f"remote_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.wav")
+                with wave.open(filename, 'wb') as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(self.listening_rate)
+                    wf.writeframes((self.frames_np * 32767).astype(np.int16).tobytes())
+                print(f"[voice_remote] Saved debug audio to {filename}")
+
             segments, _ = self.transcriber.transcribe(self.frames_np)
             self.frames_np = np.array([], dtype=np.float32)
         except Exception as e:
@@ -267,6 +297,11 @@ class VoiceRemoteInterface:
         
         if self._speak_task and not self._speak_task.done():
             await self._speak_task
+
+        # Get speaker ID result and store on self for _contact_core to pick up
+        self._identified_speaker = self._speaker_id.result(timeout=1.0)
+        if self._identified_speaker:
+            print(f"[voice_remote] Speaker identified: {self._identified_speaker}")
 
 
         close = await self._contact_core(text)
@@ -367,6 +402,9 @@ class VoiceRemoteInterface:
         #reset state
         self.recording = False
         self.last_voice_ts = None
+        self.frames_np = np.array([], dtype=np.float32)
+        self._identified_speaker = None
+        self.rx_paused = True  # hold closed until _open_channel opens it after greeting
 
         try:
             while True:
@@ -388,6 +426,11 @@ class VoiceRemoteInterface:
                             self.recording = True
                             # NEW: first speech after interrup -> allow future TTS again
                             self._clear_interrupt()
+                            # START speaker ID as soon as recording begins:
+                            self._speaker_id.start(
+                                get_frames=lambda: self.frames_np,
+                                is_recording=lambda: self.recording,
+                            )
                         self.last_voice_ts = time.monotonic()  # mark latest speech
                         self._add_frames(audio_frame)
                     elif self.recording:

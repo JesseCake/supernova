@@ -22,6 +22,9 @@ from core.tool_loader import ToolLoader
 # dynamic precontext loader:
 from core.precontext import PrecontextLoader, VoiceMode
 
+# voice printing:
+from core.speaker_id import load_profiles
+
 
 class CoreProcessor:
     def __init__(self, config: AppConfig):
@@ -152,7 +155,7 @@ class CoreProcessor:
             conversation_history = []
 
         # now we create the system message:
-        system_message = self.create_system_message(mode=mode)
+        system_message = self.create_system_message(mode=mode, session=session)
 
         prompt = [system_message] + self.create_prompt(
             input_text=input_text,
@@ -231,7 +234,7 @@ class CoreProcessor:
 
         return prompt
 
-    def create_system_message(self, mode: VoiceMode = VoiceMode.PLAIN):
+    def create_system_message(self, mode: VoiceMode = VoiceMode.PLAIN, session: dict = None):
         # Dynamically load precontext from personality/ files — picks up edits without restart
         full_pre_context = self.precontext_loader.get(mode)
  
@@ -250,6 +253,20 @@ class CoreProcessor:
  
         full_pre_context += f"\n\nCurrent Time: (use these for user answers as needed)\n Time: {time}\nDate: {date}\nDay: {day}\nTimezone (if needed): {timezone}\n"
  
+        # Inject identified speaker if known:
+        if session and session.get('speaker'):
+            speaker = session['speaker']
+            config_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../config')
+            profiles = load_profiles(config_dir)
+            profile  = profiles.get(speaker, {})
+            block    = f"[SPEAKER IDENTIFIED]\nYou are speaking with {speaker}."
+            # let's not use this yet, we might just use it on tools directly
+            #if profile.get('email'):
+            #    block += f"\nTheir email address is {profile['email']}."
+            #if profile.get('notes'):
+            #    block += f"\n{profile['notes']}"
+            full_pre_context += f"\n\n{block}"
+
         return {
             'role':    'system',
             'content': full_pre_context,

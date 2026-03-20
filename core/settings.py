@@ -36,12 +36,23 @@ class VoiceConfig:
     use_cuda: bool = False
 
 @dataclass
+class SpeakerConfig:
+    threshold: float = 0.75
+
+@dataclass
+class DebugConfig:
+    record_audio: bool = False
+    record_dir: str = "./debug_audio"
+
+@dataclass
 class AppConfig:
     ollama: OllamaConfig
     server: ServerConfig
     interfaces: InterfacesConfig
     voice: VoiceConfig = field(default_factory=VoiceConfig)
     asterisk: AsteriskConfig = field(default_factory=AsteriskConfig)
+    debug: DebugConfig = field(default_factory=DebugConfig)
+    speaker_id: SpeakerConfig = field(default_factory=SpeakerConfig)
 
 def load_config(path: str = None) -> AppConfig:
     if path is None:
@@ -63,10 +74,26 @@ def load_config(path: str = None) -> AppConfig:
         if k in VoiceConfig.__dataclass_fields__
     })
 
+    # Debug config
+    debug_raw = raw.get("debug") or {}
+    debug = DebugConfig(**{
+        k: v for k, v in debug_raw.items()
+        if k in DebugConfig.__dataclass_fields__
+    })
+
+    # Speaker ID threshold
+    speaker_id_raw = raw.get("speaker_id") or {}
+    speaker_id = SpeakerConfig(**{
+        k: v for k, v in speaker_id_raw.items()
+        if k in SpeakerConfig.__dataclass_fields__
+    })
+
     return AppConfig(
         ollama=OllamaConfig(**raw["ollama"]),
         server=ServerConfig(**raw["server"]),
         interfaces=InterfacesConfig(**(raw.get("interfaces") or {})),
         voice=voice,
         asterisk=asterisk,
+        debug=debug,
+        speaker_id=speaker_id,
     )
