@@ -19,7 +19,7 @@ from core.precontext import VoiceMode
 from core.speaker_id import SpeakerIdentifier, load_profiles
 
 from whisper_live.vad import VoiceActivityDetector
-from whisper_live.transcriber import WhisperModel
+from faster_whisper import WhisperModel
 
 FRAME_HDR = struct.Struct('<4sI')  # (type:4s, length:uint32)
 
