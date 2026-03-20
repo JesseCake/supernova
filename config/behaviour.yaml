@@ -1,0 +1,9 @@
+enabled: true
+
+# Position in the system prompt relative to other context providers.
+# Lower number = appears earlier. Default is 50 if not set.
+context_priority: 1
+
+# Path to the rules JSON file.
+# Defaults to personality/behaviour_overrides.json if not set.
+#rules_file: "/custom/path/behaviour_overrides.json"

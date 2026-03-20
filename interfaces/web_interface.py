@@ -2,6 +2,7 @@ import gradio as gr
 import uuid
 import threading
 
+from core.precontext import VoiceMode
 
 class WebInterface:
     def __init__(self, core_processor):
@@ -18,7 +19,7 @@ class WebInterface:
             # Kick off the core processing in a background thread
             t = threading.Thread(
                 target=self.core_processor.process_input,
-                kwargs={"input_text": message, "session_id": self.session_id, "is_voice": False},
+                kwargs={"input_text": message, "session_id": self.session_id, "mode": VoiceMode.PLAIN},
                 daemon=True,
             )
             t.start()

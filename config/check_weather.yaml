@@ -1,0 +1,8 @@
+enabled: true
+
+api_key: "APIKEY"
+default_location: "Brunswick, VIC, Australia"
+# Home coordinates — used for the default location to avoid city name ambiguity
+home_coords:
+  lat: -37.7746
+  lon: 144.9631

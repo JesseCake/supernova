@@ -12,6 +12,8 @@ import resampy
 
 from piper import PiperVoice, SynthesisConfig
 
+from core.precontext import VoiceMode
+
 from whisper_live.vad import VoiceActivityDetector
 from whisper_live.transcriber import WhisperModel
 
@@ -79,8 +81,8 @@ class VoiceRemoteInterface:
         self.speaking_rate = 16000          # what we stream to the client
         self.piper_rate = 16000             # change if piper voice uses a different rate
         self.voice = PiperVoice.load(
-            "./libs/voices/glados_piper_medium.onnx",  # install with python3 -m piper.download_voices en_GB-northern_english_male-medium or just place onnx files in folder
-            use_cuda=False,                 # True if you installed onnxruntime-gpu and want GPU
+                core_processor.config.voice.model_path,
+                use_cuda=core_processor.config.voice.use_cuda,     # True if you installed onnxruntime-gpu and want GPU
             )
         
         self.piper_syn_config = SynthesisConfig(
@@ -169,7 +171,7 @@ class VoiceRemoteInterface:
         print(f"[debug] starting thread to process input: {input_text}")
         thread = threading.Thread(
             target=self.core_processor.process_input,
-            kwargs={"input_text": input_text, "session_id": self.session_id, "is_voice": True},
+            kwargs={"input_text": input_text, "session_id": self.session_id, "mode": VoiceMode.SPEAKER},
             daemon=True,
         )
         thread.start()

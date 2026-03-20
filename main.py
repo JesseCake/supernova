@@ -3,7 +3,7 @@ import asyncio
 from core.core import CoreProcessor
 
 # Config
-from config.settings import load_config
+from core.settings import load_config
 
 # Interfaces
 from interfaces.web_interface import WebInterface

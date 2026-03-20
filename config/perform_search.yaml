@@ -1,0 +1,3 @@
+enabled: true
+
+searxng_url: "http://localhost:8888"

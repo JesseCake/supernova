@@ -17,6 +17,8 @@ from whisper_live.vad import VoiceActivityDetector
 #from whisper_live.transcriber import WhisperModel  # WE NOW USE DIRECTLY FASTER WHISPER
 from faster_whisper import WhisperModel
 
+from core.precontext import VoiceMode
+
 # ============================================================
 # AsteriskInterface
 # ============================================================
@@ -51,8 +53,8 @@ class AsteriskInterface:
         # TTS (Piper) — own instance + lock
         self._piper_lock = threading.Lock()
         self.voice = PiperVoice.load(
-            "./libs/voices/en_GB-northern_english_male-medium.onnx",
-            use_cuda=False,
+            core_processor.config.voice.model_path,
+            use_cuda=core_processor.config.voice.use_cuda,
         )
         self.piper_syn_config = SynthesisConfig(
             volume=1.0,
@@ -224,10 +226,10 @@ class AsteriskInterface:
                 compression_ratio_threshold=None,
             )
             #debugging:
-            segments = list(segments)
-            print(f"[asterisk] DEBUG {len(segments)} segments, info={info}")
-            for s in segments:
-                print(f"[asterisk] DEBUG segment: '{s.text}' no_speech_prob={s.no_speech_prob:.4f} avg_logprob={s.avg_logprob:.4f}")
+            #segments = list(segments)
+            #print(f"[asterisk] DEBUG {len(segments)} segments, info={info}")
+            #for s in segments:
+            #    print(f"[asterisk] DEBUG segment: '{s.text}' no_speech_prob={s.no_speech_prob:.4f} avg_logprob={s.avg_logprob:.4f}")
 
             self.frames_np = np.array([], dtype=np.float32)
         except Exception as e:
@@ -268,8 +270,7 @@ class AsteriskInterface:
             kwargs={
                 "input_text": input_text,
                 "session_id": self.session_id,
-                "is_voice": False,
-                "voice_hangup": False,  # no hangup tool
+                "mode": VoiceMode.PHONE,
             },
             daemon=True,
         )

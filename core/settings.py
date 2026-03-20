@@ -23,16 +23,6 @@ class InterfacesConfig:
     asterisk: bool = False
 
 @dataclass
-class PtvConfig:
-    api_key: str
-    stop_id: str           = "14312"   # Anstey Station platform 1
-    stop_name: str         = "Anstey Station"
-    direction: str         = "citybound"
-    gtfs_zip_folder: str   = "2"       # folder inside GTFS zip for this line
-    cache_file: str        = ""        # auto-set to config dir if empty
-    walk_minutes: int      = 7         # used in prompt formatting to give user an idea of how long to get to station before next train
-
-@dataclass
 class AsteriskConfig:
     ari_host: str           = "127.0.0.1"
     ari_port: int           = 8088
@@ -41,29 +31,23 @@ class AsteriskConfig:
     rtp_local_ip: str       = "127.0.0.1"
 
 @dataclass
+class VoiceConfig:
+    model_path: str = "./libs/voices/voice.onnx"
+    use_cuda: bool = False
+
+@dataclass
 class AppConfig:
     ollama: OllamaConfig
     server: ServerConfig
     interfaces: InterfacesConfig
-    ha_url: str
-    ptv: Optional[PtvConfig] = None
-    searxng_url: str = "http://localhost:8888"  # default so it works without config entry
+    voice: VoiceConfig = field(default_factory=VoiceConfig)
     asterisk: AsteriskConfig = field(default_factory=AsteriskConfig)
 
 def load_config(path: str = None) -> AppConfig:
     if path is None:
-        path = os.path.join(os.path.dirname(__file__), "settings.yaml")
+        path = os.path.join(os.path.dirname(__file__), "../config/core_config.yaml")
     with open(path) as f:
         raw = yaml.safe_load(f)
-    
-    # Conditionally include ptv config if present, but tools will check for presence of config.ptv before enabling related tools
-    ptv = None
-    if raw.get("ptv") and raw["ptv"].get("api_key"):
-        ptv_raw = raw["ptv"]
-        #auto-set cache_file path next to settings.yaml if not specified
-        if not ptv_raw.get("cache_file"):
-            ptv_raw["cache_file"] = os.path.join(os.path.dirname(path), "ptv_cache.json")
-        ptv = PtvConfig(**{k: v for k, v in ptv_raw.items() if k in PtvConfig.__dataclass_fields__})
 
     # Asterisk config loading
     asterisk_raw = raw.get("asterisk") or {}
@@ -72,12 +56,17 @@ def load_config(path: str = None) -> AppConfig:
         if k in AsteriskConfig.__dataclass_fields__
     })
 
+    # Voice config
+    voice_raw = raw.get("voice") or {}
+    voice = VoiceConfig(**{
+        k: v for k, v in voice_raw.items()
+        if k in VoiceConfig.__dataclass_fields__
+    })
+
     return AppConfig(
         ollama=OllamaConfig(**raw["ollama"]),
         server=ServerConfig(**raw["server"]),
         interfaces=InterfacesConfig(**(raw.get("interfaces") or {})),
-        ha_url=raw["home_assistant"]["url"],
-        ptv=ptv,
-        searxng_url=raw.get("searxng", {}).get("url", "http://localhost:8888"),
+        voice=voice,
         asterisk=asterisk,
     )
