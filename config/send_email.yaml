@@ -1,0 +1,10 @@
+enabled: true
+
+smtp_host: "smtp.gmail.com"
+smtp_port: 587
+username: ""  # use a gmail account (ensure 2FA is turned on)
+password: ""  # go to https://myaccount.google.com/apppasswords to generate a new one for this "app"
+from_address: "supernova@supernova.supernova"  # change this to whatever you want
+
+contacts:
+  John: "person@example.com"

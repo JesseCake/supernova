@@ -125,10 +125,17 @@ def execute(tool_args: dict, session, core, tool_config: dict) -> str:
         msg['Subject'] = subject
         msg.attach(MIMEText(body, 'plain'))
 
-        with smtplib.SMTP_SSL(smtp_host, smtp_port) as server:
-            if username and password:
-                server.login(username, password)
-            server.sendmail(from_addr, to_address, msg.as_string())
+        if smtp_port == 465:
+            with smtplib.SMTP_SSL(smtp_host, smtp_port) as server:
+                if username and password:
+                    server.login(username, password)
+                server.sendmail(from_addr, to_address, msg.as_string())
+        else:
+            with smtplib.SMTP(smtp_host, smtp_port) as server:
+                if username and password:
+                    server.starttls()
+                    server.login(username, password)
+                server.sendmail(from_addr, to_address, msg.as_string())
 
         return core._wrap_tool_result("send_email", {
             "text": f"Email sent to {to_address}.",
