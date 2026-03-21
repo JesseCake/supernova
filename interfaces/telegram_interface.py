@@ -29,6 +29,7 @@ class TelegramInterface:
         self._sessions      = {}   # chat_id → session_id
         self._last_active   = {}   # chat_id → loop timestamp of last message
         self._last_typing   = {}   # chat_id → loop timestamp of last typing indicator
+        self._chat_locks: dict = {}   # chat_id → asyncio.Lock
 
     # ── Main loop ─────────────────────────────────────────────────────────────
 
@@ -112,55 +113,57 @@ class TelegramInterface:
         if chat_id not in allowed:
             print(f"[telegram] Ignoring unknown chat_id: {chat_id!r}")
             return
+        
+        async with self._get_lock(chat_id):
 
-        # ── /reset command ────────────────────────────────────────────────────
-        # Clears conversation history and sends a visual separator so the user
-        # knows the bot has forgotten the previous conversation.
-        if text.lower() in ("/reset", "/start"):
-            await self._reset_session(chat_id)
-            await self.send_message(
-                chat_id,
-                "——————————————\n"
-                "🔄 Conversation reset. Starting fresh.\n"
-                "To clear the chat visually, tap the chat name → Clear History."
+            # ── /reset command ────────────────────────────────────────────────────
+            # Clears conversation history and sends a visual separator so the user
+            # knows the bot has forgotten the previous conversation.
+            if text.lower() in ("/reset", "/start"):
+                await self._reset_session(chat_id)
+                await self.send_message(
+                    chat_id,
+                    "——————————————\n"
+                    "🔄 Conversation reset. Starting fresh.\n"
+                    "To clear the chat visually, tap the chat name → Clear History."
+                )
+                return
+
+            await self._ensure_session(chat_id)
+            session_id = self._sessions[chat_id]
+
+            # ── Typing indicator ──────────────────────────────────────────────────
+            # Show immediately so the user sees feedback before the first token.
+            now = asyncio.get_event_loop().time()
+            await self._send_typing(chat_id)
+            self._last_typing[chat_id] = now
+
+            # ── LLM processing ────────────────────────────────────────────────────
+            thread = threading.Thread(
+                target=self.core_processor.process_input,
+                kwargs={
+                    "input_text": text,
+                    "session_id": session_id,
+                    "mode":       VoiceMode.PLAIN,
+                },
+                daemon=True,
             )
-            return
+            thread.start()
 
-        await self._ensure_session(chat_id)
-        session_id = self._sessions[chat_id]
+            # Drain the response queue, refreshing the typing indicator as chunks
+            # arrive so Telegram keeps showing it throughout generation.
+            core_session = self.core_processor.get_session(session_id)
+            response     = []
+            while True:
+                chunk = await asyncio.to_thread(core_session['response_queue'].get)
+                if chunk is None:
+                    break
+                response.append(chunk)
+                await self._maybe_send_typing(chat_id)
 
-        # ── Typing indicator ──────────────────────────────────────────────────
-        # Show immediately so the user sees feedback before the first token.
-        now = asyncio.get_event_loop().time()
-        await self._send_typing(chat_id)
-        self._last_typing[chat_id] = now
-
-        # ── LLM processing ────────────────────────────────────────────────────
-        thread = threading.Thread(
-            target=self.core_processor.process_input,
-            kwargs={
-                "input_text": text,
-                "session_id": session_id,
-                "mode":       VoiceMode.PLAIN,
-            },
-            daemon=True,
-        )
-        thread.start()
-
-        # Drain the response queue, refreshing the typing indicator as chunks
-        # arrive so Telegram keeps showing it throughout generation.
-        core_session = self.core_processor.get_session(session_id)
-        response     = []
-        while True:
-            chunk = await asyncio.to_thread(core_session['response_queue'].get)
-            if chunk is None:
-                break
-            response.append(chunk)
-            await self._maybe_send_typing(chat_id)
-
-        full_response = "".join(response).strip()
-        if full_response:
-            await self.send_message(chat_id, full_response)
+            full_response = "".join(response).strip()
+            if full_response:
+                await self.send_message(chat_id, full_response)
 
     async def _handle_photo(self, chat_id: str, photo: list, caption: str):
         """Download photo and route through core with image content."""
@@ -169,47 +172,49 @@ class TelegramInterface:
         if chat_id not in allowed:
             print(f"[telegram] Ignoring unknown chat_id: {chat_id!r}")
             return
+        
+        async with self._get_lock(chat_id):
 
-        # Get largest size (last in Telegram's array)
-        file_id     = photo[-1]["file_id"]
-        image_bytes = await self._download_photo(file_id)
-        if not image_bytes:
-            await self.send_message(chat_id, "Sorry, I couldn't download that image.")
-            return
+            # Get largest size (last in Telegram's array)
+            file_id     = photo[-1]["file_id"]
+            image_bytes = await self._download_photo(file_id)
+            if not image_bytes:
+                await self.send_message(chat_id, "Sorry, I couldn't download that image.")
+                return
 
-        prompt = caption or ""
-        print(f"[telegram] Photo from {chat_id}, prompt: {prompt!r}")
+            prompt = caption or ""
+            print(f"[telegram] Photo from {chat_id}, prompt: {prompt!r}")
 
-        await self._ensure_session(chat_id)
-        session_id = self._sessions[chat_id]
+            await self._ensure_session(chat_id)
+            session_id = self._sessions[chat_id]
 
-        await self._send_typing(chat_id)
-        self._last_typing[chat_id] = asyncio.get_event_loop().time()
+            await self._send_typing(chat_id)
+            self._last_typing[chat_id] = asyncio.get_event_loop().time()
 
-        thread = threading.Thread(
-            target=self.core_processor.process_input,
-            kwargs={
-                "input_text": prompt,
-                "session_id": session_id,
-                "mode":       VoiceMode.PLAIN,
-                "images":     [image_bytes],
-            },
-            daemon=True,
-        )
-        thread.start()
+            thread = threading.Thread(
+                target=self.core_processor.process_input,
+                kwargs={
+                    "input_text": prompt,
+                    "session_id": session_id,
+                    "mode":       VoiceMode.PLAIN,
+                    "images":     [image_bytes],
+                },
+                daemon=True,
+            )
+            thread.start()
 
-        core_session = self.core_processor.get_session(session_id)
-        response     = []
-        while True:
-            chunk = await asyncio.to_thread(core_session['response_queue'].get)
-            if chunk is None:
-                break
-            response.append(chunk)
-            await self._maybe_send_typing(chat_id)
+            core_session = self.core_processor.get_session(session_id)
+            response     = []
+            while True:
+                chunk = await asyncio.to_thread(core_session['response_queue'].get)
+                if chunk is None:
+                    break
+                response.append(chunk)
+                await self._maybe_send_typing(chat_id)
 
-        full_response = "".join(response).strip()
-        if full_response:
-            await self.send_message(chat_id, full_response)
+            full_response = "".join(response).strip()
+            if full_response:
+                await self.send_message(chat_id, full_response)
 
     async def _download_photo(self, file_id: str) -> bytes | None:
         """Download a photo from Telegram, return raw bytes."""
@@ -240,6 +245,11 @@ class TelegramInterface:
             self.core_processor.sessions.pop(session_id, None)
         self._last_active.pop(chat_id, None)
         self._last_typing.pop(chat_id, None)
+
+    def _get_lock(self, chat_id: str) -> asyncio.Lock:
+        if chat_id not in self._chat_locks:
+            self._chat_locks[chat_id] = asyncio.Lock()
+        return self._chat_locks[chat_id]
 
     # ── Typing indicator ──────────────────────────────────────────────────────
 
