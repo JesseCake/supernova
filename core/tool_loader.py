@@ -110,7 +110,7 @@ class ToolLoader:
         latest = 0.0
         for directory in (self.tools_dir, self.config_dir):
             try:
-                latest = max(latest, os.path.getmtime(directory))
+                #latest = max(latest, os.path.getmtime(directory))  # this was re-loading on anything in the dir being changed, being full reloads over and over
                 for fname in os.listdir(directory):
                     if fname.endswith(('.py', '.yaml')) and not fname.startswith('_'):
                         fpath = os.path.join(directory, fname)

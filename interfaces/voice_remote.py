@@ -178,6 +178,8 @@ class VoiceRemoteInterface:
         self,
         core_processor,
         listening_rate:          int = 16000,
+        transcriber              = None,
+        vad                      = None,
         whisper_model_size:      str = 'base.en',
         piper_max_concurrent:    int = 1,
         whisper_max_concurrent:  int = 1,
@@ -192,7 +194,13 @@ class VoiceRemoteInterface:
         self._registry_lock = threading.Lock()
 
         # ── Shared config ─────────────────────────────────────────────────────
-        self.vad_timeout          = 0.7
+        # Store VAD config for per-connection instantiation.
+        # We don't share a single VAD instance — it's stateful — but we use
+        # the passed-in instance to copy threshold/frame_rate settings from.
+        self._vad_threshold  = vad.threshold  if vad else 0.5
+        self._vad_frame_rate = vad.frame_rate if vad else listening_rate
+        self.vad_timeout     = 0.7
+
         self.close_channel_phrase = "finish conversation"
         self.speaking_rate        = 16000
 
@@ -218,8 +226,12 @@ class VoiceRemoteInterface:
         self._piper_pool: Optional[_InferencePool] = None   # created in run()
 
         # ── Whisper ───────────────────────────────────────────────────────────
-        print("[voice_remote] Loading Whisper model...")
-        self._whisper_instance       = WhisperModel(model_size_or_path=whisper_model_size)
+        if transcriber is not None:
+            print("[voice_remote] Using shared Whisper model.")
+            self._whisper_instance = transcriber
+        else:
+            print("[voice_remote] Loading Whisper model...")
+            self._whisper_instance = WhisperModel(model_size_or_path=whisper_model_size)
         self._whisper_max_concurrent = whisper_max_concurrent
         self._whisper_pool: Optional[_InferencePool] = None   # created in run()
 
@@ -243,10 +255,8 @@ class VoiceRemoteInterface:
     def _unregister(self, endpoint_id: str):
         """Remove an endpoint from the registry on disconnect."""
         with self._registry_lock:
-            self._endpoints.pop(endpoint_id, None)
-        cs = self._endpoints.get(endpoint_id)
+            cs = self._endpoints.pop(endpoint_id, None)
         friendly = cs.friendly_name if cs else endpoint_id
-        self._endpoints.pop(endpoint_id, None)
         print(f"[registry] unregistered: {endpoint_id!r} ('{friendly}') — "
               f"{len(self._endpoints)} endpoint(s) online")
 
@@ -383,6 +393,18 @@ class VoiceRemoteInterface:
         await cs.writer.drain()
         cs.rx_paused = False
 
+    async def _open_channel_silent(self, cs: ClientSession, announcement: str):
+        """
+        Server-initiated call path — no greeting, no mic open.
+        Goes straight to the LLM with the announcement as the opening turn.
+        The LLM speaks the announcement naturally, then either closes the
+        channel (if the announcement text says to) or sends RDY0 to open
+        the mic for a follow-up conversation.
+        """
+        cs.rx_paused = True
+        # No "I'm here", no RDY0 — jump straight to LLM
+        await self._contact_core(cs, announcement, silent_start=True)
+
     async def _close_channel(self, cs: ClientSession):
         """
         End a voice session. Sends CLOS but does NOT close the TCP connection.
@@ -395,15 +417,19 @@ class VoiceRemoteInterface:
 
     # ── LLM dispatch ─────────────────────────────────────────────────────────
 
-    async def _contact_core(self, cs: ClientSession, input_text: str) -> bool:
+    async def _contact_core(self, cs: ClientSession, input_text: str, silent_start: bool = False) -> bool:
         """Send transcript to LLM, stream TTS back. Returns True if session should close."""
         if cs.session_id is None:
             cs.session_id = str(uuid.uuid4())
             self.core_processor.create_session(cs.session_id)
             core_session = self.core_processor.get_session(cs.session_id)
+            if core_session is not None:
+                core_session['endpoint_id'] = cs.endpoint_id
             if core_session is not None and cs._identified_speaker:
                 core_session['speaker'] = cs._identified_speaker
-            await self._speak_text(cs, "Working")
+            if not silent_start:
+                # so that we don't say "working" with inbound calls to endpoints:
+                await self._speak_text(cs, "Working")
 
         print(f"[voice_remote:{cs.endpoint_id}] → core: {input_text!r}")
         thread = threading.Thread(
@@ -531,7 +557,7 @@ class VoiceRemoteInterface:
         print(f"[voice_remote] satellite connected: {addr}")
 
         cs             = ClientSession(reader=reader, writer=writer, addr=addr)
-        cs.vad_detector = VoiceActivityDetector(threshold=0.5, frame_rate=self.listening_rate)
+        cs.vad_detector = VoiceActivityDetector(threshold=self._vad_threshold, frame_rate=self._vad_frame_rate)
         cs._speaker_id  = SpeakerIdentifier(self._speaker_profiles)
 
         try:
@@ -555,9 +581,13 @@ class VoiceRemoteInterface:
 
                 # ── WAKE: start (or restart) a voice session ──────────────────
                 elif ftype in (b'WAKE', b'OPEN'):
-                    # On a persistent connection, WAKE can arrive at the start
-                    # of each new wake-word session. Re-open the channel.
-                    await self._open_channel(cs)
+                    announcement = payload.decode("utf-8", errors="replace").strip() if payload else ""
+                    if announcement:
+                        # Server-initiated call — skip greeting, go straight to LLM
+                        await self._open_channel_silent(cs, announcement)
+                    else:
+                        # Normal wake word — greet and open mic as usual
+                        await self._open_channel(cs)
 
                 # ── AUD0: microphone audio ────────────────────────────────────
                 elif ftype == b'AUD0':

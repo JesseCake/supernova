@@ -8,6 +8,8 @@ Responsibilities:
     so that voice_remote.py can speak them as they arrive (streaming TTS pipeline).
   - Detects and executes tool calls inline, loops back for the model's follow-up.
   - Provides cancel_active_response() so voice_remote can interrupt mid-stream on barge-in.
+  - Owns the EventStore and Scheduler so tools can persist and fire future events.
+  - Provides schedule_event() and schedule_call() as the clean public API for tools.
  
 Threading model:
   core.py runs inside whichever thread calls process_input().
@@ -15,7 +17,6 @@ Threading model:
   event loop stays free to stream TTS concurrently.
 """
 
-import importlib
 import json
 import threading
 import time
@@ -24,11 +25,8 @@ try:
 except Exception:
     ollama = None
 import queue
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import os
-from urllib.parse import urlparse
-
-import tempfile
 
 # AppConfig: dataclass / pydantic model parsed from config.yaml — holds ollama host/model,
 # voice model path, debug flags, etc.
@@ -49,6 +47,10 @@ from core.precontext import PrecontextLoader, VoiceMode
 # Used here only to inject the identified speaker's name into the system prompt.
 from core.speaker_id import load_profiles
 
+# Event scheduling: For managing and spinning off event scheduling as needed/called
+from core.event_store import EventStore
+from core.scheduler import Scheduler
+
 
 class CoreProcessor:
     """
@@ -57,6 +59,13 @@ class CoreProcessor:
     One CoreProcessor is created at server startup and shared across all connections.
     Session isolation is achieved via the self.sessions dict, keyed by session_id
     (a UUID assigned per connection by voice_remote.py).
+ 
+    Public API for tools:
+        core.schedule_event(...)  — persist + schedule a future event
+        core.schedule_call(...)   — convenience wrapper: schedule a voice call
+        core.cancel_event(id)     — cancel a scheduled event by id
+        core.list_events(type)    — list pending events, optionally by type
+        core.voice_remote         — set by main.py; gives tools access to initiate_call()
     """
     def __init__(self, config: AppConfig):
         # Dict of session_id → session dict. Each session holds its own history,
@@ -87,6 +96,141 @@ class CoreProcessor:
             config_dir=config_dir,
             app_config=config,
         )
+
+        # ── Event system ──────────────────────────────────────────────────────
+        # EventStore persists events to config/scheduled_events.json.
+        # Scheduler fires them at the right time and calls _on_event_fired().
+        # Both are started here so they're available to tools immediately.
+        self.event_store = EventStore(config_dir)
+        self.scheduler   = Scheduler(self.event_store, self._on_event_fired)
+        self.scheduler.start()
+ 
+        # ── voice_remote reference ─────────────────────────────────────────────
+        # Set by main.py after VoiceRemoteInterface is created, e.g.:
+        #   core_processor.voice_remote = vr
+        # Gives _on_event_fired() access to initiate_call() without importing
+        # voice_remote here (which would create a circular dependency).
+        self.voice_remote = None
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Event scheduling API  (called by tools)
+    # ──────────────────────────────────────────────────────────────────────────
+ 
+    def schedule_event(
+        self,
+        event_type:    str,
+        label:         str,
+        delay_seconds: float,
+        endpoint_id:   str,
+        announcement:  str,
+        extra:         dict = None,
+    ) -> str:
+        """
+        Schedule a future event that fires after delay_seconds.
+ 
+        Persists to disk so it survives a server reboot. Returns the event id
+        which can be passed to cancel_event() to cancel it before it fires.
+ 
+        Args:
+            event_type:    Category string, e.g. 'timer', 'reminder', 'alert'.
+                           Used for filtering in list_events().
+            label:         Human-readable name shown in listings, e.g. 'pasta'.
+            delay_seconds: Seconds from now until the event fires.
+            endpoint_id:   Which registered satellite to call when it fires.
+            announcement:  Text passed as context to the LLM when initiating
+                           the voice call, e.g. "The pasta timer is done.
+                           Announce this naturally."
+            extra:         Optional extra fields stored on the event dict,
+                           e.g. {'duration_str': '5m'} for display in listings.
+        """
+        due_at = (
+            datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
+        ).isoformat()
+ 
+        return self.scheduler.schedule(
+            event_type   = event_type,
+            label        = label,
+            due_at_iso   = due_at,
+            endpoint_id  = endpoint_id,
+            announcement = announcement,
+            extra        = extra or {},
+        )
+ 
+    def schedule_call(
+        self,
+        endpoint_id:   str,
+        announcement:  str,
+        delay_seconds: float = 0,
+        label:         str   = "call",
+    ) -> str:
+        """
+        Convenience wrapper: schedule a voice call to an endpoint.
+ 
+        For immediate calls (delay_seconds=0) this still goes through the
+        scheduler so it is non-blocking and consistent with deferred calls.
+        Returns the event id.
+        """
+        return self.schedule_event(
+            event_type    = 'call',
+            label         = label,
+            delay_seconds = delay_seconds,
+            endpoint_id   = endpoint_id,
+            announcement  = announcement,
+        )
+ 
+    def cancel_event(self, event_id: str) -> bool:
+        """Cancel a scheduled event by id. Returns True if it existed."""
+        return self.scheduler.cancel(event_id)
+ 
+    def list_events(self, event_type: str = None) -> list:
+        """
+        Return pending scheduled events, optionally filtered by type.
+        Used by tools to answer "what timers do I have set?"
+        """
+        if event_type:
+            return self.scheduler.list_type(event_type)
+        return self.event_store.all()
+ 
+    def register_event_handler(self, callback_type: str, handler):
+        """
+        Register a handler for a given callback_type.
+
+        handler signature: handler(event: dict) -> None
+        Called from the scheduler thread — must be non-blocking.
+
+        Example:
+            core.register_event_handler('voice_call', my_voice_handler)
+            core.register_event_handler('sms',        my_sms_handler)
+        """
+        if not hasattr(self, '_event_handlers'):
+            self._event_handlers = {}
+        self._event_handlers[callback_type] = handler
+        print(f"[core] registered event handler: {callback_type!r}")
+
+    def _on_event_fired(self, event: dict):
+        """
+        Route a fired event to the correct registered handler by callback_type.
+        Falls back to 'voice_call' for backwards compatibility.
+        """
+        if not hasattr(self, '_event_handlers'):
+            self._event_handlers = {}
+
+        callback_type = event.get('callback_type', 'voice_call')
+        handler       = self._event_handlers.get(callback_type)
+
+        if handler is None:
+            print(f"[core] no handler registered for callback_type={callback_type!r} "
+                  f"— event {event.get('id')} dropped")
+            return
+
+        try:
+            handler(event)
+        except Exception as e:
+            print(f"[core] event handler error ({callback_type}): {e}")
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Logging
+    # ──────────────────────────────────────────────────────────────────────────
 
     def _log(self, label, session=None, extra=None):
         """
