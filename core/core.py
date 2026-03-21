@@ -482,6 +482,10 @@ class CoreProcessor:
         # of tools vs plain text mode (e.g. hangup_call is voice-only).
         prompt_tools = self.tool_loader.get_tools(mode=mode)
 
+        # record that we had images so we can add a message that they existed without 
+        # sending them again in history:
+        had_images = bool(images)
+
         # ── Tool loop ─────────────────────────────────────────────────────────
         # We loop because a tool result must be fed back to the model so it can
         # generate a natural-language response incorporating the tool's output.
@@ -493,7 +497,16 @@ class CoreProcessor:
                 session=session, 
                 images=images,
                 )
-            images = None  # only send images on first turn
+            images = None  # clear after first turn
+
+            # After the LLM has seen the image, annotate the last user message
+            # in history so future turns know an image was part of that turn.
+            if had_images:
+                for msg in reversed(conversation_history):
+                    if msg.get('role') == 'user':
+                        msg['content'] = f"[image was attached] {msg['content']}"
+                        break
+                had_images = False
 
             # Append assistant turn to history (text and/or tool_calls).
             if full_response or chat_tool_calls:
