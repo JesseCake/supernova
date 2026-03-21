@@ -421,7 +421,7 @@ class CoreProcessor:
     # ──────────────────────────────────────────────────────────────────────────
     # Main entry point
     # ──────────────────────────────────────────────────────────────────────────
-    def process_input(self, input_text, session_id, mode: VoiceMode = VoiceMode.PLAIN):
+    def process_input(self, input_text, session_id, mode: VoiceMode = VoiceMode.PLAIN, images: list = None):
         """
         Run the full LLM loop for one user utterance and push output to the
         session's response_queue for TTS consumption.
@@ -465,6 +465,7 @@ class CoreProcessor:
         if conversation_history is None:
             conversation_history = []
 
+
         # Build the system message fresh each turn so personality file edits,
         # speaker identification updates, and the current time are always current.
         system_message = self.create_system_message(mode=mode, session=session)
@@ -490,7 +491,9 @@ class CoreProcessor:
                 prompt_text=prompt, 
                 prompt_tools=prompt_tools, 
                 session=session, 
+                images=images,
                 )
+            images = None  # only send images on first turn
 
             # Append assistant turn to history (text and/or tool_calls).
             if full_response or chat_tool_calls:
@@ -647,7 +650,7 @@ class CoreProcessor:
     # Ollama streaming
     # ──────────────────────────────────────────────────────────────────────────
 
-    def send_to_ollama(self, prompt_text, prompt_tools, session):
+    def send_to_ollama(self, prompt_text, prompt_tools, session, images=None):
         """
         Stream a chat completion from Ollama and forward tokens to response_queue.
  
@@ -678,6 +681,13 @@ class CoreProcessor:
         try:
             response_content = ""
             tool_calls = []
+
+            # attach images to the last user message if provided
+            if images:
+                for msg in reversed(prompt_text):
+                    if msg.get('role') == 'user':
+                        msg['images'] = images
+                        break
 
             # Use the chat endpoint (not raw completion) — it handles tool schemas
             # natively and the structured response is easier to parse.

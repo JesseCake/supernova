@@ -55,12 +55,50 @@ class TelegramInterface:
         for update in data.get("result", []):
             self._offset = update["update_id"] + 1
             msg = update.get("message", {})
+
             if not msg:
                 continue
+            
             chat_id = str(msg["chat"]["id"])
             text    = msg.get("text", "").strip()
+            photo   = msg.get("photo")
+            caption = msg.get("caption", "").strip()
+
             if text:
                 asyncio.create_task(self._handle_message(chat_id, text))
+            elif photo:
+                asyncio.create_task(self._handle_photo(chat_id, photo, caption))
+
+    async def _ensure_session(self, chat_id: str):
+        """Create or reuse session for chat_id, expiring if idle too long."""
+        now = asyncio.get_event_loop().time()
+
+        # Expire if idle too long
+        if chat_id in self._sessions:
+            idle = now - self._last_active.get(chat_id, 0)
+            if idle > self.SESSION_TTL:
+                print(f"[telegram] Session expired for {chat_id} ({idle/60:.1f} min idle)")
+                await self._reset_session(chat_id)
+
+        self._last_active[chat_id] = now
+
+        # Create new session if needed
+        if chat_id not in self._sessions:
+            session_id    = str(uuid.uuid4())
+            friendly_name = next(
+                (ep.friendly_name for ep in self.config.telegram.endpoints.values()
+                 if ep.chat_id == chat_id),
+                None
+            )
+            self.core_processor.create_session(session_id)
+            core_session = self.core_processor.get_session(session_id)
+            if core_session is not None:
+                core_session['endpoint_id'] = chat_id
+                core_session['interface']   = 'telegram'
+                if friendly_name:
+                    core_session['speaker'] = friendly_name
+            self._sessions[chat_id] = session_id
+            print(f"[telegram] New session for {friendly_name or chat_id}: {session_id}")
 
     # ── Message handling ──────────────────────────────────────────────────────
 
@@ -88,42 +126,7 @@ class TelegramInterface:
             )
             return
 
-        # ── Session expiry ────────────────────────────────────────────────────
-        # If the user hasn't sent a message in SESSION_TTL seconds, expire the
-        # session so the next message starts a fresh conversation.
-        now = asyncio.get_event_loop().time()
-        if chat_id in self._sessions:
-            idle = now - self._last_active.get(chat_id, 0)
-            if idle > self.SESSION_TTL:
-                print(f"[telegram] Session expired for {chat_id} "
-                      f"({idle / 60:.1f} min idle) — starting fresh")
-                await self._reset_session(chat_id)
-
-        self._last_active[chat_id] = now
-
-        # ── Session creation ──────────────────────────────────────────────────
-        if chat_id not in self._sessions:
-            session_id = str(uuid.uuid4())
-            self.core_processor.create_session(session_id)
-            core_session = self.core_processor.get_session(session_id)
-            
-            # look up friendly name:
-            friendly_name = next(
-                (ep.friendly_name for ep in self.config.telegram.endpoints.values()
-                 if ep.chat_id == chat_id),
-                 None
-            )
-
-            if core_session is not None:
-                core_session['endpoint_id'] = chat_id
-                core_session['interface']   = 'telegram'
-                # inject speaker name so the system prompt knows who it is
-                if friendly_name:
-                    core_session['speaker'] = friendly_name
-
-            self._sessions[chat_id] = session_id
-            print(f"[telegram] New session for {friendly_name or chat_id}: {session_id}")
-
+        await self._ensure_session(chat_id)
         session_id = self._sessions[chat_id]
 
         # ── Typing indicator ──────────────────────────────────────────────────
@@ -157,6 +160,72 @@ class TelegramInterface:
         full_response = "".join(response).strip()
         if full_response:
             await self.send_message(chat_id, full_response)
+
+    async def _handle_photo(self, chat_id: str, photo: list, caption: str):
+        """Download photo and route through core with image content."""
+        # Whitelist check
+        allowed = {ep.chat_id for ep in self.config.telegram.endpoints.values()}
+        if chat_id not in allowed:
+            print(f"[telegram] Ignoring unknown chat_id: {chat_id!r}")
+            return
+
+        # Get largest size (last in Telegram's array)
+        file_id     = photo[-1]["file_id"]
+        image_bytes = await self._download_photo(file_id)
+        if not image_bytes:
+            await self.send_message(chat_id, "Sorry, I couldn't download that image.")
+            return
+
+        prompt = caption or "What's in this image?"
+        print(f"[telegram] Photo from {chat_id}, prompt: {prompt!r}")
+
+        await self._ensure_session(chat_id)
+        session_id = self._sessions[chat_id]
+
+        await self._send_typing(chat_id)
+        self._last_typing[chat_id] = asyncio.get_event_loop().time()
+
+        thread = threading.Thread(
+            target=self.core_processor.process_input,
+            kwargs={
+                "input_text": prompt,
+                "session_id": session_id,
+                "mode":       VoiceMode.PLAIN,
+                "images":     [image_bytes],
+            },
+            daemon=True,
+        )
+        thread.start()
+
+        core_session = self.core_processor.get_session(session_id)
+        response     = []
+        while True:
+            chunk = await asyncio.to_thread(core_session['response_queue'].get)
+            if chunk is None:
+                break
+            response.append(chunk)
+            await self._maybe_send_typing(chat_id)
+
+        full_response = "".join(response).strip()
+        if full_response:
+            await self.send_message(chat_id, full_response)
+
+    async def _download_photo(self, file_id: str) -> bytes | None:
+        """Download a photo from Telegram, return raw bytes."""
+        try:
+            async with self._http.get(
+                f"{self.base_url}/getFile",
+                params={"file_id": file_id},
+            ) as r:
+                data = await r.json()
+            file_path = data["result"]["file_path"]
+            async with self._http.get(
+                f"https://api.telegram.org/file/bot{self.token}/{file_path}"
+            ) as r:
+                return await r.read()
+        except Exception as e:
+            print(f"[telegram] Photo download error: {e}")
+            return None
 
     # ── Session management ────────────────────────────────────────────────────
 
