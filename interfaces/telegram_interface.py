@@ -131,6 +131,7 @@ class TelegramInterface:
 
         # ── Typing indicator ──────────────────────────────────────────────────
         # Show immediately so the user sees feedback before the first token.
+        now = asyncio.get_event_loop().time()
         await self._send_typing(chat_id)
         self._last_typing[chat_id] = now
 
@@ -176,7 +177,7 @@ class TelegramInterface:
             await self.send_message(chat_id, "Sorry, I couldn't download that image.")
             return
 
-        prompt = caption or "What's in this image?"
+        prompt = caption or ""
         print(f"[telegram] Photo from {chat_id}, prompt: {prompt!r}")
 
         await self._ensure_session(chat_id)
