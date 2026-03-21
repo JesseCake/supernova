@@ -50,7 +50,7 @@ if __name__ == "__main__":
         # Start the remote voice interface (runs in background thread)
         def run_remote_voice_interface():
             asyncio.run(
-                VoiceRemoteInterface(core_processor, transcriber=whisper_model, vad=vad).run(
+                VoiceRemoteInterface(core_processor).run(
                     host=config.server.remote_voice_host, 
                     port=config.server.remote_voice_port,
                 )
