@@ -40,6 +40,7 @@ from typing import Optional
 
 
 EVENTS_FILENAME = "scheduled_events.json"
+EVENTS_SUBDIR   = "cache"
 
 
 class EventStore:
@@ -52,7 +53,9 @@ class EventStore:
     """
 
     def __init__(self, config_dir: str):
-        self._path  = os.path.join(config_dir, EVENTS_FILENAME)
+        cache_dir   = os.path.join(config_dir, '..', EVENTS_SUBDIR)
+        os.makedirs(cache_dir, exist_ok=True)
+        self._path  = os.path.join(cache_dir, EVENTS_FILENAME)
         self._lock  = threading.Lock()
         self._events: dict = {}   # id → event dict
         self._load()

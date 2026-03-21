@@ -22,6 +22,14 @@ asterisk:
   ari_password: "supernovaaccess" # must match password in ari.conf - yes this is a password set in github, but access is restricted in asterisk to localhost connections only so it's low risk
   rtp_local_ip: "127.0.0.1"   # leave as-is (RTP stays local on Jetson)
 
+# this section is so you can debug and take recordings on voice inputs for enrolling voices etc
+debug:                        
+  record_audio: false
+  record_dir: "./debug_audio"
+
 voice:
   model_path: "./libs/voices/glados_piper_medium.onnx"
   use_cuda: false
+
+speaker_id:
+  threshold: 0.5  # threshold to pass for positive speaker ID (only for Asterisk interface as it struggles with bad phone audio)

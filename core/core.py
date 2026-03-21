@@ -208,15 +208,10 @@ class CoreProcessor:
         print(f"[core] registered event handler: {callback_type!r}")
 
     def _on_event_fired(self, event: dict):
-        """
-        Route a fired event to the correct registered handler by callback_type.
-        Falls back to 'voice_call' for backwards compatibility.
-        """
-        if not hasattr(self, '_event_handlers'):
-            self._event_handlers = {}
-
-        callback_type = event.get('callback_type', 'voice_call')
-        handler       = self._event_handlers.get(callback_type)
+        callback_type = event.get('callback_type', 'voice_remote')
+        print(f"[core] event fired: id={event.get('id')} label={event.get('label')!r} "
+              f"callback_type={callback_type!r} handlers={list(self._event_handlers.keys())}")
+        handler = self._event_handlers.get(callback_type)
 
         if handler is None:
             print(f"[core] no handler registered for callback_type={callback_type!r} "
@@ -227,7 +222,6 @@ class CoreProcessor:
             handler(event)
         except Exception as e:
             print(f"[core] event handler error ({callback_type}): {e}")
-
     # ──────────────────────────────────────────────────────────────────────────
     # Logging
     # ──────────────────────────────────────────────────────────────────────────

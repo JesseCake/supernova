@@ -1,0 +1,13 @@
+enabled: true
+
+ari_host: "127.0.0.1"
+ari_port: 8088
+ari_user: "supernova"
+ari_password: "supernovaaccess"
+rtp_local_ip: "127.0.0.1"
+outbound_caller_id: ""
+
+endpoints:
+  office:
+    friendly_name: "Office Phone"
+    number: "100"

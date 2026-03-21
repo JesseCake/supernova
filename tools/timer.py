@@ -35,7 +35,8 @@ def set_timer(
     """
     Set a timer that announces through the speaker when it finishes.
     Provide either hours/minutes/seconds or a target_time — not both.
-    The label is optional, only use if asked in initial request by user.
+    The label is optional, do not ask for label information if not given.
+    Use when requested to 'set a timer' or 'remind me in x to do something'
 
     Args:
         label: A short name for what the timer is for (if requested)
@@ -145,15 +146,15 @@ def _execute_set(tool_args: dict, session: dict, core, tool_config: dict) -> str
             ),
         })
 
-    # ── Resolve endpoint ──────────────────────────────────────────────────────
-    # The session stores the endpoint_id of the satellite the user is speaking
-    # from — set by voice_remote._contact_core() when the session is created.
-    # This means the timer always calls back to whoever set it.
+    # ── Resolve endpoint and interface ───────────────────────────────────────
+    # The session carries both the endpoint_id (who to call back) and the
+    # interface (which handler to use). Both are set by the interface when
+    # the core session is created. New interfaces just set their own values
+    # and register a matching handler in main.py — nothing here needs to change.
     endpoint_id = session.get('endpoint_id', '')
+    interface   = session.get('interface', 'voice_remote')  # fallback to voice_remote for now
 
     if not endpoint_id:
-        # Fall back to a configured default endpoint if the session doesn't
-        # have one (e.g. if the tool is called from a non-voice interface).
         endpoint_id = tool_config.get('default_endpoint', '')
 
     if not endpoint_id:
@@ -183,7 +184,7 @@ def _execute_set(tool_args: dict, session: dict, core, tool_config: dict) -> str
             # Store duration metadata so list_timers can show original and remaining.
             'duration_seconds': duration_seconds,
             'duration_str':     duration_str,
-            'callback_type':    'voice_call',
+            'callback_type':    interface,   # routes to the right handler in main.py
         },
     )
 

@@ -14,15 +14,21 @@ from interfaces.asterisk_interface import AsteriskInterface
 # Both Whisper and VAD are passed into whichever interfaces need them.
 from faster_whisper import WhisperModel
 from whisper_live.vad import VoiceActivityDetector
-whisper_model = WhisperModel(model_size_or_path="base.en")
-vad           = VoiceActivityDetector(threshold=0.5, frame_rate=16000)
-
+from piper import PiperVoice
 
 if __name__ == "__main__":
 
     # ── Config + core ─────────────────────────────────────────────────────────
     config         = load_config()
     core_processor = CoreProcessor(config)
+
+    # Shared inference instances — created once, passed into all interfaces
+    whisper_model = WhisperModel(model_size_or_path="base.en")
+    vad           = VoiceActivityDetector(threshold=0.5, frame_rate=16000)
+    piper_voice   = PiperVoice.load(
+        config.voice.model_path,
+        use_cuda=config.voice.use_cuda,
+    )
 
     # ── Shared async event loop ───────────────────────────────────────────────
     # One loop drives all async interfaces (voice_remote, asterisk, future IM etc.).
@@ -33,27 +39,42 @@ if __name__ == "__main__":
     asyncio.set_event_loop(loop)
 
     # ── Asterisk interface ────────────────────────────────────────────────────
-    if config.interfaces.asterisk:
+    if config.asterisk.enabled:
         asterisk = AsteriskInterface(
             core_processor,
             config,
             transcriber=whisper_model,
             vad=vad,
+            piper_voice = piper_voice,
         )
         loop.create_task(asterisk.run())
 
         # Register handler so scheduled events can initiate Asterisk calls
         def _asterisk_call_handler(event):
-            # TODO: implement when Asterisk scheduling is needed
-            print(f"[main] asterisk_call event fired: {event.get('label')!r} — not yet implemented")
+            announcement  = event.get('announcement', '')
+            caller_number = event.get('endpoint_id', '')
+            if event.get('missed'):
+                announcement = f"[Missed while offline] {announcement}"
+            if not caller_number:
+                print(f"[main] asterisk_call event has no endpoint_id")
+                return
+            asyncio.run_coroutine_threadsafe(
+                asterisk.initiate_call(caller_number, announcement),
+                loop,
+            )
 
-        core_processor.register_event_handler('asterisk_call', _asterisk_call_handler)
+        core_processor.register_event_handler('asterisk', _asterisk_call_handler)
         print(f"[main] asterisk interface starting, connecting to ARI at "
               f"{config.asterisk.ari_host}:{config.asterisk.ari_port}")
 
     # ── Voice remote interface ────────────────────────────────────────────────
     if config.interfaces.voice_remote:
-        vr = VoiceRemoteInterface(core_processor, transcriber=whisper_model, vad=vad)
+        vr = VoiceRemoteInterface(
+            core_processor, 
+            transcriber=whisper_model, 
+            vad=vad,
+            piper_voice=piper_voice,
+            )
 
         # Store loop reference so the scheduler can post initiate_call() onto it
         vr._loop = loop
@@ -75,7 +96,7 @@ if __name__ == "__main__":
                 loop,
             )
 
-        core_processor.register_event_handler('voice_call', _voice_call_handler)
+        core_processor.register_event_handler('voice_remote', _voice_call_handler)
 
         loop.create_task(vr.run(
             host=config.server.remote_voice_host,

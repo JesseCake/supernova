@@ -180,6 +180,7 @@ class VoiceRemoteInterface:
         listening_rate:          int = 16000,
         transcriber              = None,
         vad                      = None,
+        piper_voice              = None,
         whisper_model_size:      str = 'base.en',
         piper_max_concurrent:    int = 1,
         whisper_max_concurrent:  int = 1,
@@ -217,11 +218,15 @@ class VoiceRemoteInterface:
         )
 
         # ── Piper ─────────────────────────────────────────────────────────────
-        print("[voice_remote] Loading Piper TTS model...")
-        self._piper_voice_instance = PiperVoice.load(
-            core_processor.config.voice.model_path,
-            use_cuda=core_processor.config.voice.use_cuda,
-        )
+        if piper_voice is not None:
+            print("[voice_remote] Using shared Piper model.")
+            self._piper_voice_instance = piper_voice
+        else:
+            print("[voice_remote] Loading Piper model...")
+            self._piper_voice_instance = PiperVoice.load(
+                core_processor.config.voice.model_path,
+                use_cuda=core_processor.config.voice.use_cuda,
+            )
         self._piper_max_concurrent = piper_max_concurrent
         self._piper_pool: Optional[_InferencePool] = None   # created in run()
 
@@ -425,11 +430,16 @@ class VoiceRemoteInterface:
             core_session = self.core_processor.get_session(cs.session_id)
             if core_session is not None:
                 core_session['endpoint_id'] = cs.endpoint_id
+                core_session['interface']   = 'voice_remote'
             if core_session is not None and cs._identified_speaker:
                 core_session['speaker'] = cs._identified_speaker
             if not silent_start:
                 # so that we don't say "working" with inbound calls to endpoints:
                 await self._speak_text(cs, "Working")
+                # Satellite moved to SPEAKING during "Working" — send THNK
+                # so it transitions back to THINKING while the LLM generates.
+                cs.writer.write(pack_frame(b'THNK'))
+                await cs.writer.drain()
 
         print(f"[voice_remote:{cs.endpoint_id}] → core: {input_text!r}")
         thread = threading.Thread(
