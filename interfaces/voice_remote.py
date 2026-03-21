@@ -47,6 +47,7 @@ from typing import Optional, Tuple, Dict
 import numpy as np
 import resampy
 import os
+import json
 
 from piper import PiperVoice, SynthesisConfig
 
@@ -117,6 +118,7 @@ class ClientSession:
     # ── Endpoint identity (set on HELO) ───────────────────────────────────────
     # None until the first HELO frame is received. Used as the registry key.
     endpoint_id: Optional[str] = None
+    friendly_name: Optional[str] = None
 
     # ── Core session (resets on CLOS, persists across turns within a session) ─
     session_id: Optional[str] = None
@@ -235,14 +237,17 @@ class VoiceRemoteInterface:
         """Add or replace a connected endpoint in the registry."""
         with self._registry_lock:
             self._endpoints[endpoint_id] = cs
-        print(f"[registry] registered: {endpoint_id!r} ({cs.addr}) — "
+        print(f"[registry] registered: {endpoint_id!r} ('{cs.friendly_name}') ({cs.addr}) — "
               f"{len(self._endpoints)} endpoint(s) online")
 
     def _unregister(self, endpoint_id: str):
         """Remove an endpoint from the registry on disconnect."""
         with self._registry_lock:
             self._endpoints.pop(endpoint_id, None)
-        print(f"[registry] unregistered: {endpoint_id!r} — "
+        cs = self._endpoints.get(endpoint_id)
+        friendly = cs.friendly_name if cs else endpoint_id
+        self._endpoints.pop(endpoint_id, None)
+        print(f"[registry] unregistered: {endpoint_id!r} ('{friendly}') — "
               f"{len(self._endpoints)} endpoint(s) online")
 
     def list_endpoints(self) -> list:
@@ -535,10 +540,18 @@ class VoiceRemoteInterface:
 
                 # ── HELO: endpoint registration ───────────────────────────────
                 if ftype == b'HELO':
-                    endpoint_id     = payload.decode("utf-8", errors="replace").strip()
-                    cs.endpoint_id  = endpoint_id
+                    try:
+                        helo           = json.loads(payload.decode("utf-8", errors="replace"))
+                        endpoint_id    = helo.get("id", "unknown")
+                        friendly_name  = helo.get("name", endpoint_id)
+                    except Exception:
+                        # Fall back to plain string for backwards compatibility
+                        endpoint_id   = payload.decode("utf-8", errors="replace").strip()
+                        friendly_name = endpoint_id
+                    cs.endpoint_id   = endpoint_id
+                    cs.friendly_name = friendly_name
                     self._register(endpoint_id, cs)
-                    cs.rx_paused   = False
+                    cs.rx_paused     = False
 
                 # ── WAKE: start (or restart) a voice session ──────────────────
                 elif ftype in (b'WAKE', b'OPEN'):
