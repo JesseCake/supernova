@@ -110,7 +110,7 @@ if __name__ == "__main__":
     if config.telegram.enabled:
         telegram = TelegramInterface(
             core_processor,
-            token = config.telegram.token,
+            config=config,
         )
         loop.create_task(telegram.run())
 
@@ -129,7 +129,7 @@ if __name__ == "__main__":
             lambda endpoint_id: True
         )
         print(f"[main] telegram interface starting")
-        
+
     # ── Web / Gradio interface ────────────────────────────────────────────────
     if config.interfaces.web:
         def _run_web():
