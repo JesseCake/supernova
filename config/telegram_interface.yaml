@@ -1,0 +1,42 @@
+# ── Telegram Interface Configuration ─────────────────────────────────────────
+#
+# SETUP STEPS:
+#   1. Open Telegram and search for @BotFather
+#   2. Send /newbot and follow the prompts to create your bot
+#   3. BotFather will give you a token — paste it below
+#   4. Search for your new bot in Telegram and send it any message (e.g. "hi")
+#   5. Open this URL in your browser to find your chat_id:
+#      https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates   (don't forget to put "bot" in front of it like example)
+#   6. Look for "chat":{"id": 123456789} — that number is your chat_id
+#   7. Paste it into the endpoint below
+#
+# For additional users (e.g. your partner):
+#   - They message the bot on their Telegram
+#   - You check getUpdates again — their chat_id will appear
+#   - Add a new entry under endpoints with their chat_id
+#
+# SECURITY NOTE:
+#   - Keep your token private — anyone with it can control your bot
+#   - Only chat_ids listed under endpoints will be allowed to use the bot
+#   - Anyone else who messages it will be silently ignored
+# ─────────────────────────────────────────────────────────────────────────────
+
+enabled: true
+
+# Your bot token from BotFather — revoke and replace if ever exposed
+token: "YOURTOKEN"
+
+endpoints:
+
+  # Each person who uses the bot needs their own entry here.
+  # The key (e.g. "jesse") is used internally — keep it lowercase, no spaces.
+  jesse:
+    # Shown in logs and notifications — just a display label
+    friendly_name: "Jesse"
+    # From getUpdates — the number next to "id" inside "chat"
+    chat_id: "YOURCHATID"
+
+  # Example second user — uncomment and fill in after they message the bot:
+  # partner:
+  #   friendly_name: "Partner Name"
+  #   chat_id: ""   # fill in from getUpdates after they send the bot a message

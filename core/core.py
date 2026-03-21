@@ -112,6 +112,9 @@ class CoreProcessor:
         # voice_remote here (which would create a circular dependency).
         self.voice_remote = None
 
+        self._event_handlers  = {}
+        self._presence_checks = {}
+
     # ──────────────────────────────────────────────────────────────────────────
     # Event scheduling API  (called by tools)
     # ──────────────────────────────────────────────────────────────────────────
@@ -222,6 +225,35 @@ class CoreProcessor:
             handler(event)
         except Exception as e:
             print(f"[core] event handler error ({callback_type}): {e}")
+
+    def register_presence_check(self, interface: str, checker):
+        """
+        Register a presence checker for an interface.
+
+        checker signature: checker(endpoint_id: str) -> bool
+        Returns True if the endpoint is currently reachable.
+
+        Example:
+            core.register_presence_check('telegram', lambda endpoint_id: True)
+            core.register_presence_check('voice_remote', lambda eid: vr.get_endpoint(eid) is not None)
+        """
+        if not hasattr(self, '_presence_checks'):
+            self._presence_checks = {}
+        self._presence_checks[interface] = checker
+        print(f"[core] registered presence check: {interface!r}")
+
+    def is_endpoint_reachable(self, interface: str, endpoint_id: str) -> bool:
+        """Check if an endpoint is currently reachable via its interface."""
+        if not hasattr(self, '_presence_checks'):
+            return False
+        checker = self._presence_checks.get(interface)
+        if checker is None:
+            return False
+        try:
+            return bool(checker(endpoint_id))
+        except Exception as e:
+            print(f"[core] presence check error ({interface}): {e}")
+            return False
     # ──────────────────────────────────────────────────────────────────────────
     # Logging
     # ──────────────────────────────────────────────────────────────────────────
@@ -489,7 +521,32 @@ class CoreProcessor:
         self._log("Finished processing input and response", session=session)
         self.response_finished(session)
 
-        # print('\ncore: Finishing processing input and response')
+
+    def run_headless(core, prompt, tools=None):
+        """
+        Run a prompt through the LLM with no user present.
+        Returns the text response. The LLM can call tools like schedule_call or notify_user, whatever a tool needs assessed.
+        """
+        session_id = f"headless_{uuid.uuid4().hex[:8]}"
+        core.create_session(session_id)
+        session = core.get_session(session_id)
+        
+        # Mark as headless so tools know there's no live user
+        session['interface']   = 'headless'
+        session['endpoint_id'] = 'jesse_im'   # where to route any notifications
+        
+        core.process_input(prompt, session_id, mode=VoiceMode.PLAIN)
+        
+        # Drain the response queue
+        result = []
+        while True:
+            chunk = session['response_queue'].get(timeout=30)
+            if chunk is None:
+                break
+            result.append(chunk)
+        
+        core.sessions.pop(session_id, None)
+        return "".join(result)
 
 
     # ──────────────────────────────────────────────────────────────────────────

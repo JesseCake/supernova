@@ -37,6 +37,16 @@ class AsteriskEndpointConfig:
     number:        str = ""
     friendly_name: str = ""
 
+@dataclass
+class TelegramEndpointConfig:
+    chat_id:       str = ""
+    friendly_name: str = ""
+
+@dataclass
+class TelegramConfig:
+    enabled:   bool = False
+    token:     str  = ""
+    endpoints: dict = field(default_factory=dict)
 
 @dataclass
 class AsteriskConfig:
@@ -75,6 +85,7 @@ class AppConfig:
     interfaces: InterfacesConfig
     voice:      VoiceConfig    = field(default_factory=VoiceConfig)
     asterisk:   AsteriskConfig = field(default_factory=AsteriskConfig)
+    telegram:   TelegramConfig = field(default_factory=TelegramConfig)
     debug:      DebugConfig    = field(default_factory=DebugConfig)
     speaker_id: SpeakerConfig  = field(default_factory=SpeakerConfig)
 
@@ -139,6 +150,26 @@ def load_config(path: str = None) -> AppConfig:
         for name, ep in endpoints_raw.items()
     }
 
+    # ── Telegram ──────────────────────────────────────────────────────────────
+    telegram_raw = _load_yaml(os.path.join(config_dir, "telegram_interface.yaml"))
+    if not telegram_raw:
+        telegram_raw = dict(raw.get("telegram") or {})
+
+    telegram_enabled = telegram_raw.pop("enabled", None)
+    if telegram_enabled is None:
+        telegram_enabled = bool((raw.get("interfaces") or {}).get("telegram", False))
+
+    endpoints_raw = telegram_raw.pop("endpoints", {}) or {}
+    telegram = _dataclass_from_dict(TelegramConfig, telegram_raw)
+    telegram.enabled = telegram_enabled
+    telegram.endpoints = {
+        name: TelegramEndpointConfig(**{
+            k: v for k, v in ep.items()
+            if k in TelegramEndpointConfig.__dataclass_fields__
+        })
+        for name, ep in endpoints_raw.items()
+    }
+
     # ── Voice ─────────────────────────────────────────────────────────────────
     voice = _dataclass_from_dict(VoiceConfig, raw.get("voice") or {})
 
@@ -152,6 +183,9 @@ def load_config(path: str = None) -> AppConfig:
     interfaces_raw = dict(raw.get("interfaces") or {})
     # Sync asterisk enabled flag so existing code using config.interfaces.asterisk still works
     interfaces_raw["asterisk"] = asterisk_enabled
+    # telegram
+    interfaces_raw["telegram"] = telegram_enabled
+    
     interfaces = InterfacesConfig(**{
         k: v for k, v in interfaces_raw.items()
         if k in InterfacesConfig.__dataclass_fields__
@@ -163,6 +197,7 @@ def load_config(path: str = None) -> AppConfig:
         interfaces = interfaces,
         voice      = voice,
         asterisk   = asterisk,
+        telegram   = telegram,
         debug      = debug,
         speaker_id = speaker_id,
     )

@@ -9,6 +9,7 @@ from core.settings import load_config
 from interfaces.web_interface import WebInterface
 from interfaces.voice_remote import VoiceRemoteInterface
 from interfaces.asterisk_interface import AsteriskInterface
+from interfaces.telegram_interface import TelegramInterface
 
 # Shared inference instances — created once here so no interface loads its own.
 # Both Whisper and VAD are passed into whichever interfaces need them.
@@ -105,6 +106,30 @@ if __name__ == "__main__":
         print(f"[main] voice_remote starting on "
               f"{config.server.remote_voice_host}:{config.server.remote_voice_port}")
 
+    # ── Telegram IM interface ─────────────────────────────────────────────────
+    if config.telegram.enabled:
+        telegram = TelegramInterface(
+            core_processor,
+            token = config.telegram.token,
+        )
+        loop.create_task(telegram.run())
+
+        def _telegram_handler(event):
+            chat_id      = event.get('endpoint_id', '')
+            announcement = event.get('announcement', '')
+            if not chat_id:
+                return
+            asyncio.run_coroutine_threadsafe(
+                telegram.send_message(chat_id, announcement),
+                loop,
+            )
+
+        core_processor.register_event_handler('telegram', _telegram_handler)
+        core_processor.register_presence_check('telegram',
+            lambda endpoint_id: True
+        )
+        print(f"[main] telegram interface starting")
+        
     # ── Web / Gradio interface ────────────────────────────────────────────────
     if config.interfaces.web:
         def _run_web():
