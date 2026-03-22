@@ -28,7 +28,7 @@ Usage:
     # List all for user queries ("what timers do I have set?")
     all_events = store.all()
 
-File location: config/scheduled_events.json
+File location: data/scheduler/scheduled_events.json
 """
 
 import json
@@ -38,9 +38,11 @@ import threading
 from datetime import datetime, timezone
 from typing import Optional
 
+from core.logger import get_logger
+log = get_logger('event_store')
+
 
 EVENTS_FILENAME = "scheduled_events.json"
-EVENTS_SUBDIR   = "cache"
 
 
 class EventStore:
@@ -53,9 +55,13 @@ class EventStore:
     """
 
     def __init__(self, config_dir: str):
-        cache_dir   = os.path.join(config_dir, '..', EVENTS_SUBDIR)
-        os.makedirs(cache_dir, exist_ok=True)
-        self._path  = os.path.join(cache_dir, EVENTS_FILENAME)
+        # Store in data/scheduler/ alongside other tool data.
+        # config_dir is kept as a parameter for backwards compatibility
+        # but is no longer used for the storage path.
+        project_root    = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        data_dir        = os.path.join(project_root, 'data', 'scheduler')
+        os.makedirs(data_dir, exist_ok=True)
+        self._path  = os.path.join(data_dir, EVENTS_FILENAME)
         self._lock  = threading.Lock()
         self._events: dict = {}   # id → event dict
         self._load()
@@ -80,8 +86,7 @@ class EventStore:
             event['created_at'] = event.get('created_at', _now_iso())
             self._events[event_id] = event
             self._save_locked()
-            print(f"[event_store] added: {event_id} type={event.get('type')} "
-                  f"label={event.get('label')!r} due={event.get('due_at')}")
+            log.info("Event added", extra={'data': f"id={event_id} type={event.get('type')} label={event.get('label')!r} due={event.get('due_at')}"})
             return event_id
 
     def remove(self, event_id: str) -> bool:
@@ -92,7 +97,7 @@ class EventStore:
             label = self._events[event_id].get('label', event_id)
             del self._events[event_id]
             self._save_locked()
-            print(f"[event_store] removed: {event_id} ({label!r})")
+            log.info("Event removed", extra={'data': f"id={event_id} label={label!r}"})
             return True
 
     def all(self) -> list:
@@ -150,9 +155,9 @@ class EventStore:
                 self._events = raw
             else:
                 self._events = {}
-            print(f"[event_store] loaded {len(self._events)} event(s) from {self._path}")
+            log.info("Events loaded", extra={'data': f"{len(self._events)} event(s) from {self._path}"})
         except Exception as e:
-            print(f"[event_store] error loading {self._path}: {e} — starting empty")
+            log.error("Error loading events", extra={'data': f"{self._path}: {e}"})
             self._events = {}
 
     def _save_locked(self):
@@ -167,7 +172,7 @@ class EventStore:
                 json.dump(list(self._events.values()), f, indent=2)
             os.replace(tmp, self._path)
         except Exception as e:
-            print(f"[event_store] error saving {self._path}: {e}")
+            log.error("Error saving events", extra={'data': f"{self._path}: {e}"})
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

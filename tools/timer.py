@@ -17,7 +17,6 @@ The TOOLS list at the bottom of this file registers all three with the
 tool_loader using the multi-tool export convention.
 """
 
-import re
 from datetime import datetime, timedelta
 from core.tool_base import ToolBase
 from core.event_store import seconds_until

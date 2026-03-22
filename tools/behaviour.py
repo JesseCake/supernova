@@ -17,7 +17,7 @@ Context provider:
 Config (config/behaviour.yaml):
     enabled: true
     context_priority: 10   # lower = earlier in system prompt
-    rules_file: null       # defaults to personality/behaviour_overrides.json
+    rules_file: null       # defaults to data/behaviour/behaviour_overrides.json
 """
 
 import os
@@ -51,10 +51,7 @@ def _resolve_path(tool_config: dict) -> str:
     configured = tool_config.get('rules_file')
     if configured:
         return os.path.abspath(configured)
-    # Default: personality/behaviour_overrides.json relative to project root
-    return os.path.abspath(
-        os.path.join(os.path.dirname(__file__), '../personality/behaviour_overrides.json')
-    )
+    return ToolBase.data_path('behaviour', 'behaviour_overrides.json')
 
 
 def _ensure_loaded(tool_config: dict):

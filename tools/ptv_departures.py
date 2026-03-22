@@ -359,14 +359,15 @@ def format_departures(departures: list[dict], stop_name: str, walk_minutes: int 
 
 def _get_cache_file(tool_config: dict) -> str:
     """
-    Return the cache file path from tool_config, falling back to ./cache/ptv_cache.json.
+    Return the cache file path from tool_config, falling back to
+    data/ptv_departures/ptv_cache.json via ToolBase.data_path.
     Also ensures the cache directory exists.
     """
-    cache_file = tool_config.get('cache_file') or os.path.join(
-        os.path.dirname(__file__), '../cache/ptv_cache.json'
-    )
-    os.makedirs(os.path.dirname(os.path.abspath(cache_file)), exist_ok=True)
-    return cache_file
+    configured = tool_config.get('cache_file')
+    if configured:
+        os.makedirs(os.path.dirname(os.path.abspath(configured)), exist_ok=True)
+        return configured
+    return ToolBase.data_path('ptv_departures', 'ptv_cache.json')
 
 
 # ── Executors ─────────────────────────────────────────────────────────────────

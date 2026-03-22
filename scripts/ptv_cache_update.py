@@ -6,13 +6,13 @@ Run manually or via cron (e.g. weekly on Monday at 3am) to refresh the
 static GTFS timetable cache used by the train departure tools.
 
 Usage:
-    python3 scripts/ptv_cache_update.py --update-cache
-    python3 scripts/ptv_cache_update.py --test
-    python3 scripts/ptv_cache_update.py --test-arrival 09:00
-    python3 scripts/ptv_cache_update.py --find-stop "anstey"
+    .venv/bin/python3 scripts/ptv_cache_update.py --update-cache
+    .venv/bin/python3 scripts/ptv_cache_update.py --test
+    .venv/bin/python3 scripts/ptv_cache_update.py --test-arrival 09:00
+    .venv/bin/python3 scripts/ptv_cache_update.py --find-stop "anstey"
 
 Cron example (weekly, Monday 3am):
-    0 3 * * 1  cd /home/user/supernova && python3 scripts/ptv_cache_update.py --update-cache
+    0 3 * * 1  cd /home/user/supernova && /home/user/supernova/.venv/python3 scripts/ptv_cache_update.py --update-cache
 (use crontab -e - change the directory above from /home/user to where you're keeping this)
 
 Config is read from config/ptv_departures.yaml — no need to touch this script
@@ -37,12 +37,10 @@ def load_ptv_config() -> dict:
     with open(yaml_path) as f:
         cfg = yaml.safe_load(f)
 
-    # Resolve cache_file — use yaml value or fall back to ./cache/ptv_cache.json
+    # Resolve cache_file — use yaml value or fall back to data/ptv_departures/ptv_cache.json
     if not cfg.get('cache_file'):
-        cfg['cache_file'] = os.path.join(os.path.dirname(__file__), '../cache/ptv_cache.json')
-
-    # Ensure the cache directory exists
-    os.makedirs(os.path.dirname(os.path.abspath(cfg['cache_file'])), exist_ok=True)
+        from core.tool_base import ToolBase
+        cfg['cache_file'] = ToolBase.data_path('ptv_departures', 'ptv_cache.json')
 
     return cfg
 

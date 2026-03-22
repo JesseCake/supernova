@@ -6,4 +6,4 @@ stop_name: "Anstey Station"
 direction: "citybound"
 gtfs_zip_folder: "2"
 walk_minutes: 7
-cache_file: "./cache/ptv_cache.json"  # cache_file auto-set if omitted
+# cache file is now auto set to live in tools path

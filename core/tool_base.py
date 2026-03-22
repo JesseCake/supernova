@@ -86,6 +86,7 @@ CONTEXT INJECTION — add provide_context to inject into the system prompt:
 ────────────────────────────────────────────────────────────────────────────────
 """
 
+import os
 import logging
 from core.logger import get_logger
 
@@ -196,14 +197,7 @@ class ToolBase:
         The LLM still runs afterward. To suppress the follow-up, include
         'instruction: Acknowledge briefly.' in your result payload.
         """
-        interface = session.get('interface', 'unknown')
-        if interface in ('voice_remote', 'asterisk'):
-            core.send_whole_response(text, session)
-        else:
-            # For text interfaces, use the immediate_send callback if available
-            send_fn = session.get('immediate_send')
-            if send_fn:
-                send_fn(text)
+        core.send_whole_response(text, session)
 
     # ── Scheduling ────────────────────────────────────────────────────────────
 
@@ -333,3 +327,167 @@ class ToolBase:
         # modes by default. Tool authors can filter by checking core state
         # if needed — but most context is relevant everywhere.
         return text.strip() if text else ""
+
+    # ── File storage ──────────────────────────────────────────────────────────
+    # All tool data lives under data/{tool_name}/ at the project root.
+    # Use data_path() as the foundation — JSON/text helpers are convenience
+    # wrappers on top. For anything else (SQLite, CSV, binary) use data_path()
+    # directly with standard Python file I/O.
+
+    @staticmethod
+    def data_path(tool_name: str, filename: str = None) -> str:
+        """
+        Return the path to a tool's data directory, or a file within it.
+        The directory is created automatically if it doesn't exist.
+
+        All tool data lives under data/{tool_name}/ at the project root.
+        Use this as the foundation for any file I/O — never hardcode paths.
+
+        Usage:
+            # Get the directory
+            dir_path = ToolBase.data_path('recipes')
+
+            # Get a specific file path
+            file_path = ToolBase.data_path('recipes', 'goulash.md')
+
+            # Use with standard Python file I/O
+            with open(ToolBase.data_path('my_tool', 'store.db')) as f:
+                ...
+        """
+        import os as _os
+        project_root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+        dir_path     = _os.path.join(project_root, 'data', tool_name)
+        _os.makedirs(dir_path, exist_ok=True)
+        if filename:
+            return _os.path.join(dir_path, filename)
+        return dir_path
+
+    @staticmethod
+    def read_json(tool_name: str, filename: str, default=None):
+        """
+        Read a JSON file from the tool's data directory.
+        Returns default if the file doesn't exist or can't be parsed.
+
+        Usage:
+            state = ToolBase.read_json('my_tool', 'state.json', default={})
+        """
+        import json as _json
+        path = ToolBase.data_path(tool_name, filename)
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                return _json.load(f)
+        except FileNotFoundError:
+            return default
+        except Exception as e:
+            get_logger(f'tools.{tool_name}').error(
+                "Failed to read JSON", extra={'data': f"{filename}: {e}"}
+            )
+            return default
+
+    @staticmethod
+    def write_json(tool_name: str, filename: str, data) -> bool:
+        """
+        Atomically write data as JSON to the tool's data directory.
+        Uses a .tmp rename so partial writes never corrupt the file.
+        Returns True on success, False on failure.
+
+        Usage:
+            ToolBase.write_json('my_tool', 'state.json', my_data)
+        """
+        import json as _json
+        import tempfile
+        import os as _os
+        path = ToolBase.data_path(tool_name, filename)
+        tmp  = None
+        try:
+            fd, tmp = tempfile.mkstemp(
+                dir    = _os.path.dirname(path),
+                prefix = f".{filename}.tmp."
+            )
+            with _os.fdopen(fd, 'w', encoding='utf-8') as f:
+                _json.dump(data, f, indent=2, ensure_ascii=False)
+            _os.replace(tmp, path)
+            return True
+        except Exception as e:
+            get_logger(f'tools.{tool_name}').error(
+                "Failed to write JSON", extra={'data': f"{filename}: {e}"}
+            )
+            try:
+                if tmp and _os.path.exists(tmp):
+                    _os.remove(tmp)
+            except Exception:
+                pass
+            return False
+
+    @staticmethod
+    def read_text(tool_name: str, filename: str, default: str = "") -> str:
+        """
+        Read a text or markdown file from the tool's data directory.
+        Returns default if the file doesn't exist.
+
+        Usage:
+            content = ToolBase.read_text('recipes', 'goulash.md')
+        """
+        path = ToolBase.data_path(tool_name, filename)
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                return f.read()
+        except FileNotFoundError:
+            return default
+        except Exception as e:
+            get_logger(f'tools.{tool_name}').error(
+                "Failed to read file", extra={'data': f"{filename}: {e}"}
+            )
+            return default
+
+    @staticmethod
+    def write_text(tool_name: str, filename: str, content: str) -> bool:
+        """
+        Atomically write text or markdown to the tool's data directory.
+        Returns True on success, False on failure.
+
+        Usage:
+            ToolBase.write_text('recipes', 'goulash.md', markdown_content)
+        """
+        import tempfile
+        import os as _os
+        path = ToolBase.data_path(tool_name, filename)
+        tmp  = None
+        try:
+            fd, tmp = tempfile.mkstemp(
+                dir    = _os.path.dirname(path),
+                prefix = f".{filename}.tmp."
+            )
+            with _os.fdopen(fd, 'w', encoding='utf-8') as f:
+                f.write(content)
+            _os.replace(tmp, path)
+            return True
+        except Exception as e:
+            get_logger(f'tools.{tool_name}').error(
+                "Failed to write file", extra={'data': f"{filename}: {e}"}
+            )
+            try:
+                if tmp and _os.path.exists(tmp):
+                    _os.remove(tmp)
+            except Exception:
+                pass
+            return False
+
+    @staticmethod
+    def list_files(tool_name: str, extension: str = None) -> list:
+        """
+        List filenames in the tool's data directory.
+        Optionally filter by extension (e.g. '.md', '.json').
+
+        Usage:
+            all_files    = ToolBase.list_files('recipes')
+            recipe_files = ToolBase.list_files('recipes', extension='.md')
+        """
+        dir_path = ToolBase.data_path(tool_name)
+        try:
+            files = os.listdir(dir_path)
+            if extension:
+                files = [f for f in files if f.endswith(extension)]
+            return sorted(files)
+        except Exception:
+            return []
