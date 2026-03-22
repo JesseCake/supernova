@@ -196,7 +196,14 @@ class ToolBase:
         The LLM still runs afterward. To suppress the follow-up, include
         'instruction: Acknowledge briefly.' in your result payload.
         """
-        core.send_whole_response(text, session)
+        interface = session.get('interface', 'unknown')
+        if interface in ('voice_remote', 'asterisk'):
+            core.send_whole_response(text, session)
+        else:
+            # For text interfaces, use the immediate_send callback if available
+            send_fn = session.get('immediate_send')
+            if send_fn:
+                send_fn(text)
 
     # ── Scheduling ────────────────────────────────────────────────────────────
 

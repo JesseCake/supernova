@@ -503,7 +503,24 @@ class CoreProcessor:
                 # no tool call
                 break
 
-        # Signal the TTS drain loop in voice_remote that there's nothing more coming.
+        # For text interfaces using immediate_send (IM etc), fire the final response directly
+        # rather than leaving it in the queue to be drained.
+        send_fn = session.get('immediate_send')
+        if send_fn:
+            # Drain whatever is in the queue now and send it immediately
+            final_chunks = []
+            q = session['response_queue']
+            while not q.empty():
+                try:
+                    chunk = q.get_nowait()
+                    if chunk is not None:
+                        final_chunks.append(chunk)
+                except Exception:
+                    break
+            final_text = "".join(final_chunks).strip()
+            if final_text:
+                send_fn(final_text)
+
         log.info("Response finished", **self._elapsed(session))
         self.response_finished(session)
 
@@ -711,6 +728,16 @@ class CoreProcessor:
 
             # ── Tool execution ────────────────────────────────────────────────
             if tool_calls:
+                # Fire any pre-tool LLM text immediately before tools run
+                # so text interfaces see it before tool feedback arrives.
+                # Needed on chunk style message interface like IM where you 
+                # want to see the text before tool responses in order
+                if response_content.strip():
+                    send_fn = session.get('immediate_send')
+                    if send_fn:
+                        send_fn(response_content.strip())
+                        self._flush_queue(session['response_queue'])
+
                 # Now handling multiple tool calls if wanted by agent
                 tool_messages       = []
                 
@@ -759,7 +786,6 @@ class CoreProcessor:
                         }
 
                     tool_messages.append(tool_message)   #  collect each result
-                    last_tool_name = tool_name_detected  #  track last tool name
                 
                 return response_content, tool_messages, tool_calls
 
@@ -845,7 +871,7 @@ class CoreProcessor:
             'tool_name': tool_name,
             'content':   json.dumps({"text": message}),
         }
-        return response_content, tool_message, tool_calls    
+        return response_content, [tool_message], tool_calls    
 
     # ──────────────────────────────────────────────────────────────────────────
     # Queue helpers (called by voice_remote at the end of _contact_core)

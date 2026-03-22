@@ -99,6 +99,13 @@ class TelegramInterface:
             if core_session is not None:
                 core_session['endpoint_id'] = chat_id
                 core_session['interface']   = 'telegram'
+                loop = asyncio.get_event_loop()
+                core_session['immediate_send'] = lambda text, _loop=loop, _chat_id=chat_id: \
+                    asyncio.run_coroutine_threadsafe(
+                        self.send_message(_chat_id, text),
+                        _loop,
+                    )
+                core_session['immediate_send_only'] = True
                 if friendly_name:
                     core_session['speaker'] = friendly_name
             self._sessions[chat_id] = session_id
