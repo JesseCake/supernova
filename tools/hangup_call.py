@@ -2,6 +2,9 @@
 hangup_call tool — signals the voice channel to close.
 Voice-only (set in hangup_call.yaml).
 """
+from core.tool_base import ToolBase
+
+log = ToolBase.logger('hangup_call')
 
 
 # ── Schema function ───────────────────────────────────────────────────────────
@@ -17,7 +20,8 @@ def hangup_call() -> str:
 # ── Executor ──────────────────────────────────────────────────────────────────
 
 def execute(tool_args: dict, session, core, tool_config: dict) -> str:
-    # Signal the voice interface to close the channel
+    log.info("Hanging up", extra={'data': f"endpoint={ToolBase.endpoint(session)!r}"})
+    # Signal the voice interface to close the channel after this response
     session['close_voice_channel'].set()
-    # No return value needed — hangup is handled by the caller checking tool_name
+    # Returning None tells core the tool ran successfully with no result text
     return None

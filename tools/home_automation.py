@@ -2,13 +2,18 @@
 home_automation_action tool — control switches and activate scenes via Home Assistant.
 Config (including API key and URL) lives in config/home_automation.yaml.
 """
-from typing import Annotated, Literal
+from typing import Annotated
 from pydantic import Field
-import json
 
-# Lazy-loaded HA client — created once on first use
+from core.tool_base import ToolBase
+
+log = ToolBase.logger('home_automation')
+
+
+# ── Lazy-loaded HA client ─────────────────────────────────────────────────────
+# Created once on first use and cached for the lifetime of the process.
+
 _ha_client = None
-
 
 def _get_client(tool_config: dict):
     """Return a cached Home Assistant client, creating it on first call."""
@@ -44,39 +49,40 @@ def home_automation_action(
 # ── Executor ──────────────────────────────────────────────────────────────────
 
 def execute(tool_args: dict, session, core, tool_config: dict) -> str:
-    params = tool_args.get('parameters', {})
+    params      = ToolBase.params(tool_args)
     action_type = params.get('action_type')
-    entity_id = params.get('entity_id')
-    state = params.get('state')
+    entity_id   = params.get('entity_id')
+    state       = params.get('state')
+
+    log.info("Home automation action", extra={'data': f"action={action_type!r} entity={entity_id!r} state={state!r}"})
 
     try:
         ha = _get_client(tool_config)
 
         if action_type == "set_switch":
             switch = ha.get_domain("switch")
-            core.send_whole_response(f"{entity_id} {state}.", session)
+            ToolBase.speak(core, session, f"{entity_id} {state}.")
             if state == "on":
                 switch.turn_on(entity_id=f"switch.{entity_id}")
             else:
                 switch.turn_off(entity_id=f"switch.{entity_id}")
-            return core._wrap_tool_result("home_automation_action", {
-                "text": f"Successfully switched {entity_id} {state}"
+            return ToolBase.result(core, 'home_automation_action', {
+                "text": f"Successfully switched {entity_id} {state}",
             })
 
         elif action_type == "activate_scene":
-            core.send_whole_response(f"Activating scene '{entity_id}'.", session)
+            ToolBase.speak(core, session, f"Activating scene '{entity_id}'.")
             scene = ha.get_domain("scene")
             scene.turn_on(entity_id=f"scene.{entity_id}")
-            return core._wrap_tool_result("home_automation_action", {
-                "text": f"Successfully activated scene {entity_id}"
+            return ToolBase.result(core, 'home_automation_action', {
+                "text": f"Successfully activated scene {entity_id}",
             })
 
         else:
-            return core._wrap_tool_result("home_automation_action", {
-                "text": "Error: Invalid action type. Use 'set_switch' or 'activate_scene'."
-            })
+            return ToolBase.error(core, 'home_automation_action',
+                "Invalid action type. Use 'set_switch' or 'activate_scene'.")
 
     except Exception as e:
-        return core._wrap_tool_result("home_automation_action", {
-            "text": f"Error performing {action_type} on {entity_id}: {str(e)}. Check the entity name is correct."
-        })
+        log.error("Home automation action failed", exc_info=True)
+        return ToolBase.error(core, 'home_automation_action',
+            f"Error performing {action_type} on {entity_id}: {e}. Check the entity name is correct.")

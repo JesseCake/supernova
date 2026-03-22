@@ -25,6 +25,9 @@ import json
 import threading
 from typing import Annotated
 from pydantic import Field
+from core.tool_base import ToolBase
+
+log = ToolBase.logger('behaviour')
 
 
 # ── Module-level state singleton ──────────────────────────────────────────────
@@ -90,9 +93,9 @@ def _ensure_loaded(tool_config: dict):
                     out.append(r)
         _state.rules = out[:20]
         _state.mtime = mtime
-        print(f"[behaviour] Reloaded {len(_state.rules)} rule(s) from {path}")
+        log.info("Rules reloaded", extra={'data': f"{len(_state.rules)} rules from {path}"})
     except Exception as e:
-        print(f"[behaviour] Load error: {e}")
+        log.error("Load error", exc_info=True)
 
 
 def _save(tool_config: dict):
@@ -179,7 +182,7 @@ def list_behaviour() -> str:
 def execute_update(tool_args: dict, session, core, tool_config: dict) -> str:
     rule = ((tool_args.get("parameters") or {}).get("rule") or "").strip()
     if not rule:
-        return core._wrap_tool_result("update_behaviour", {"text": "No rule provided"})
+        return ToolBase.error(core, 'update_behaviour', "No rule provided.")
     rule = rule[:200]
 
     with _state.lock:
@@ -188,8 +191,8 @@ def execute_update(tool_args: dict, session, core, tool_config: dict) -> str:
             _state.rules.append(rule)
             _save(tool_config)
 
-    core.send_whole_response("Added behaviour rule.", session)
-    return core._wrap_tool_result("update_behaviour", {"text": "Rule added"})
+    ToolBase.speak(core, session, "Added behaviour rule.")
+    return ToolBase.result(core, 'update_behaviour', {"text": "Rule added"})
 
 
 def execute_remove(tool_args: dict, session, core, tool_config: dict) -> str:
@@ -204,8 +207,8 @@ def execute_remove(tool_args: dict, session, core, tool_config: dict) -> str:
         else:
             msg = "Rule not found"
 
-    core.send_whole_response("Removed behaviour rule.", session)
-    return core._wrap_tool_result("remove_behaviour", {"text": msg})
+    ToolBase.speak(core, session, "Removed behaviour rule.")
+    return ToolBase.result(core, 'remove_behaviour', {"text": msg})
 
 
 def execute_list(tool_args: dict, session, core, tool_config: dict) -> str:
@@ -218,8 +221,8 @@ def execute_list(tool_args: dict, session, core, tool_config: dict) -> str:
     else:
         summary = "Current behaviour rules:\n" + "\n".join(f"- {r}" for r in rules)
 
-    core.send_whole_response("Listing behaviour rules.", session)
-    return core._wrap_tool_result("list_behaviour", {"rules": rules, "summary": summary})
+    ToolBase.speak(core, session, "Listing behaviour rules.")
+    return ToolBase.result(core, 'list_behaviour', {"rules": rules, "summary": summary})
 
 
 # ── Multi-tool export ─────────────────────────────────────────────────────────

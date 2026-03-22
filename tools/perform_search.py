@@ -4,12 +4,13 @@ perform_search tool — web search via SearXNG.
 from typing import Annotated
 from pydantic import Field
 import requests
-import json
+
+from core.tool_base import ToolBase
+
+log = ToolBase.logger('perform_search')
 
 
 # ── Schema function ───────────────────────────────────────────────────────────
-# This is what the ToolLoader passes to Ollama as the tool definition.
-# The name must match the filename (perform_search).
 
 def perform_search(
     query: Annotated[str, Field(description="The search query. Required.")],
@@ -23,25 +24,23 @@ def perform_search(
 
 
 # ── Executor ──────────────────────────────────────────────────────────────────
-# Called by core when the model invokes this tool.
-# Signature must always be: execute(tool_args, session, core, tool_config)
 
 def execute(tool_args: dict, session, core, tool_config: dict) -> str:
-    params = tool_args.get('parameters', {})
-    query = params.get('query', '')
+    params        = ToolBase.params(tool_args)
+    query         = params.get('query', '')
     num_responses = int(params.get('number', 10))
 
-    core.send_whole_response(f"Performing Web Search on '{query}'.\n\r", session)
-    core._log("perform_search start", session=session, extra=f"q={query} n={num_responses}")
+    ToolBase.speak(core, session, f"Searching for '{query}'.")
+    log.info("Search started", extra={'data': f"q={query!r} n={num_responses}"})
 
     try:
         searxng_url = tool_config.get('searxng_url', 'http://localhost:8888')
-        response = requests.get(
+        response    = requests.get(
             searxng_url + "/search",
             params={
-                "q": query,
-                "format": "json",
-                "language": "en-AU",
+                "q":          query,
+                "format":     "json",
+                "language":   "en-AU",
                 "safesearch": 1,
             },
             timeout=10,
@@ -54,22 +53,25 @@ def execute(tool_args: dict, session, core, tool_config: dict) -> str:
             title = r.get("title", "")
             title = title.split("›")[-1].strip() if "›" in title else title
             results.append({
-                "title": title[:100],
+                "title":   title[:100],
                 "snippet": r.get("content", "")[:200],
-                "link": r.get("url"),
+                "link":    r.get("url"),
             })
 
         if not results:
             results.append({"error": "No results found, try rephrasing the query"})
 
-        core._log("perform_search end", session=session, extra=f"found={len(results)}")
+        log.info("Search complete", extra={'data': f"found={len(results)}"})
 
     except requests.exceptions.ConnectionError:
+        log.warning("Search service unavailable")
         results = [{"error": "Search service unavailable"}]
+
     except Exception as e:
+        log.error("Search failed", exc_info=True)
         results = [{"error": f"Search failed: {e}"}]
 
-    return core._wrap_tool_result("perform_search", {
+    return ToolBase.result(core, 'perform_search', {
         "instruction": (
             "Use these results to answer the user's question directly if possible, "
             "or choose the most relevant URL to open with the open_website tool for further research. "

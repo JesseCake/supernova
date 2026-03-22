@@ -21,6 +21,10 @@ from datetime import datetime, date, timedelta, timezone
 from google.transit import gtfs_realtime_pb2
 import zoneinfo
 
+from core.tool_base import ToolBase
+
+log = ToolBase.logger('ptv_departures')
+
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 GTFS_URL = (
@@ -72,7 +76,7 @@ def build_cache(stop_id: str, gtfs_zip_folder: str, cache_file: str):
     Takes ~30s due to the large GTFS download (~213MB).
     Run via scripts/ptv_cache_update.py --update-cache, ideally weekly via cron.
     """
-    print(f"Downloading static GTFS timetable (~213MB)...", flush=True)
+    log.info("Downloading static GTFS timetable (~213MB)")
     outer = zipfile.ZipFile(io.BytesIO(requests.get(GTFS_URL, timeout=180).content))
     inner = zipfile.ZipFile(io.BytesIO(outer.read(f"{gtfs_zip_folder}/google_transit.zip")))
 
@@ -125,8 +129,7 @@ def build_cache(stop_id: str, gtfs_zip_folder: str, cache_file: str):
     }
     with open(cache_file, "w") as f:
         json.dump(cache, f)
-    print(f"Cache saved: {cache_file}")
-    print(f"  {len(stop_times)} departures for stop {stop_id}, {len(trips)} trips")
+    log.info("Cache saved", extra={'data': f"{cache_file} — {len(stop_times)} departures, {len(trips)} trips"})
 
 
 def _parse_gtfs_time(time_str: str, base_date: date) -> float:
@@ -371,34 +374,9 @@ def _get_cache_file(tool_config: dict) -> str:
 # All config is read from tool_config (ptv_departures.yaml).
 
 def execute_next_departures(tool_args: dict, session, core, tool_config: dict) -> str:
-    count = tool_args.get('parameters', {}).get('count', 2)
-    core.send_whole_response("Checking train times. ", session)
-    try:
-        api_key   = tool_config.get('api_key')
-        stop_id   = tool_config.get('stop_id', '14312')
-        stop_name = tool_config.get('stop_name', 'Anstey Station')
-        walk_mins = tool_config.get('walk_minutes', 7)
-        cache_file = _get_cache_file(tool_config)
-
-        deps   = get_departures(api_key, stop_id, stop_name, cache_file, n=count)
-        result = format_departures(deps, stop_name, walk_mins)
-        return core._wrap_tool_result("get_next_train_departures", {"text": result})
-
-    except FileNotFoundError:
-        return core._wrap_tool_result("get_next_train_departures", {
-            "text": "Train timetable cache not found. Run scripts/ptv_cache_update.py --update-cache first."
-        })
-    except Exception as e:
-        return core._wrap_tool_result("get_next_train_departures", {
-            "text": f"Error fetching train times: {e}"
-        })
-
-
-def execute_by_arrival(tool_args: dict, session, core, tool_config: dict) -> str:
-    params     = tool_args.get('parameters', {})
-    target_str = params.get('arrival_time')
-    count      = params.get('count', 3)
-    core.send_whole_response("Checking train arrival times. ", session)
+    count = ToolBase.params(tool_args).get('count', 2)
+    ToolBase.speak(core, session, "Checking train times.")
+    log.info("Fetching next departures", extra={'data': f"count={count}"})
     try:
         api_key    = tool_config.get('api_key')
         stop_id    = tool_config.get('stop_id', '14312')
@@ -406,7 +384,31 @@ def execute_by_arrival(tool_args: dict, session, core, tool_config: dict) -> str
         walk_mins  = tool_config.get('walk_minutes', 7)
         cache_file = _get_cache_file(tool_config)
 
-        # Parse the target arrival time into a timezone-aware datetime for today
+        deps   = get_departures(api_key, stop_id, stop_name, cache_file, n=count)
+        result = format_departures(deps, stop_name, walk_mins)
+        return ToolBase.result(core, 'get_next_train_departures', {"text": result})
+
+    except FileNotFoundError:
+        return ToolBase.error(core, 'get_next_train_departures',
+            "Train timetable cache not found. Run scripts/ptv_cache_update.py --update-cache first.")
+    except Exception as e:
+        log.error("Failed to fetch next departures", exc_info=True)
+        return ToolBase.error(core, 'get_next_train_departures', f"Error fetching train times: {e}")
+
+
+def execute_by_arrival(tool_args: dict, session, core, tool_config: dict) -> str:
+    params     = ToolBase.params(tool_args)
+    target_str = params.get('arrival_time')
+    count      = params.get('count', 3)
+    ToolBase.speak(core, session, "Checking train arrival times.")
+    log.info("Fetching departures by arrival", extra={'data': f"target={target_str} count={count}"})
+    try:
+        api_key    = tool_config.get('api_key')
+        stop_id    = tool_config.get('stop_id', '14312')
+        stop_name  = tool_config.get('stop_name', 'Anstey Station')
+        walk_mins  = tool_config.get('walk_minutes', 7)
+        cache_file = _get_cache_file(tool_config)
+
         target = datetime.now(tz=MELB_TZ).replace(
             hour=int(target_str.split(":")[0]),
             minute=int(target_str.split(":")[1]),
@@ -417,7 +419,7 @@ def execute_by_arrival(tool_args: dict, session, core, tool_config: dict) -> str
         result = format_departures(deps, stop_name, walk_mins)
 
         if not deps:
-            return core._wrap_tool_result("get_train_departures_by_arrival", {
+            return ToolBase.result(core, 'get_train_departures_by_arrival', {
                 "text": (
                     f"No trains from {stop_name} will arrive at Flinders Street by {target_str}. "
                     "Tell the user there are no suitable trains and suggest they check for a later "
@@ -425,7 +427,7 @@ def execute_by_arrival(tool_args: dict, session, core, tool_config: dict) -> str
                 )
             })
 
-        return core._wrap_tool_result("get_train_departures_by_arrival", {
+        return ToolBase.result(core, 'get_train_departures_by_arrival', {
             "text": result,
             "instructions": (
                 "For each train option, tell the user what time it departs, and how many minutes early it will arrive at Flinders Street "
@@ -435,13 +437,11 @@ def execute_by_arrival(tool_args: dict, session, core, tool_config: dict) -> str
         })
 
     except FileNotFoundError:
-        return core._wrap_tool_result("get_train_departures_by_arrival", {
-            "text": "Train timetable cache not found. Tell the user to run scripts/ptv_cache_update.py --update-cache first."
-        })
+        return ToolBase.error(core, 'get_train_departures_by_arrival',
+            "Train timetable cache not found. Tell the user to run scripts/ptv_cache_update.py --update-cache first.")
     except Exception as e:
-        return core._wrap_tool_result("get_train_departures_by_arrival", {
-            "text": f"Error fetching train times: {e}"
-        })
+        log.error("Failed to fetch departures by arrival", exc_info=True)
+        return ToolBase.error(core, 'get_train_departures_by_arrival', f"Error fetching train times: {e}")
 
 
 # ── Multi-tool export ─────────────────────────────────────────────────────────

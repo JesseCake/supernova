@@ -19,6 +19,10 @@ tool_loader using the multi-tool export convention.
 
 import re
 from datetime import datetime, timedelta
+from core.tool_base import ToolBase
+from core.event_store import seconds_until
+
+log = ToolBase.logger('timer')
 
 
 # ── Schema functions (shown to the LLM as tool definitions) ──────────────────
@@ -70,21 +74,9 @@ def list_timers():
 # ── Executors (the actual implementation called when the LLM invokes a tool) ─
 
 def _execute_set(tool_args: dict, session: dict, core, tool_config: dict) -> str:
-    """
-    Resolve the timer arguments, calculate delay_seconds, and schedule the event.
-
-    Accepts either:
-      - hours/minutes/seconds integers  (relative: user says "5 minutes")
-      - target_time string              (absolute: user says "at 3pm")
-
-    If target_time is provided it takes precedence. Both paths resolve to a
-    delay_seconds which is passed to core.schedule_event().
-    """
-    params      = tool_args.get("parameters", {})
+    params      = ToolBase.params(tool_args)
     label       = str(params.get("label", "timer")).strip() or "timer"
     target_time = str(params.get("target_time", "")).strip()
-
-    duration_seconds = 0
 
     hours   = int(params.get("hours",   0))
     minutes = int(params.get("minutes", 0))
@@ -92,23 +84,18 @@ def _execute_set(tool_args: dict, session: dict, core, tool_config: dict) -> str
 
     duration_seconds = hours * 3600 + minutes * 60 + seconds
 
-    # ── Resolve target_time to a delay ───────────────────────────────────────
-    # target_time takes precedence over duration if both are somehow provided.
     if target_time:
         now    = datetime.now()
         parsed = None
-
-        # Try common time/datetime formats in order of specificity.
-        # Full datetime formats first, then time-only formats.
         formats = [
-            "%Y-%m-%d %H:%M",   # 2026-03-21 14:30
-            "%d %B %Y %H:%M",   # 21 March 2026 14:30
-            "%d/%m/%Y %H:%M",   # 21/03/2026 14:30
-            "%H:%M",            # 14:30
-            "%I:%M%p",          # 2:30PM
-            "%I:%M %p",         # 2:30 PM
-            "%I%p",             # 2PM
-            "%I %p",            # 2 PM
+            "%Y-%m-%d %H:%M",
+            "%d %B %Y %H:%M",
+            "%d/%m/%Y %H:%M",
+            "%H:%M",
+            "%I:%M%p",
+            "%I:%M %p",
+            "%I%p",
+            "%I %p",
         ]
         for fmt in formats:
             try:
@@ -118,17 +105,10 @@ def _execute_set(tool_args: dict, session: dict, core, tool_config: dict) -> str
                 continue
 
         if parsed is None:
-            return core._wrap_tool_result("set_timer", {
-                "status":  "error",
-                "message": (
-                    f"Could not understand the time '{target_time}'. "
-                    f"Try formats like '14:30', '2:30pm', or '2026-03-21 14:30'."
-                ),
-            })
+            return ToolBase.error(core, 'set_timer',
+                f"Could not understand the time '{target_time}'. "
+                f"Try formats like '14:30', '2:30pm', or '2026-03-21 14:30'.")
 
-        # If only a time was given (strptime defaults year to 1900),
-        # fill in today's date. If that time has already passed today,
-        # roll forward to tomorrow.
         if parsed.year == 1900:
             parsed = parsed.replace(year=now.year, month=now.month, day=now.day)
             if parsed <= now:
@@ -136,36 +116,17 @@ def _execute_set(tool_args: dict, session: dict, core, tool_config: dict) -> str
 
         duration_seconds = int((parsed - now).total_seconds())
 
-    # ── Validate ──────────────────────────────────────────────────────────────
     if duration_seconds <= 0:
-        return core._wrap_tool_result("set_timer", {
-            "status":  "error",
-            "message": (
-                "Please provide either a duration (e.g. '5 minutes') or a "
-                "future target_time (e.g. '3pm')."
-            ),
-        })
+        return ToolBase.error(core, 'set_timer',
+            "Please provide either a duration (e.g. '5 minutes') or a future target_time (e.g. '3pm').")
 
-    # ── Resolve endpoint and interface ───────────────────────────────────────
-    # The session carries both the endpoint_id (who to call back) and the
-    # interface (which handler to use). Both are set by the interface when
-    # the core session is created. New interfaces just set their own values
-    # and register a matching handler in main.py — nothing here needs to change.
-    endpoint_id = session.get('endpoint_id', '')
-    interface   = session.get('interface', 'voice_remote')  # fallback to voice_remote for now
+    endpoint_id = ToolBase.endpoint(session) or tool_config.get('default_endpoint', '')
+    interface   = ToolBase.interface(session)
 
     if not endpoint_id:
-        endpoint_id = tool_config.get('default_endpoint', '')
+        return ToolBase.error(core, 'set_timer',
+            "No endpoint available to call back to when the timer fires.")
 
-    if not endpoint_id:
-        return core._wrap_tool_result("set_timer", {
-            "status":  "error",
-            "message": "No endpoint available to call back to when the timer fires.",
-        })
-
-    # ── Build announcement ────────────────────────────────────────────────────
-    # This text is injected as LLM context when initiate_call() fires, so the
-    # response is a natural-sounding announcement rather than a flat canned line.
     duration_str = _format_duration(duration_seconds)
     announcement = (
         f"The '{label}' timer has finished. "
@@ -173,63 +134,47 @@ def _execute_set(tool_args: dict, session: dict, core, tool_config: dict) -> str
         f"Announce this to the user in a friendly, natural way."
     )
 
-    # ── Schedule ──────────────────────────────────────────────────────────────
-    event_id = core.schedule_event(
-        event_type    = 'timer',
+    log.info("Scheduling timer", extra={'data': f"label={label!r} duration={duration_str} endpoint={endpoint_id!r} interface={interface!r}"})
+
+    event_id = ToolBase.schedule(
+        core, session, tool_config,
         label         = label,
         delay_seconds = duration_seconds,
-        endpoint_id   = endpoint_id,
         announcement  = announcement,
-        extra         = {
-            # Store duration metadata so list_timers can show original and remaining.
-            'duration_seconds': duration_seconds,
-            'duration_str':     duration_str,
-            'callback_type':    interface,   # routes to the right handler in main.py
-        },
+        event_type    = 'timer',
+        endpoint_id   = endpoint_id,
+        interface     = interface,
     )
 
-    # Immediate spoken feedback — heard before the LLM formulates its response
-    core.send_whole_response(f"Setting {label} timer for {duration_str}.", session)
+    ToolBase.speak(core, session, f"Setting {label} timer for {duration_str}.")
 
-    return core._wrap_tool_result("set_timer", {
-        "status":   "set",
-        "label":    label,
-        "duration": duration_str,
+    return ToolBase.result(core, 'set_timer', {
+        "status":      "set",
+        "label":       label,
+        "duration":    duration_str,
         "instruction": "Timer set successfully. Feedback already given. Acknowledge briefly and hangup.",
     })
 
 
 def _execute_cancel(tool_args: dict, session: dict, core, tool_config: dict) -> str:
-    """
-    Cancel a pending timer by its id.
-    Returns 'cancelled' if found and removed, 'not_found' if the id was unknown
-    (e.g. the timer already fired or the id was wrong).
-    """
-    params   = tool_args.get("parameters", {})
+    params   = ToolBase.params(tool_args)
     timer_id = str(params.get("timer_id", "")).strip()
 
     if not timer_id:
-        return core._wrap_tool_result("cancel_timer", {
-            "status":  "error",
-            "message": "No timer_id provided. Call list_timers to find the id.",
-        })
+        return ToolBase.error(core, 'cancel_timer',
+            "No timer_id provided. Call list_timers to find the id.")
 
-    removed = core.cancel_event(timer_id)
+    removed = ToolBase.cancel_schedule(core, timer_id)
+    log.info("Timer cancelled" if removed else "Timer not found", extra={'data': f"id={timer_id}"})
 
-    return core._wrap_tool_result("cancel_timer", {
+    return ToolBase.result(core, 'cancel_timer', {
         "status":   "cancelled" if removed else "not_found",
         "timer_id": timer_id,
     })
 
 
 def _execute_list(tool_args: dict, session: dict, core, tool_config: dict) -> str:
-    """
-    Return all pending timers with their label, id, original duration, and
-    remaining time. Returns an empty list if no timers are set.
-    """
-    from core.event_store import seconds_until
-
-    timers  = core.list_events(event_type='timer')
+    timers  = ToolBase.list_scheduled(core, event_type='timer')
     results = []
 
     for t in timers:
@@ -241,7 +186,7 @@ def _execute_list(tool_args: dict, session: dict, core, tool_config: dict) -> st
             "set_for":   t.get('duration_str', ''),
         })
 
-    return core._wrap_tool_result("list_timers", {
+    return ToolBase.result(core, 'list_timers', {
         "timers": results,
         "count":  len(results),
     })
