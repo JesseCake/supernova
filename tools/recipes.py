@@ -115,13 +115,15 @@ def search_recipes(
     )] = False,
 ) -> str:
     """
-    Search or list recipes.
+        Search or list recipes.
     - No arguments: list all saved recipes.
     - tag only: list recipes with that tag.
     - ingredients: find recipes that use those ingredients.
     - ingredients + tag: find recipes using those ingredients filtered by tag.
-    Use when the user asks what recipes are saved, wants to browse,
-    or asks 'what can I make with X'.
+    Use when the user asks things like:
+      'what recipes do we have', 'show me all recipes' etc,
+      'what can I make with chicken and lemon',
+      'do we have any pasta recipes', 'what's in the recipe book'.
     """
     ...
 
@@ -131,8 +133,10 @@ def get_recipe(
 ) -> str:
     """
     Retrieve a full recipe by name.
-    Use when the user asks for a specific recipe, wants to cook something,
-    or asks to display a recipe.
+    Use when the user asks things like:
+      'show me the goulash recipe', 'how do I make banana muffins',
+      'pull up the pasta recipe', 'what are the ingredients for X',
+      'I want to cook X tonight'.
     Returns the full recipe text including ingredients and method.
     """
     ...
@@ -165,18 +169,24 @@ def manage_recipe(
 ) -> str:
     """
     Save, edit, or delete a recipe.
-
+ 
     action='save': store a new recipe.
       Provide the full recipe in the body field — write it naturally as
       you would on a recipe card. Ingredients, method steps, notes.
       Returns an error if a recipe with that title already exists.
-
+      Use when the user says things like: 'save this recipe', 'add this to
+      the recipe book', 'store this recipe', 'remember this recipe'.
+ 
     action='edit': update an existing recipe.
       To rewrite the recipe, provide the updated text in body.
       To just add a note, leave body empty and use the notes field.
       Metadata (serves, cook_time, tags) can be updated independently.
-
-    action='delete': remove a recipe permanently. Confirm with user first.
+      Use when the user says things like: 'update the goulash recipe',
+      'change the serves to 6', 'add a note to the muffin recipe'.
+ 
+    action='delete': remove a recipe permanently. IMPORTANT: Confirm with user first.
+      Use when the user says things like: 'delete the goulash recipe',
+      'remove that recipe', 'get rid of the muffin recipe'.
     """
     ...
 
@@ -268,7 +278,7 @@ def _execute_get(tool_args: dict, session, core, tool_config: dict) -> str:
         return ToolBase.error(core, 'get_recipe',
             f"No recipe found matching '{title}'. Try search_recipes to see what's available.")
 
-    ToolBase.speak(core, session, f"Getting {title}.")
+    ToolBase.speak(core, session, f"Getting Recipe {title}.")
 
     content  = ToolBase.read_text('recipes', fname)
     fm, body = _parse(content)
@@ -311,7 +321,7 @@ def _execute_manage(tool_args: dict, session, core, tool_config: dict) -> str:
                 f"A recipe called '{title}' already exists. "
                 f"Use action='edit' to modify it, or choose a different name.")
 
-        ToolBase.speak(core, session, f"Saving {title}.")
+        ToolBase.speak(core, session, f"Saving Recipe {title}.")
 
         fm = {
             'title':     title,
@@ -341,7 +351,7 @@ def _execute_manage(tool_args: dict, session, core, tool_config: dict) -> str:
             return ToolBase.error(core, 'manage_recipe',
                 f"No recipe found matching '{title}'.")
 
-        ToolBase.speak(core, session, f"Updating {title}.")
+        ToolBase.speak(core, session, f"Updating Recipe {title}.")
 
         content  = ToolBase.read_text('recipes', fname)
         fm, body = _parse(content)
@@ -392,7 +402,7 @@ def _execute_manage(tool_args: dict, session, core, tool_config: dict) -> str:
             return ToolBase.error(core, 'manage_recipe',
                 f"No recipe found matching '{title}'.")
 
-        ToolBase.speak(core, session, f"Deleting {title}.")
+        ToolBase.speak(core, session, f"Deleting Recipe {title}.")
 
         path = ToolBase.data_path('recipes', fname)
         try:
