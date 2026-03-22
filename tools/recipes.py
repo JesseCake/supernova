@@ -9,31 +9,27 @@ Format:
     ---
     title: Hungarian Goulash
     serves: 4
-    prep_time: 20 mins
     cook_time: 2 hours
-    oven_temp: null
     tags: [beef, stew, hungarian]
     added: 2026-03-22
     ---
 
-    ## Ingredients
-
+    Ingredients:
     - 800g beef chuck, cubed
+    - 2 onions, diced
     ...
 
-    ## Method
-
+    Method:
     1. Brown the beef...
-    ...
+    2. Soften the onions...
 
-    ## Notes
-
-    Optional notes here.
+    Notes:
+    Best made the day before.
 
 Tools (3 total):
-    recipe_search  — list all recipes, filter by tag, or search by ingredient(s)
-    recipe_get     — retrieve a full recipe by name
-    recipe_manage  — save, edit, or delete a recipe
+    search_recipes — list all recipes, filter by tag, or search by ingredient(s)
+    get_recipe     — retrieve a full recipe by name
+    manage_recipe  — save, edit, or delete a recipe
 """
 
 import re
@@ -97,73 +93,16 @@ def _find_recipe_file(title: str) -> str | None:
     return None
 
 
-def _coerce_list(value, split_char: str = ',') -> list[str]:
-    """
-    Coerce a value to a clean list of strings.
-    Handles: already a list, a comma/newline-delimited string, or None.
-    Filters out single-character items which indicate character iteration.
-    """
-    if isinstance(value, str):
-        # Split on newlines first, then commas
-        items = re.split(r'\n|,', value)
-    elif isinstance(value, list):
-        items = value
-    else:
-        return []
-    cleaned = [str(i).strip() for i in items if str(i).strip()]
-    # Filter single-char items — symptom of LLM passing a string as a list
-    return [i for i in cleaned if len(i) > 1]
-
-
-def _build_recipe_markdown(
-    title:       str,
-    serves:      str,
-    prep_time:   str,
-    cook_time:   str,
-    oven_temp:   str,
-    tags:        list,
-    ingredients: list[str],
-    method:      list[str],
-    notes:       str,
-) -> str:
-    """Build a complete recipe markdown string from structured fields."""
-    fm = {
-        'title':     title,
-        'serves':    serves    or 'unknown',
-        'prep_time': prep_time or 'unknown',
-        'cook_time': cook_time or 'unknown',
-        'oven_temp': oven_temp or None,
-        'tags':      tags      or [],
-        'added':     str(date.today()),
-    }
-
-    body_lines = ['## Ingredients', '']
-    for ing in ingredients:
-        body_lines.append(f"- {ing.strip()}")
-    body_lines.append('')
-    body_lines.append('## Method')
-    body_lines.append('')
-    for i, step in enumerate(method, 1):
-        body_lines.append(f"{i}. {step.strip()}")
-    if notes:
-        body_lines.append('')
-        body_lines.append('## Notes')
-        body_lines.append('')
-        body_lines.append(notes.strip())
-
-    return _render(fm, '\n'.join(body_lines))
-
-
 # ── Schema functions ──────────────────────────────────────────────────────────
 
-def recipe_search(
+def search_recipes(
     ingredients: Annotated[list[str], Field(
         default=[],
         description=(
             "Ingredients to search for, e.g. ['chicken', 'lemon']. "
             "Leave empty to list all recipes. "
-            "Returns recipes containing ANY of the listed ingredients. "
-            "Pass match_all=true to require ALL ingredients."
+            "Returns recipes containing ANY listed ingredient. "
+            "Set match_all=true to require ALL ingredients."
         )
     )] = [],
     tag: Annotated[str, Field(
@@ -187,79 +126,55 @@ def recipe_search(
     ...
 
 
-def recipe_get(
-    title: Annotated[str, Field(description="The recipe name to retrieve. Partial matches accepted. Required.")],
+def get_recipe(
+    title: Annotated[str, Field(description="Recipe name to retrieve. Partial matches accepted. Required.")],
 ) -> str:
     """
     Retrieve a full recipe by name.
     Use when the user asks for a specific recipe, wants to cook something,
-    or asks to display a recipe on screen.
-    Returns ingredients, method, and all recipe details.
+    or asks to display a recipe.
+    Returns the full recipe text including ingredients and method.
     """
     ...
 
 
-def recipe_manage(
+def manage_recipe(
     action: Annotated[str, Field(description=(
-        "What to do. One of: "
-        "'save' (store a new recipe), "
-        "'edit' (modify an existing recipe), "
+        "What to do: 'save' (store a new recipe), "
+        "'edit' (update an existing recipe), "
         "'delete' (remove a recipe). Required."
     ))],
     title: Annotated[str, Field(description="Recipe title. Required for all actions.")],
-    # ── save fields ───────────────────────────────────────────────────────────
-    ingredients: Annotated[list[str], Field(
-        default=[],
-        description=(
-            "Ingredient list as a JSON array of strings. Required for save. "
-            "Each ingredient must be a separate string in the list, "
-            "e.g. ['400g pasta', '2 eggs', '100g pancetta']. "
-            "Never pass as a single concatenated string."
-        )
-    )] = [],
-    method: Annotated[list[str], Field(
-        default=[],
-        description=(
-            "Ordered method steps as a JSON array of strings. Required for save. "
-            "Each step must be a separate string in the list, "
-            "e.g. ['Boil the pasta', 'Fry the pancetta']. "
-            "Never pass as a single concatenated string."
-        )
-    )] = [],
-    serves:    Annotated[str, Field(default="", description="Serving size, e.g. '4'.")] = "",
-    prep_time: Annotated[str, Field(default="", description="Prep time, e.g. '15 mins'.")] = "",
-    cook_time: Annotated[str, Field(default="", description="Cook time, e.g. '1 hour'.")] = "",
-    oven_temp: Annotated[str, Field(default="", description="Oven temperature, e.g. '180°C'.")] = "",
-    tags:      Annotated[list[str], Field(default=[], description="Category tags.")] = [],
-    notes:     Annotated[str, Field(default="", description="Tips or notes.")] = "",
-    # ── edit fields ───────────────────────────────────────────────────────────
-    operation: Annotated[str, Field(
+    body: Annotated[str, Field(
         default="",
         description=(
-            "Edit operation. One of: "
-            "set_field, add_tag, remove_tag, "
-            "add_ingredient, remove_ingredient, "
-            "add_step, replace_step, remove_step, "
-            "append_notes. Required for edit."
+            "The full recipe text. Required for save. "
+            "Write it naturally — list ingredients, then numbered steps, "
+            "then any notes. The text is stored as-is so write it clearly. "
+            "For edit, provide the updated full recipe text, or leave empty "
+            "and use the notes field to just append a note."
         )
     )] = "",
-    field:       Annotated[str, Field(default="", description="Field name for set_field, e.g. 'serves'.")] = "",
-    value:       Annotated[str, Field(default="", description="New value for the edit operation.")] = "",
-    step_number: Annotated[int, Field(default=0,  description="Step number for replace_step/remove_step (1-indexed).")] = 0,
+    serves:    Annotated[str, Field(default="", description="Serving size, e.g. '4' or '4-6'.")] = "",
+    cook_time: Annotated[str, Field(default="", description="Total cook time, e.g. '1 hour 30 mins'.")] = "",
+    tags:      Annotated[list[str], Field(default=[], description="Category tags, e.g. ['pasta', 'quick'].")] = [],
+    notes:     Annotated[str, Field(
+        default="",
+        description="A note to append to the recipe. Used with edit when you only want to add a note rather than rewrite the whole recipe."
+    )] = "",
 ) -> str:
     """
     Save, edit, or delete a recipe.
 
-    action='save': store a new recipe from ingredients and method steps.
-      Use after the user describes or photographs a recipe.
+    action='save': store a new recipe.
+      Provide the full recipe in the body field — write it naturally as
+      you would on a recipe card. Ingredients, method steps, notes.
       Returns an error if a recipe with that title already exists.
 
-    action='edit': make a targeted change to one part of an existing recipe.
-      Set operation to one of: set_field, add_tag, remove_tag,
-      add_ingredient, remove_ingredient, add_step, replace_step,
-      remove_step, append_notes.
-      Use field+value for set_field, value for ingredient/tag/step changes,
-      step_number+value for replace_step and remove_step.
+    action='edit': update an existing recipe.
+      To rewrite the recipe, provide the updated text in body.
+      To just add a note, leave body empty and use the notes field.
+      Metadata (serves, cook_time, tags) can be updated independently.
 
     action='delete': remove a recipe permanently. Confirm with user first.
     """
@@ -289,7 +204,7 @@ def _execute_search(tool_args: dict, session, core, tool_config: dict) -> str:
         if filter_tag and filter_tag not in tags:
             continue
 
-        # Ingredient search
+        # Ingredient search — search the full body text
         if ingredients:
             body_lower = body.lower()
             found = [ing for ing in ingredients if ing in body_lower]
@@ -324,14 +239,14 @@ def _execute_search(tool_args: dict, session, core, tool_config: dict) -> str:
             msg = f"No recipes found with tag '{filter_tag}'."
         else:
             msg = "No recipes saved yet."
-        return ToolBase.result(core, 'recipe_search', {
+        return ToolBase.result(core, 'search_recipes', {
             "count":        0,
             "results":      [],
             "instructions": f"Tell the user: {msg}",
         })
 
     log.info("Recipe search", extra={'data': f"ingredients={ingredients} tag={filter_tag!r} found={len(results)}"})
-    return ToolBase.result(core, 'recipe_search', {
+    return ToolBase.result(core, 'search_recipes', {
         "count":        len(results),
         "results":      results,
         "instructions": (
@@ -346,12 +261,12 @@ def _execute_get(tool_args: dict, session, core, tool_config: dict) -> str:
     title  = str(params.get('title', '')).strip()
 
     if not title:
-        return ToolBase.error(core, 'recipe_get', "No recipe title provided.")
+        return ToolBase.error(core, 'get_recipe', "No recipe title provided.")
 
     fname = _find_recipe_file(title)
     if not fname:
-        return ToolBase.error(core, 'recipe_get',
-            f"No recipe found matching '{title}'. Try recipe_search to see what's available.")
+        return ToolBase.error(core, 'get_recipe',
+            f"No recipe found matching '{title}'. Try search_recipes to see what's available.")
 
     ToolBase.speak(core, session, f"Getting {title}.")
 
@@ -359,17 +274,15 @@ def _execute_get(tool_args: dict, session, core, tool_config: dict) -> str:
     fm, body = _parse(content)
 
     log.info("Recipe retrieved", extra={'data': fname})
-    return ToolBase.result(core, 'recipe_get', {
+    return ToolBase.result(core, 'get_recipe', {
         "title":      fm.get('title', title),
         "serves":     fm.get('serves'),
-        "prep_time":  fm.get('prep_time'),
         "cook_time":  fm.get('cook_time'),
-        "oven_temp":  fm.get('oven_temp'),
         "tags":       fm.get('tags', []),
         "recipe":     body,
         "instructions": (
-            "Present the recipe clearly. For voice, read the ingredients then method steps. "
-            "For text, format it neatly with sections."
+            "Present the recipe clearly. For voice, read the ingredients then "
+            "the method steps. For text, display the recipe body as-is."
         ),
     })
 
@@ -380,51 +293,42 @@ def _execute_manage(tool_args: dict, session, core, tool_config: dict) -> str:
     title  = str(params.get('title', '')).strip()
 
     if not action:
-        return ToolBase.error(core, 'recipe_manage', "No action provided. Use 'save', 'edit', or 'delete'.")
+        return ToolBase.error(core, 'manage_recipe',
+            "No action provided. Use 'save', 'edit', or 'delete'.")
     if not title:
-        return ToolBase.error(core, 'recipe_manage', "No recipe title provided.")
+        return ToolBase.error(core, 'manage_recipe', "No recipe title provided.")
 
     # ── SAVE ──────────────────────────────────────────────────────────────────
     if action == 'save':
-        # Coerce and validate ingredients and method — guards against the LLM
-        # passing a single string instead of a list, which causes character iteration
-        ingredients = _coerce_list(params.get('ingredients', []))
-        method      = _coerce_list(params.get('method', []))
-
-        if not ingredients:
-            return ToolBase.error(core, 'recipe_manage',
-                "Ingredients list was empty or malformed. Please provide as a proper list.")
-        if not method:
-            return ToolBase.error(core, 'recipe_manage',
-                "Method steps were empty or malformed. Please provide as a proper list.")
+        body = str(params.get('body', '')).strip()
+        if not body:
+            return ToolBase.error(core, 'manage_recipe',
+                "No recipe body provided. Write the full recipe text in the body field.")
 
         existing = _find_recipe_file(title)
         if existing:
-            return ToolBase.error(core, 'recipe_manage',
+            return ToolBase.error(core, 'manage_recipe',
                 f"A recipe called '{title}' already exists. "
                 f"Use action='edit' to modify it, or choose a different name.")
 
         ToolBase.speak(core, session, f"Saving {title}.")
 
-        content  = _build_recipe_markdown(
-            title       = title,
-            serves      = str(params.get('serves', '')),
-            prep_time   = str(params.get('prep_time', '')),
-            cook_time   = str(params.get('cook_time', '')),
-            oven_temp   = str(params.get('oven_temp', '')),
-            tags        = params.get('tags', []),
-            ingredients = ingredients,
-            method      = method,
-            notes       = str(params.get('notes', '')),
-        )
+        fm = {
+            'title':     title,
+            'serves':    str(params.get('serves', ''))    or None,
+            'cook_time': str(params.get('cook_time', '')) or None,
+            'tags':      params.get('tags', []),
+            'added':     str(date.today()),
+        }
+        content  = _render(fm, body)
         filename = _filename(title)
         ok       = ToolBase.write_text('recipes', filename, content)
 
         if not ok:
-            return ToolBase.error(core, 'recipe_manage', f"Failed to save '{title}'.")
+            return ToolBase.error(core, 'manage_recipe', f"Failed to save '{title}'.")
 
         log.info("Recipe saved", extra={'data': f"{title} → {filename}"})
-        return ToolBase.result(core, 'recipe_manage', {
+        return ToolBase.result(core, 'manage_recipe', {
             "status":       "saved",
             "title":        title,
             "instructions": f"Tell the user the recipe '{title}' has been saved.",
@@ -432,145 +336,52 @@ def _execute_manage(tool_args: dict, session, core, tool_config: dict) -> str:
 
     # ── EDIT ──────────────────────────────────────────────────────────────────
     elif action == 'edit':
-        operation = str(params.get('operation', '')).strip()
-        field     = str(params.get('field', '')).strip()
-        value     = str(params.get('value', '')).strip()
-        step_num  = int(params.get('step_number', 0))
-
-        if not operation:
-            return ToolBase.error(core, 'recipe_manage', "No operation provided for edit.")
-
         fname = _find_recipe_file(title)
         if not fname:
-            return ToolBase.error(core, 'recipe_manage', f"No recipe found matching '{title}'.")
+            return ToolBase.error(core, 'manage_recipe',
+                f"No recipe found matching '{title}'.")
 
         ToolBase.speak(core, session, f"Updating {title}.")
 
         content  = ToolBase.read_text('recipes', fname)
         fm, body = _parse(content)
 
-        try:
-            if operation == 'set_field':
-                if not field:
-                    return ToolBase.error(core, 'recipe_manage', "No field specified for set_field.")
-                fm[field] = value or None
+        # Update metadata fields if provided
+        if params.get('serves'):
+            fm['serves']    = str(params['serves'])
+        if params.get('cook_time'):
+            fm['cook_time'] = str(params['cook_time'])
+        if params.get('tags'):
+            fm['tags']      = params['tags']
 
-            elif operation == 'add_tag':
-                tags = fm.get('tags') or []
-                if value and value not in tags:
-                    tags.append(value)
-                fm['tags'] = tags
+        # Replace body if provided
+        new_body = str(params.get('body', '')).strip()
+        if new_body:
+            body = new_body
 
-            elif operation == 'remove_tag':
-                fm['tags'] = [t for t in (fm.get('tags') or []) if t != value]
-
-            elif operation == 'add_ingredient':
-                if not value:
-                    return ToolBase.error(core, 'recipe_manage', "No ingredient value provided.")
-                lines  = body.splitlines()
-                in_ing = False
-                insert = None
-                for i, line in enumerate(lines):
-                    if line.strip() == '## Ingredients':
-                        in_ing = True
-                        continue
-                    if in_ing and line.startswith('##'):
-                        insert = i
-                        break
-                if insert is not None:
-                    lines.insert(insert, f"- {value}")
-                else:
-                    lines.append(f"- {value}")
-                body = '\n'.join(lines)
-
-            elif operation == 'remove_ingredient':
-                if not value:
-                    return ToolBase.error(core, 'recipe_manage', "No ingredient value provided.")
-                lines = body.splitlines()
-                body  = '\n'.join(
-                    l for l in lines
-                    if not (l.startswith('-') and value.lower() in l.lower())
-                )
-
-            elif operation == 'add_step':
-                if not value:
-                    return ToolBase.error(core, 'recipe_manage', "No step value provided.")
-                lines  = body.splitlines()
-                in_mth = False
-                insert = None
-                for i, line in enumerate(lines):
-                    if line.strip() == '## Method':
-                        in_mth = True
-                        continue
-                    if in_mth and line.startswith('##'):
-                        insert = i
-                        break
-                step_count = sum(1 for l in lines if re.match(r'^\d+\.', l.strip()))
-                new_step   = f"{step_count + 1}. {value}"
-                if insert is not None:
-                    lines.insert(insert, new_step)
-                else:
-                    lines.append(new_step)
-                body = '\n'.join(lines)
-
-            elif operation == 'replace_step':
-                if not step_num or not value:
-                    return ToolBase.error(core, 'recipe_manage',
-                        "step_number and value are required for replace_step.")
-                lines = body.splitlines()
-                count = 0
-                for i, line in enumerate(lines):
-                    if re.match(r'^\d+\.', line.strip()):
-                        count += 1
-                        if count == step_num:
-                            lines[i] = f"{step_num}. {value}"
-                            break
-                body = '\n'.join(lines)
-
-            elif operation == 'remove_step':
-                if not step_num:
-                    return ToolBase.error(core, 'recipe_manage',
-                        "step_number is required for remove_step.")
-                lines     = body.splitlines()
-                count     = 0
-                renumber  = 0
-                new_lines = []
-                for line in lines:
-                    if re.match(r'^\d+\.', line.strip()):
-                        count += 1
-                        if count == step_num:
-                            continue
-                        renumber += 1
-                        line = re.sub(r'^\d+\.', f"{renumber}.", line)
-                    new_lines.append(line)
-                body = '\n'.join(new_lines)
-
-            elif operation == 'append_notes':
-                if not value:
-                    return ToolBase.error(core, 'recipe_manage', "No notes value provided.")
-                if '## Notes' in body:
-                    body = body.rstrip() + f"\n{value}"
-                else:
-                    body = body.rstrip() + f"\n\n## Notes\n\n{value}"
-
+        # Append note if provided
+        note = str(params.get('notes', '')).strip()
+        if note:
+            if 'Notes' in body or 'notes' in body:
+                body = body.rstrip() + f"\n- {note}"
             else:
-                return ToolBase.error(core, 'recipe_manage',
-                    f"Unknown operation '{operation}'. Valid: set_field, add_tag, remove_tag, "
-                    "add_ingredient, remove_ingredient, add_step, replace_step, remove_step, append_notes.")
+                body = body.rstrip() + f"\n\nNotes:\n- {note}"
 
-        except Exception as e:
-            log.error("Edit operation failed", exc_info=True)
-            return ToolBase.error(core, 'recipe_manage', f"Edit failed: {e}")
+        if not new_body and not note and not any([
+            params.get('serves'), params.get('cook_time'), params.get('tags')
+        ]):
+            return ToolBase.error(core, 'manage_recipe',
+                "Nothing to update. Provide a new body, a note to append, or updated metadata.")
 
         ok = ToolBase.write_text('recipes', fname, _render(fm, body))
         if not ok:
-            return ToolBase.error(core, 'recipe_manage', f"Failed to save changes to '{title}'.")
+            return ToolBase.error(core, 'manage_recipe',
+                f"Failed to save changes to '{title}'.")
 
-        log.info("Recipe edited", extra={'data': f"{title} operation={operation}"})
-        return ToolBase.result(core, 'recipe_manage', {
+        log.info("Recipe edited", extra={'data': title})
+        return ToolBase.result(core, 'manage_recipe', {
             "status":       "updated",
             "title":        fm.get('title', title),
-            "operation":    operation,
             "instructions": f"Tell the user the recipe '{fm.get('title', title)}' has been updated.",
         })
 
@@ -578,7 +389,8 @@ def _execute_manage(tool_args: dict, session, core, tool_config: dict) -> str:
     elif action == 'delete':
         fname = _find_recipe_file(title)
         if not fname:
-            return ToolBase.error(core, 'recipe_manage', f"No recipe found matching '{title}'.")
+            return ToolBase.error(core, 'manage_recipe',
+                f"No recipe found matching '{title}'.")
 
         ToolBase.speak(core, session, f"Deleting {title}.")
 
@@ -586,24 +398,25 @@ def _execute_manage(tool_args: dict, session, core, tool_config: dict) -> str:
         try:
             os.remove(path)
             log.info("Recipe deleted", extra={'data': fname})
-            return ToolBase.result(core, 'recipe_manage', {
+            return ToolBase.result(core, 'manage_recipe', {
                 "status":       "deleted",
                 "title":        title,
                 "instructions": f"Tell the user the recipe '{title}' has been deleted.",
             })
         except Exception as e:
             log.error("Failed to delete recipe", exc_info=True)
-            return ToolBase.error(core, 'recipe_manage', f"Failed to delete '{title}': {e}")
+            return ToolBase.error(core, 'manage_recipe',
+                f"Failed to delete '{title}': {e}")
 
     else:
-        return ToolBase.error(core, 'recipe_manage',
+        return ToolBase.error(core, 'manage_recipe',
             f"Unknown action '{action}'. Use 'save', 'edit', or 'delete'.")
 
 
 # ── Tool registration ─────────────────────────────────────────────────────────
 
 TOOLS = [
-    {'name': 'recipe_search', 'schema': recipe_search, 'execute': _execute_search},
-    {'name': 'recipe_get',    'schema': recipe_get,    'execute': _execute_get},
-    {'name': 'recipe_manage', 'schema': recipe_manage, 'execute': _execute_manage},
+    {'name': 'search_recipes', 'schema': search_recipes, 'execute': _execute_search},
+    {'name': 'get_recipe',     'schema': get_recipe,     'execute': _execute_get},
+    {'name': 'manage_recipe',  'schema': manage_recipe,  'execute': _execute_manage},
 ]
