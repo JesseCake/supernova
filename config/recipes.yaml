@@ -1,0 +1,7 @@
+# Recipe store configuration
+# Recipes are stored as Markdown files in data/recipes/
+# No API keys or external services needed.
+
+enabled: true
+voice_only: false   # available on all interfaces
+context_priority: 60
