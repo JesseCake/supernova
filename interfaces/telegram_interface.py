@@ -4,6 +4,9 @@ import uuid
 import threading
 from core.precontext import VoiceMode
 
+from core.logger import get_logger
+log = get_logger('telegram')
+
 
 class TelegramInterface:
     """
@@ -34,14 +37,14 @@ class TelegramInterface:
     # ── Main loop ─────────────────────────────────────────────────────────────
 
     async def run(self):
-        print("[telegram] Bot started, polling for messages...")
+        log.info("Bot started, polling for messages")
         async with aiohttp.ClientSession() as session:
             self._http = session
             while True:
                 try:
                     await self._poll()
                 except Exception as e:
-                    print(f"[telegram] Poll error: {e}")
+                    log.error("Poll error", exc_info=True)
                     await asyncio.sleep(5)
 
     async def _poll(self):
@@ -78,7 +81,7 @@ class TelegramInterface:
         if chat_id in self._sessions:
             idle = now - self._last_active.get(chat_id, 0)
             if idle > self.SESSION_TTL:
-                print(f"[telegram] Session expired for {chat_id} ({idle/60:.1f} min idle)")
+                log.info("Session expired", extra={'data': f"chat_id={chat_id} idle={idle/60:.1f}min"})
                 await self._reset_session(chat_id)
 
         self._last_active[chat_id] = now
@@ -99,7 +102,7 @@ class TelegramInterface:
                 if friendly_name:
                     core_session['speaker'] = friendly_name
             self._sessions[chat_id] = session_id
-            print(f"[telegram] New session for {friendly_name or chat_id}: {session_id}")
+            log.info("New session", extra={'data': f"{friendly_name or chat_id} session={session_id}"})
 
     # ── Message handling ──────────────────────────────────────────────────────
 
@@ -111,7 +114,7 @@ class TelegramInterface:
         # Anyone else is silently ignored.
         allowed = {ep.chat_id for ep in self.config.telegram.endpoints.values()}
         if chat_id not in allowed:
-            print(f"[telegram] Ignoring unknown chat_id: {chat_id!r}")
+            log.warning("Ignoring unknown chat_id", extra={'data': f"{chat_id!r}"})
             return
         
         async with self._get_lock(chat_id):
@@ -170,7 +173,7 @@ class TelegramInterface:
         # Whitelist check
         allowed = {ep.chat_id for ep in self.config.telegram.endpoints.values()}
         if chat_id not in allowed:
-            print(f"[telegram] Ignoring unknown chat_id: {chat_id!r}")
+            log.warning("Ignoring unknown chat_id", extra={'data': f"{chat_id!r}"})
             return
         
         async with self._get_lock(chat_id):
@@ -183,7 +186,7 @@ class TelegramInterface:
                 return
 
             prompt = caption or ""
-            print(f"[telegram] Photo from {chat_id}, prompt: {prompt!r}")
+            log.info("Photo received", extra={'data': f"chat_id={chat_id} prompt={prompt!r}"})
 
             await self._ensure_session(chat_id)
             session_id = self._sessions[chat_id]
@@ -230,7 +233,7 @@ class TelegramInterface:
             ) as r:
                 return await r.read()
         except Exception as e:
-            print(f"[telegram] Photo download error: {e}")
+            log.error("Photo download error", exc_info=True)
             return None
 
     # ── Session management ────────────────────────────────────────────────────
@@ -286,6 +289,6 @@ class TelegramInterface:
                 json={"chat_id": chat_id, "text": text},
             ) as r:
                 if r.status != 200:
-                    print(f"[telegram] Send error: {await r.text()}")
+                    log.error("Send error", extra={'data': await r.text()})
         except Exception as e:
-            print(f"[telegram] Send error: {e}")
+            log.error("Send error", exc_info=True)

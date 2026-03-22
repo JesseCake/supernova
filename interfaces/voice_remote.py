@@ -57,6 +57,10 @@ from core.speaker_id import SpeakerIdentifier, load_profiles
 from whisper_live.vad import VoiceActivityDetector
 from faster_whisper import WhisperModel
 
+# Logging:
+from core.logger import get_logger
+log = get_logger('voice_remote')
+
 
 # ── Frame protocol ────────────────────────────────────────────────────────────
 
@@ -219,10 +223,10 @@ class VoiceRemoteInterface:
 
         # ── Piper ─────────────────────────────────────────────────────────────
         if piper_voice is not None:
-            print("[voice_remote] Using shared Piper model.")
+            log.info("Using shared Piper model")
             self._piper_voice_instance = piper_voice
         else:
-            print("[voice_remote] Loading Piper model...")
+            log.info("Loading Piper model")
             self._piper_voice_instance = PiperVoice.load(
                 core_processor.config.voice.model_path,
                 use_cuda=core_processor.config.voice.use_cuda,
@@ -232,10 +236,10 @@ class VoiceRemoteInterface:
 
         # ── Whisper ───────────────────────────────────────────────────────────
         if transcriber is not None:
-            print("[voice_remote] Using shared Whisper model.")
+            log.info("Using shared Whisper model")
             self._whisper_instance = transcriber
         else:
-            print("[voice_remote] Loading Whisper model...")
+            log.info("Loading Whisper model")
             self._whisper_instance = WhisperModel(model_size_or_path=whisper_model_size)
         self._whisper_max_concurrent = whisper_max_concurrent
         self._whisper_pool: Optional[_InferencePool] = None   # created in run()
@@ -246,7 +250,7 @@ class VoiceRemoteInterface:
         from core.speaker_id import _get_encoder
         _get_encoder()
 
-        print("[voice_remote] Ready.")
+        log.info("Ready")
 
     # ── Registry API ─────────────────────────────────────────────────────────
 
@@ -254,16 +258,14 @@ class VoiceRemoteInterface:
         """Add or replace a connected endpoint in the registry."""
         with self._registry_lock:
             self._endpoints[endpoint_id] = cs
-        print(f"[registry] registered: {endpoint_id!r} ('{cs.friendly_name}') ({cs.addr}) — "
-              f"{len(self._endpoints)} endpoint(s) online")
+        log.info("Endpoint registered", extra={'data': f"{endpoint_id!r} '{cs.friendly_name}' {cs.addr} total={len(self._endpoints)}"})
 
     def _unregister(self, endpoint_id: str):
         """Remove an endpoint from the registry on disconnect."""
         with self._registry_lock:
             cs = self._endpoints.pop(endpoint_id, None)
         friendly = cs.friendly_name if cs else endpoint_id
-        print(f"[registry] unregistered: {endpoint_id!r} ('{friendly}') — "
-              f"{len(self._endpoints)} endpoint(s) online")
+        log.info("Endpoint unregistered", extra={'data': f"{endpoint_id!r} '{friendly}' total={len(self._endpoints)}"})
 
     def list_endpoints(self) -> list:
         """Return a list of currently connected endpoint IDs."""
@@ -303,21 +305,21 @@ class VoiceRemoteInterface:
         """
         cs = self.get_endpoint(endpoint_id)
         if cs is None:
-            print(f"[registry] initiate_call: {endpoint_id!r} not connected")
+            log.warning("initiate_call: endpoint not connected", extra={'data': f"{endpoint_id!r}"})
             return False
 
         if cs.rx_paused:
-            print(f"[registry] initiate_call: {endpoint_id!r} is busy (rx_paused)")
+            log.warning("initiate_call: endpoint busy", extra={'data': f"{endpoint_id!r}"})
             return False
 
         try:
             payload = announcement.encode("utf-8") if announcement else b""
             cs.writer.write(pack_frame(b'CALL', payload))
             await cs.writer.drain()
-            print(f"[registry] CALL sent to {endpoint_id!r}")
+            log.info("CALL sent", extra={'data': f"{endpoint_id!r}"})
             return True
         except Exception as e:
-            print(f"[registry] initiate_call error for {endpoint_id!r}: {e}")
+            log.error("initiate_call error", extra={'data': f"{endpoint_id!r}"}, exc_info=True)
             return False
 
     # ── Low-level send helpers ────────────────────────────────────────────────
@@ -332,7 +334,7 @@ class VoiceRemoteInterface:
             try:
                 cs.writer.write(pack_frame(tag, mv[i:i + step].tobytes()))
             except Exception as e:
-                print(f"[voice_remote:{cs.addr}] pcm write error: {e}")
+                log.error("PCM write error", extra={'data': str(cs.addr)}, exc_info=True)
                 break
             await cs.writer.drain()
             await asyncio.sleep(0)
@@ -363,7 +365,7 @@ class VoiceRemoteInterface:
                 try:
                     piper_chunks = await asyncio.to_thread(synth_all_chunks)
                 except Exception as e:
-                    print(f"[voice_remote:{cs.addr}] Piper error: {e}")
+                    log.error("Piper TTS error", extra={'data': str(cs.addr)}, exc_info=True)
                     return
 
             for sr, audio_f32 in piper_chunks:
@@ -441,7 +443,7 @@ class VoiceRemoteInterface:
                 cs.writer.write(pack_frame(b'THNK'))
                 await cs.writer.drain()
 
-        print(f"[voice_remote:{cs.endpoint_id}] → core: {input_text!r}")
+        log.info("Sending to core", extra={'data': f"{cs.endpoint_id} {input_text!r}"})
         thread = threading.Thread(
             target=self.core_processor.process_input,
             kwargs={"input_text": input_text, "session_id": cs.session_id, "mode": VoiceMode.SPEAKER},
@@ -521,7 +523,7 @@ class VoiceRemoteInterface:
                     return whisper.transcribe(audio_for_thread)
                 segments, _ = await asyncio.to_thread(do_transcribe)
         except Exception as e:
-            print(f"[voice_remote:{cs.addr}] ASR error: {e}")
+            log.error("ASR error", extra={'data': str(cs.addr)}, exc_info=True)
             cs.rx_paused = False
             return
 
@@ -530,7 +532,7 @@ class VoiceRemoteInterface:
             return
 
         text = " ".join(seg.text for seg in segments)
-        print(f"[voice_remote:{cs.endpoint_id}] transcription: {text!r}")
+        log.info("Transcription", extra={'data': f"{cs.endpoint_id} {text!r}"})
 
         if self.close_channel_phrase in text.lower():
             await self._close_channel(cs)
@@ -547,7 +549,7 @@ class VoiceRemoteInterface:
 
         cs._identified_speaker = cs._speaker_id.result(timeout=1.0)
         if cs._identified_speaker:
-            print(f"[voice_remote:{cs.endpoint_id}] speaker: {cs._identified_speaker}")
+            log.info("Speaker identified", extra={'data': f"{cs.endpoint_id} {cs._identified_speaker}"})
 
         await self._contact_core(cs, text)
 
@@ -564,7 +566,7 @@ class VoiceRemoteInterface:
           - Unregisters on disconnect.
         """
         addr = writer.get_extra_info('peername')
-        print(f"[voice_remote] satellite connected: {addr}")
+        log.info("Satellite connected", extra={'data': str(addr)})
 
         cs             = ClientSession(reader=reader, writer=writer, addr=addr)
         cs.vad_detector = VoiceActivityDetector(threshold=self._vad_threshold, frame_rate=self._vad_frame_rate)
@@ -602,7 +604,7 @@ class VoiceRemoteInterface:
                 # ── AUD0: microphone audio ────────────────────────────────────
                 elif ftype == b'AUD0':
                     if cs.rx_paused:
-                        print(f"[aud0] dropping frame — rx_paused")
+                        log.debug("AUD0 dropping frame — rx_paused", extra={'data': str(cs.endpoint_id)})
                         continue
 
                     audio_frame = (np.frombuffer(payload, dtype=np.int16)
@@ -641,7 +643,7 @@ class VoiceRemoteInterface:
 
                 # ── INT0: barge-in ────────────────────────────────────────────
                 elif ftype == b'INT0':
-                    print(f"[voice_remote:{cs.endpoint_id}] barge-in")
+                    log.info("Barge-in", extra={'data': str(cs.endpoint_id)})
                     cs._last_int0_ts = time.monotonic()
                     cs.interrupt_event.set()
                     if cs._speak_task and not cs._speak_task.done():
@@ -650,7 +652,7 @@ class VoiceRemoteInterface:
                         try:
                             self.core_processor.cancel_active_response(cs.session_id)
                         except Exception as e:
-                            print(f"[voice_remote:{cs.endpoint_id}] cancel error: {e}")
+                            log.error("Cancel error", extra={'data': str(cs.endpoint_id)}, exc_info=True)
                     cs.reset_audio()
 
                 # ── STOP: explicit end-of-utterance ───────────────────────────
@@ -666,7 +668,7 @@ class VoiceRemoteInterface:
             pass   # normal disconnect
 
         finally:
-            print(f"[voice_remote] satellite disconnected: {addr} (id={cs.endpoint_id!r})")
+            log.info("Satellite disconnected", extra={'data': f"{addr} id={cs.endpoint_id!r}"})
             if cs.endpoint_id:
                 self._unregister(cs.endpoint_id)
             try:
@@ -684,7 +686,7 @@ class VoiceRemoteInterface:
 
         server = await asyncio.start_server(self._handle_client, host, port)
         addr   = ', '.join(str(sock.getsockname()) for sock in server.sockets)
-        print(f"[voice_remote] Listening on {addr} (persistent connections, endpoint registry)")
+        log.info("Listening", extra={'data': f"{addr}"})
         async with server:
             await server.serve_forever()
 

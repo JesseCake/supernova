@@ -27,6 +27,7 @@ except Exception:
 import queue
 from datetime import datetime, timezone, timedelta
 import os
+import uuid
 
 # AppConfig: dataclass / pydantic model parsed from config.yaml — holds ollama host/model,
 # voice model path, debug flags, etc.
@@ -50,6 +51,10 @@ from core.speaker_id import load_profiles
 # Event scheduling: For managing and spinning off event scheduling as needed/called
 from core.event_store import EventStore
 from core.scheduler import Scheduler
+
+# Logging
+from core.logger import get_logger
+log = get_logger('core')
 
 
 class CoreProcessor:
@@ -205,26 +210,23 @@ class CoreProcessor:
             core.register_event_handler('voice_call', my_voice_handler)
             core.register_event_handler('sms',        my_sms_handler)
         """
-        if not hasattr(self, '_event_handlers'):
-            self._event_handlers = {}
         self._event_handlers[callback_type] = handler
-        print(f"[core] registered event handler: {callback_type!r}")
+        log.info("Event handler registered", extra={'data': f"type={callback_type!r}"})
+
 
     def _on_event_fired(self, event: dict):
         callback_type = event.get('callback_type', 'voice_remote')
-        print(f"[core] event fired: id={event.get('id')} label={event.get('label')!r} "
-              f"callback_type={callback_type!r} handlers={list(self._event_handlers.keys())}")
+        log.info("Event fired", extra={'data': f"id={event.get('id')} label={event.get('label')!r} callback_type={callback_type!r}"})
         handler = self._event_handlers.get(callback_type)
 
         if handler is None:
-            print(f"[core] no handler registered for callback_type={callback_type!r} "
-                  f"— event {event.get('id')} dropped")
+            log.warning("No handler for event", extra={'data': f"callback_type={callback_type!r} id={event.get('id')}"})
             return
 
         try:
             handler(event)
         except Exception as e:
-            print(f"[core] event handler error ({callback_type}): {e}")
+            log.error("Event handler error", extra={'data': f"{callback_type}: {e}"})
 
     def register_presence_check(self, interface: str, checker):
         """
@@ -237,10 +239,8 @@ class CoreProcessor:
             core.register_presence_check('telegram', lambda endpoint_id: True)
             core.register_presence_check('voice_remote', lambda eid: vr.get_endpoint(eid) is not None)
         """
-        if not hasattr(self, '_presence_checks'):
-            self._presence_checks = {}
         self._presence_checks[interface] = checker
-        print(f"[core] registered presence check: {interface!r}")
+        log.info("Presence check registered", extra={'data': f"interface={interface!r}"})
 
     def is_endpoint_reachable(self, interface: str, endpoint_id: str) -> bool:
         """Check if an endpoint is currently reachable via its interface."""
@@ -252,44 +252,21 @@ class CoreProcessor:
         try:
             return bool(checker(endpoint_id))
         except Exception as e:
-            print(f"[core] presence check error ({interface}): {e}")
+            log.warning("Presence check error", extra={'data': f"{interface}: {e}"})
             return False
     # ──────────────────────────────────────────────────────────────────────────
     # Logging
     # ──────────────────────────────────────────────────────────────────────────
 
-    def _log(self, label, session=None, extra=None):
-        """
-        Lightweight structured logger that stamps wall-clock time and, when a
-        session is active, the elapsed seconds since process_input() was called.
- 
-        Keeping timing visible here is important for diagnosing latency — you can
-        immediately see where in the pipeline time is being lost (e.g. slow first
-        token, slow tool execution, etc.).
-        """
-        now = datetime.now().isoformat()
-        perf = time.perf_counter()
-        elapsed = None
-        sid = None
-        try:
-            if session is not None:
-                # Reverse-lookup the session_id from the session object so we
-                # don't have to pass it everywhere.
-                sid = next((k for k, v in self.sessions.items() if v is session), None)
-                start = session.get('_ts_start')
-                if start:
-                    elapsed = perf - start
-        except Exception:
-            sid = None
-
-        msg = f"[TIMESTAMP] {now} | {label}"
-        if sid is not None:
-            msg += f" | session={sid}"
-        if elapsed is not None:
-            msg += f" | elapsed={elapsed:.4f}s"
-        if extra is not None:
-            msg += f" | {extra}"
-        print(msg)
+    def _elapsed(self, session: dict, extra: str = None) -> dict:
+        """Build logging kwargs with elapsed time since session start."""
+        start = session.get('_ts_start') if session else None
+        parts = []
+        if start:
+            parts.append(f"elapsed={time.perf_counter() - start:.3f}s")
+        if extra:
+            parts.append(extra)
+        return {'extra': {'data': " | ".join(parts)}} if parts else {}
 
     # ──────────────────────────────────────────────────────────────────────────
     # Session management
@@ -315,7 +292,7 @@ class CoreProcessor:
           _ts_start             - perf_counter timestamp at session creation, used by
                                   _log() for elapsed timing.
         """
-        self._log(f'Creating new session', extra=f"id={session_id}")
+        log.info("Session created", extra={'data': f"id={session_id}"})
         self.sessions[session_id] = {
             'conversation_history':     [],
             'response_queue':           queue.Queue(),
@@ -408,7 +385,7 @@ class CoreProcessor:
                 if callable(close):
                     close()
             except Exception as e:
-                print(f"[core] Error closing ollama stream: {e}")
+                log.warning("Error closing ollama stream", extra={'data': str(e)})
             finally:
                 session['ollama_stream'] = None
 
@@ -443,10 +420,10 @@ class CoreProcessor:
         session = self.get_session(session_id)
         if session is None:
             # Defensive: create a session on-the-fly if somehow missing.
-            self._log("Session not found, creating new session...", extra=f"id={session_id}")
+            log.warning("Session not found, creating on the fly", extra={'data': f"id={session_id}"})
             self.create_session(session_id)
             session = self.get_session(session_id)
-            self._log("Created new session", extra=f"id={session_id}")
+            log.info("Session created on the fly", extra={'data': f"id={session_id}"})
 
         # Reset per-turn events — must happen before any await so the queue
         # reader in voice_remote doesn't see stale state.
@@ -526,7 +503,7 @@ class CoreProcessor:
 
                 # Rebuild prompt with the updated history so the next call
                 # to send_to_ollama() includes the tool result.
-                prompt = self.update_prompt(conversation_history)
+                prompt = conversation_history
                 continue
 
             else:
@@ -534,24 +511,24 @@ class CoreProcessor:
                 break
 
         # Signal the TTS drain loop in voice_remote that there's nothing more coming.
-        self._log("Finished processing input and response", session=session)
+        log.info("Response finished", **self._elapsed(session))
         self.response_finished(session)
 
 
-    def run_headless(core, prompt, tools=None):
+    def run_headless(self, prompt, tools=None):
         """
         Run a prompt through the LLM with no user present.
         Returns the text response. The LLM can call tools like schedule_call or notify_user, whatever a tool needs assessed.
         """
         session_id = f"headless_{uuid.uuid4().hex[:8]}"
-        core.create_session(session_id)
-        session = core.get_session(session_id)
+        self.create_session(session_id)
+        session = self.get_session(session_id)
         
         # Mark as headless so tools know there's no live user
         session['interface']   = 'headless'
         session['endpoint_id'] = 'jesse_im'   # where to route any notifications
         
-        core.process_input(prompt, session_id, mode=VoiceMode.PLAIN)
+        self.process_input(prompt, session_id, mode=VoiceMode.PLAIN)
         
         # Drain the response queue
         result = []
@@ -561,7 +538,7 @@ class CoreProcessor:
                 break
             result.append(chunk)
         
-        core.sessions.pop(session_id, None)
+        self.sessions.pop(session_id, None)
         return "".join(result)
 
 
@@ -589,22 +566,6 @@ class CoreProcessor:
         # this is intentional; process_input() owns the lifetime.
         prompt = conversation_history + [user_input_section]
         return prompt
-
-    def update_prompt(self, conversation_history):
-        """
-        Rebuild the prompt after a tool call.
- 
-        At this point conversation_history already contains:
-          … | user msg | assistant msg (with tool_calls) | tool result msg
- 
-        We return it as-is; send_to_ollama() will prepend the system message
-        again via the outer prompt variable in process_input().
- 
-        Note: the system message is NOT included here — it stays in the `prompt`
-        variable in process_input() and gets re-prepended there.
-        TODO: delete?
-        """
-        return conversation_history
 
     def create_system_message(self, mode: VoiceMode = VoiceMode.PLAIN, session: dict = None):
         """
@@ -646,8 +607,6 @@ class CoreProcessor:
         # and tools can use the identity without an extra lookup.
         if session and session.get('speaker'):
             speaker     = session['speaker']
-            config_dir  = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../config')
-            profiles    = load_profiles(config_dir)
             block       = f"[SPEAKER IDENTIFIED]\nYou are speaking with {speaker}."
             # Email and notes are loaded but intentionally not injected yet —
             # they'll be passed directly to tools that need them when that feature lands.
@@ -719,12 +678,12 @@ class CoreProcessor:
             # call .close() on it to abort the HTTP connection immediately.
             session['ollama_stream'] = response_stream
 
-            self._log("Starting to process chunks", session=session)
+            log.debug("Stream started", **self._elapsed(session))
             first_chunk_yet = False
 
             for chunk in response_stream:
                 if not first_chunk_yet:
-                    self._log("Received first chunk", session=session)
+                    log.debug("First chunk received", **self._elapsed(session))
                     first_chunk_yet = True
                     # Print inline token stream header for console debugging.
                     print(f"[STREAM] ", end="", flush=True)
@@ -734,7 +693,7 @@ class CoreProcessor:
                 # We check it on every token so we stop within one token's time.
                 if cancel_event and cancel_event.is_set():
                     # add that the user interrupted:
-                    print(f"[core] response cancelled by user")
+                    log.debug("Response cancelled by user", **self._elapsed(session))
                     response_content += "\n[User interrupted]\n"
                     break
 
@@ -752,7 +711,7 @@ class CoreProcessor:
                 if chunk.message.tool_calls:
                     tool_calls.extend(chunk.message.tool_calls)
 
-            print(f"\n[STREAM END] chars={len(response_content)} tools={len(tool_calls)}", flush=True)
+            log.debug("Stream ended", extra={'data': f"chars={len(response_content)} tools={len(tool_calls)}"})
 
             # Clear the stream reference now that iteration is complete.
             session['ollama_stream'] = None
@@ -769,19 +728,19 @@ class CoreProcessor:
                     'parameters': dict(tc.function.arguments) if tc.function.arguments else {},
                 }
 
-                self._log(f"Detected tool call: {tool_name_detected}", session=session, extra=f"args={tool_args}")
+                log.info("Tool call detected", **self._elapsed(session, f"{tool_name_detected} args={tool_args}"))
 
                 try:
                     fn = self.tool_loader.get_executor(tool_name_detected)
                     if fn is None:
-                        self._log(f"Tool not found", session=session, extra=tool_name_detected)
+                        log.warning("Tool not found", extra={'data': tool_name_detected})
                         wrapped = self._wrap_tool_result(tool_name_detected, {"text": "Unknown tool"})
                     else:
-                        self._log(f"Executing tool", session=session, extra=tool_name_detected)
+                        log.info("Executing tool", **self._elapsed(session, tool_name_detected))
                         t_tool = time.perf_counter()
                         wrapped = fn(tool_args=tool_args, session=session, core=self)
                         dt_tool = time.perf_counter() - t_tool
-                        self._log(f"Finished tool", session=session, extra=f"{tool_name_detected} dur={dt_tool:.3f}s")
+                        log.info("Tool finished", **self._elapsed(session, f"{tool_name_detected} dur={dt_tool:.3f}s"))
 
                     # Format the tool result as an Ollama 'tool' role message.
                     if wrapped is None:
@@ -812,26 +771,85 @@ class CoreProcessor:
             return response_content, None, None, None
 
         except Exception as e:
-            # Check if it looks like a parsing/tool error vs a connection error
-            error_str = str(e)
-            self._log(f"Ollama exception", session=session, extra=error_str)
-            
-            # If we accumulated tool_calls before the exception, try to recover
-            # by returning a synthetic error tool result rather than crashing.
+            session['ollama_stream'] = None
+            return self._handle_ollama_error(
+                error            = e,
+                session          = session,
+                response_content = response_content,
+                tool_calls       = tool_calls,
+                response_queue   = response_queue,
+            )
+
+    def _handle_ollama_error(self, error, session, response_content, tool_calls, response_queue) -> tuple:
+        """
+        Classify an Ollama exception and return the appropriate response tuple.
+        Called from send_to_ollama's except block.
+        """
+        if isinstance(error, ConnectionError):
+            msg = "Cannot connect to Ollama — is it running? Try: ollama serve"
+            log.error("Ollama connection error", extra={'data': str(error)})
+            response_queue.put(f"\nError: {msg}")
+            return f"Error: {msg}", None, None, None
+
+        if ollama and isinstance(error, ollama.RequestError):
+            msg = f"Bad request to Ollama: {error.error}"
+            log.error("Ollama request error", extra={'data': msg})
+            response_queue.put(f"\nError: {msg}")
+            return f"Error: {msg}", None, None, None
+
+        if ollama and isinstance(error, ollama.ResponseError):
+            log.error("Ollama response error", extra={'data': f"status={error.status_code} {error.error}"})
+
+            if error.status_code == 404:
+                log.info("Model not found — attempting pull", extra={'data': self.model})
+                try:
+                    self.ollama_client.pull(self.model)
+                    msg = "Model was missing and has been pulled. Please try again."
+                    log.info("Model pulled successfully", extra={'data': self.model})
+                except Exception as pull_err:
+                    msg = f"Model '{self.model}' not found and pull failed: {pull_err}"
+                    log.error("Model pull failed", extra={'data': str(pull_err)})
+                response_queue.put(f"\nError: {msg}")
+                return f"Error: {msg}", None, None, None
+
+            # 500 or None — may be malformed LLM tool call mid-stream
             if tool_calls:
-                tool_name_detected = tool_calls[0].function.name if tool_calls[0].function else "unknown"
-                tool_message = {
-                    'role': 'tool',
-                    'tool_name': tool_name_detected,
-                    'content': json.dumps({"text": f"Tool call failed: {error_str}"}),
-                }
-                return response_content, tool_message, tool_name_detected, tool_calls
+                return self._loop_back_bad_tool(
+                    response_content, tool_calls, session,
+                    "Your response was malformed. Please retry the tool call with valid arguments."
+                )
 
-            # Otherwise it's a real connection/parse error — push an error string
-            # to the queue so the user hears something.
-            response_queue.put(f"\nError: {error_str}")
-            return f"Error: {error_str}", None, None, None
+            msg = f"Ollama server error ({error.status_code})"
+            response_queue.put(f"\nError: {msg}")
+            return f"Error: {msg}", None, None, None
 
+        # General exception — malformed tool call or unexpected error
+        if tool_calls:
+            return self._loop_back_bad_tool(
+                response_content, tool_calls, session,
+                f"Tool call failed: {error}. Please try again."
+            )
+
+        msg = str(error)
+        log.error("Unexpected Ollama exception", extra={'data': msg})
+        response_queue.put(f"\nError: {msg}")
+        return f"Error: {msg}", None, None, None
+
+    def _loop_back_bad_tool(self, response_content, tool_calls, session, message) -> tuple:
+        """Return a tool error that loops back to the LLM so it can retry."""
+        tool_name = "unknown"
+        try:
+            if tool_calls[0].function:
+                tool_name = tool_calls[0].function.name
+        except Exception:
+            pass
+        log.warning("Looping back bad tool call", extra={'data': f"tool={tool_name}"})
+        tool_message = {
+            'role':      'tool',
+            'tool_name': tool_name,
+            'content':   json.dumps({"text": message}),
+        }
+        return response_content, tool_message, tool_name, tool_calls    
 
     # ──────────────────────────────────────────────────────────────────────────
     # Queue helpers (called by voice_remote at the end of _contact_core)

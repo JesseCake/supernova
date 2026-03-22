@@ -76,6 +76,7 @@ class SpeakerConfig:
 class DebugConfig:
     record_audio: bool = False
     record_dir:   str  = "./debug_audio"
+    verbose:      bool = False
 
 
 @dataclass

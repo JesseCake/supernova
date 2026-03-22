@@ -5,6 +5,9 @@ from core.core import CoreProcessor
 # Config
 from core.settings import load_config
 
+# Logger:
+from core.logger import setup_logging, get_logger
+
 # Interfaces
 from interfaces.web_interface import WebInterface
 from interfaces.voice_remote import VoiceRemoteInterface
@@ -17,11 +20,16 @@ from faster_whisper import WhisperModel
 from whisper_live.vad import VoiceActivityDetector
 from piper import PiperVoice
 
+
 if __name__ == "__main__":
 
     # ── Config + core ─────────────────────────────────────────────────────────
     config         = load_config()
     core_processor = CoreProcessor(config)
+
+    # Logging
+    setup_logging(debug=config.debug.verbose, log_dir='logs')
+    log = get_logger('launcher')
 
     # Shared inference instances — created once, passed into all interfaces
     whisper_model = WhisperModel(model_size_or_path="base.en")
@@ -57,7 +65,7 @@ if __name__ == "__main__":
             if event.get('missed'):
                 announcement = f"[Missed while offline] {announcement}"
             if not caller_number:
-                print(f"[main] asterisk_call event has no endpoint_id")
+                log.warning("Asterisk event has no endpoint_id")
                 return
             asyncio.run_coroutine_threadsafe(
                 asterisk.initiate_call(caller_number, announcement),
@@ -65,8 +73,7 @@ if __name__ == "__main__":
             )
 
         core_processor.register_event_handler('asterisk', _asterisk_call_handler)
-        print(f"[main] asterisk interface starting, connecting to ARI at "
-              f"{config.asterisk.ari_host}:{config.asterisk.ari_port}")
+        log.info("Asterisk interface starting", extra={'data': f"{config.asterisk.ari_host}:{config.asterisk.ari_port}"})
 
     # ── Voice remote interface ────────────────────────────────────────────────
     if config.interfaces.voice_remote:
@@ -90,7 +97,7 @@ if __name__ == "__main__":
             if event.get('missed'):
                 announcement = f"[Missed while server was offline] {announcement}"
             if not endpoint_id:
-                print(f"[main] voice_call event has no endpoint_id: {event.get('label')!r}")
+                log.warning("Voice call event has no endpoint_id", extra={'data': f"label={event.get('label')!r}"})
                 return
             asyncio.run_coroutine_threadsafe(
                 vr.initiate_call(endpoint_id, announcement),
@@ -103,8 +110,7 @@ if __name__ == "__main__":
             host=config.server.remote_voice_host,
             port=config.server.remote_voice_port,
         ))
-        print(f"[main] voice_remote starting on "
-              f"{config.server.remote_voice_host}:{config.server.remote_voice_port}")
+        log.info("Voice remote starting", extra={'data': f"{config.server.remote_voice_host}:{config.server.remote_voice_port}"})
 
     # ── Telegram IM interface ─────────────────────────────────────────────────
     if config.telegram.enabled:
@@ -128,7 +134,7 @@ if __name__ == "__main__":
         core_processor.register_presence_check('telegram',
             lambda endpoint_id: True
         )
-        print(f"[main] telegram interface starting")
+        log.info("Telegram interface starting")
 
     # ── Web / Gradio interface ────────────────────────────────────────────────
     if config.interfaces.web:
@@ -140,7 +146,7 @@ if __name__ == "__main__":
 
         web_thread = threading.Thread(target=_run_web, daemon=True)
         web_thread.start()
-        print(f"[main] web interface starting")
+        log.info("Web interface starting")
 
     # ── Run forever ───────────────────────────────────────────────────────────
     # All async interfaces are now scheduled as tasks on the shared loop.
@@ -148,6 +154,6 @@ if __name__ == "__main__":
     try:
         loop.run_forever()
     except KeyboardInterrupt:
-        print("\n[main] shutting down...")
+        log.info("Shutting down")
     finally:
         loop.close()

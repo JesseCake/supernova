@@ -22,6 +22,10 @@ from faster_whisper import WhisperModel
 from core.precontext import VoiceMode
 from core.speaker_id import SpeakerIdentifier, load_profiles
 
+# Logging:
+from core.logger import get_logger
+log = get_logger('asterisk')
+
 # ============================================================
 # AsteriskInterface
 # ============================================================
@@ -56,10 +60,10 @@ class AsteriskInterface:
         # TTS (Piper) — own instance + lock
         self._piper_lock = threading.Lock()
         if piper_voice is not None:
-            print("[asterisk] Using shared Piper model.")
+            log.info("Using shared Piper model")
             self.voice = piper_voice
         else:
-            print("[asterisk] Loading Piper model...")
+            log.info("Loading Piper model")
             self.voice = PiperVoice.load(
                 core_processor.config.voice.model_path,
                 use_cuda=core_processor.config.voice.use_cuda,
@@ -121,7 +125,7 @@ class AsteriskInterface:
         self._endpoints = {}
         for name, ep in (config.asterisk.endpoints or {}).items():
             self._endpoints[name] = ep
-            print(f"[asterisk] endpoint: {name!r} ({ep.friendly_name} — {ep.number})")
+            log.info("Endpoint configured", extra={'data': f"{name!r} {ep.friendly_name} — {ep.number}"})
 
     # ----------------------------------------------------------
     # ARI helpers
@@ -227,7 +231,7 @@ class AsteriskInterface:
 
         min_samples = int(0.2 * AGENT_RATE)
         if self.frames_np.size < min_samples:
-            print(f"[asterisk] Ignoring short buffer ({self.frames_np.size} samples)")
+            log.debug("Ignoring short buffer", extra={'data': f"{self.frames_np.size} samples"})
             self.frames_np = np.array([], dtype=np.float32)
             return
         
@@ -247,7 +251,7 @@ class AsteriskInterface:
                     wf.setsampwidth(2)
                     wf.setframerate(AGENT_RATE)
                     wf.writeframes((audio_snapshot * 32767).astype(np.int16).tobytes())
-                print(f"[asterisk] Saved debug audio to {filename}")
+                log.debug("Saved debug audio", extra={'data': filename})
 
             def do_transcribe():
                 return self.transcriber.transcribe(
@@ -261,7 +265,7 @@ class AsteriskInterface:
 
             
         except Exception as e:
-            print(f"[asterisk] ASR error: {e}")
+            log.error("ASR error", exc_info=True)
             self.frames_np = np.array([], dtype=np.float32)
             return
 
@@ -269,10 +273,10 @@ class AsteriskInterface:
             return
 
         text = " ".join(seg.text for seg in segments).strip()
-        print(f"[asterisk] Transcription: '{text}'")
+        log.info("Transcription", extra={'data': repr(text)})
 
         if not text or re.fullmatch(r'[\s.…]+', text):
-            print("[asterisk] Ignoring Whisper hallucination")
+            log.debug("Ignoring Whisper hallucination")
             return
 
         if self.close_channel_phrase in text.lower():
@@ -283,7 +287,7 @@ class AsteriskInterface:
         self._identified_speaker = self._speaker_id.result(timeout=1.0)
         self.frames_np = np.array([], dtype=np.float32)  # clear frames
         if self._identified_speaker:
-            print(f"[asterisk] Speaker identified: {self._identified_speaker}")
+            log.info("Speaker identified", extra={'data': self._identified_speaker})
 
         await self._contact_core(text)
 
@@ -297,14 +301,14 @@ class AsteriskInterface:
             self.core_processor.create_session(self.session_id)
             core_session = self.core_processor.get_session(self.session_id)
             if core_session is not None:
-                print(f"[asterisk] Matching: caller_number={self.caller_number!r}")
-                print(f"[asterisk] Configured endpoints: { {n: ep.number for n, ep in self._endpoints.items()} }")
+                log.debug("Matching caller", extra={'data': f"caller_number={self.caller_number!r}"})
+                log.debug("Configured endpoints", extra={'data': str({n: ep.number for n, ep in self._endpoints.items()})})
                 matched_id = 'asterisk'
                 for name, ep in self._endpoints.items():
                     if str(ep.number) == str(self.caller_number):
                         matched_id = name
                         break
-                print(f"[asterisk] Matched endpoint_id={matched_id!r}")
+                log.info("Endpoint matched", extra={'data': f"endpoint_id={matched_id!r}"})
                 core_session['endpoint_id']   = matched_id
                 core_session['caller_number'] = self.caller_number
                 core_session['interface']     = 'asterisk'
@@ -317,7 +321,7 @@ class AsteriskInterface:
         if core_session is not None and self._identified_speaker:
             core_session['speaker'] = self._identified_speaker
 
-        print(f"[asterisk] Processing: {input_text}")
+        log.info("Processing input", extra={'data': repr(input_text)})
         thread = threading.Thread(
             target=self.core_processor.process_input,
             kwargs={
@@ -383,7 +387,7 @@ class AsteriskInterface:
             try:
                 piper_chunks = await asyncio.to_thread(synth)
             except Exception as e:
-                print(f"[asterisk] Piper error: {e}")
+                log.error("Piper TTS error", exc_info=True)
                 return
 
             samples_per_packet = int(SAMPLE_RATE * PTIME_MS / 1000)  # 160 @ 8kHz/20ms
@@ -428,28 +432,26 @@ class AsteriskInterface:
         into the LLM as the opening turn when the call is answered.
         """
         # Look up the configured endpoint to get the real phone number
-        print(f"[asterisk] initiate_call received endpoint_id={endpoint_id!r}")
+        log.info("Initiating call", extra={'data': f"endpoint_id={endpoint_id!r}"})
         ep = self._endpoints.get(endpoint_id)
-        print(f"[asterisk] Looked up ep={ep!r}")
         if ep is None:
-            print(f"[asterisk] initiate_call: unknown endpoint {endpoint_id!r} — "
-                  f"available: {list(self._endpoints.keys())}")
+            log.warning("Unknown endpoint", extra={'data': f"{endpoint_id!r} available={list(self._endpoints.keys())}"})
             return False
 
         number = ep.number
         if not number:
-            print(f"[asterisk] initiate_call: endpoint {endpoint_id!r} has no number configured")
+            log.warning("Endpoint has no number", extra={'data': f"{endpoint_id!r}"})
             return False
 
         if self.channel_id is not None:
-            print(f"[asterisk] initiate_call: busy, cannot call {endpoint_id!r} ({number})")
+            log.warning("Busy, cannot initiate call", extra={'data': f"{endpoint_id!r} ({number})"})
             return False
 
         if not self._ws_session:
-            print(f"[asterisk] initiate_call: no ARI session available")
+            log.warning("No ARI session available")
             return False
 
-        print(f"[asterisk] Initiating outbound call: endpoint={endpoint_id!r} number={number!r}")
+        log.info("Outbound call initiated", extra={'data': f"endpoint={endpoint_id!r} number={number!r}"})
 
         try:
             # Store announcement so _handle_call can inject it into the LLM
@@ -462,18 +464,18 @@ class AsteriskInterface:
                 app      = "supernova",
             )
             if result and "id" in result:
-                print(f"[asterisk] Outbound call to {endpoint_id!r} ({number}) initiated: {result['id']}")
+                log.info("Outbound call accepted", extra={'data': f"{endpoint_id!r} ({number}) channel={result['id']}"})
                 return True
             else:
-                print(f"[asterisk] Outbound call to {endpoint_id!r} ({number}) failed: {result}")
+                log.error("Outbound call failed", extra={'data': f"{endpoint_id!r} ({number}) result={result}"})
                 return False
         except Exception as e:
-            print(f"[asterisk] initiate_call error: {e}")
+            log.error("initiate_call error", exc_info=True)
             return False
 
 
     async def _hangup(self):
-        print("[asterisk] Hanging up.")
+        log.info("Hanging up")
         self.session_id = None
         self.rx_paused = False
         if self._ws_session and self.channel_id:
@@ -484,7 +486,7 @@ class AsteriskInterface:
 
     async def _handle_call(self, channel_id: str, session: aiohttp.ClientSession):
         """Drive a single call from answer to hangup."""
-        print(f"[asterisk] Handling call on channel {channel_id}")
+        log.info("Handling call", extra={'data': f"channel={channel_id}"})
         self.channel_id    = channel_id
         self.session_id    = None
         self.frames_np     = np.array([], dtype=np.float32)
@@ -516,10 +518,10 @@ class AsteriskInterface:
                 connection_type="client",
                 direction="both",
             )
-            print(f"[asterisk] externalMedia response: {ext}")
+            log.debug("externalMedia response", extra={'data': str(ext)})
 
             if not ext or "id" not in ext:
-                print(f"[asterisk] externalMedia failed — bailing")
+                log.error("externalMedia failed — bailing")
                 return
 
             ext_channel_id = ext["id"]
@@ -527,7 +529,7 @@ class AsteriskInterface:
             # Bridge the call channel and external media channel
             bridge = await self._ari_post(session, "/bridges", type="mixing")
             if not bridge or "id" not in bridge:
-                print("[asterisk] Failed to create bridge")
+                log.error("Failed to create bridge")
                 return
             bridge_id = bridge["id"]
 
@@ -536,13 +538,13 @@ class AsteriskInterface:
                 f"/bridges/{bridge_id}/addChannel",
                 channel=f"{channel_id},{ext_channel_id}",
             )
-            print(f"[asterisk] addChannel result: {result}")
+            log.debug("addChannel result", extra={'data': str(result)})
 
             # Asterisk sends RTP to our socket — we send back to the same address
             # The UnicastRTP channel name (extract):
             asterisk_rtp_port = int(ext["channelvars"]["UNICASTRTP_LOCAL_PORT"])
             self._rtp_remote = (local_ip, asterisk_rtp_port)
-            print(f"[asterisk] RTP remote: {self._rtp_remote}, local port: {local_port}")
+            log.info("RTP configured", extra={'data': f"remote={self._rtp_remote} local_port={local_port}"})
 
             # Answer the original channel
             await self._ari_post(session, f"/channels/{channel_id}/answer")
@@ -577,7 +579,7 @@ class AsteriskInterface:
                     # No RTP packet in 1s — check if call is still active and loop
                     continue
                 except Exception as e:
-                    print(f"[asterisk] RTP recv error: {e}")
+                    log.error("RTP recv error", exc_info=True)
                     break
 
                 if len(raw) <= RTP_HDR_SIZE:
@@ -637,7 +639,7 @@ class AsteriskInterface:
                         if self.frames_np.size >= int(0.3 * AGENT_RATE):  # 0.3s minimum
                             await self._transcribe_and_respond()
                         else:
-                            print(f"[asterisk] Discarding short buffer ({self.frames_np.size} samples)")
+                            log.debug("Discarding short buffer", extra={'data': f"{self.frames_np.size} samples"})
                             self.frames_np = np.array([], dtype=np.float32)
                         self.recording     = False
                         self.last_voice_ts = None
@@ -655,7 +657,7 @@ class AsteriskInterface:
                     await self._ari_delete(session, f"/channels/{ext_channel_id}")
             except Exception:
                 pass
-            print(f"[asterisk] Call ended on channel {channel_id}")
+            log.info("Call ended", extra={'data': f"channel={channel_id}"})
 
     # ----------------------------------------------------------
     # ARI WebSocket event loop
@@ -670,14 +672,14 @@ class AsteriskInterface:
             f"&subscribeAll=false"
         )
 
-        print(f"[asterisk] Connecting to ARI at {cfg.ari_host}:{cfg.ari_port}")
+        log.info("Connecting to ARI", extra={'data': f"{cfg.ari_host}:{cfg.ari_port}"})
 
         async with aiohttp.ClientSession() as session:
             self._ws_session = session
             while True:
                 try:
                     async with session.ws_connect(ws_url) as ws:
-                        print("[asterisk] ARI WebSocket connected.")
+                        log.info("ARI WebSocket connected")
                         async for msg in ws:
                             if msg.type == aiohttp.WSMsgType.TEXT:
                                 event = json.loads(msg.data)
@@ -686,15 +688,15 @@ class AsteriskInterface:
                                 aiohttp.WSMsgType.CLOSED,
                                 aiohttp.WSMsgType.ERROR,
                             ):
-                                print("[asterisk] WebSocket closed/error, reconnecting...")
+                                log.warning("WebSocket closed/error, reconnecting")
                                 break
                 except Exception as e:
-                    print(f"[asterisk] ARI connection error: {e}, retrying in 5s...")
+                    log.error("ARI connection error, retrying in 5s", exc_info=True)
                     await asyncio.sleep(5)
 
     async def _transfer_to_dialplan(self, session: aiohttp.ClientSession):
         # allows transferring to dialtone
-        print("[asterisk] DTMF 0 — transferring to dialplan")
+        log.info("DTMF 0 — transferring to dialplan")
         channel_id = self.channel_id   # save before nulling
         self.channel_id = None         # stop the RTP loop
         if not channel_id:
@@ -710,7 +712,7 @@ class AsteriskInterface:
                 priority=1,
             )
         except Exception as e:
-            print(f"[asterisk] Transfer failed: {e}")
+            log.error("Transfer failed", exc_info=True)
 
     async def _handle_event(self, event: dict, session: aiohttp.ClientSession):
         etype = event.get("type")
@@ -735,10 +737,10 @@ class AsteriskInterface:
             if not caller_number and "/" in channel_name:
                 caller_number = channel_name.split("/")[1].split("-")[0]
             self.caller_number = caller_number
-            print(f"[asterisk] Caller captured: number={caller_number!r} from channel={channel_name!r}")
+            log.info("Caller captured", extra={'data': f"number={caller_number!r} channel={channel_name!r}"})
 
             if self.channel_id is not None:
-                print(f"[asterisk] Rejecting call {channel_id} — already busy")
+                log.warning("Rejecting call — already busy", extra={'data': f"channel={channel_id}"})
                 await self._ari_delete(session, f"/channels/{channel_id}")
                 return
 
@@ -747,7 +749,7 @@ class AsteriskInterface:
         elif etype == "StasisEnd":
             channel_id = event.get("channel", {}).get("id")
             if channel_id == self.channel_id:
-                print("[asterisk] StasisEnd — call ended by remote.")
+                log.info("Call ended by remote")
                 self.channel_id = None
 
         # we can dial 0 for an outside line:
@@ -755,8 +757,7 @@ class AsteriskInterface:
             channel_id = event.get("channel", {}).get("id")
             digit = event.get("digit")
             
-            # debug:
-            print(f"[asterisk] DTMF channel_id={channel_id}, digit={digit}")
+            log.debug("DTMF received", extra={'data': f"channel={channel_id} digit={digit}"})
 
             if channel_id == self.channel_id and digit == "0":
                 await self._transfer_to_dialplan(session)
@@ -764,5 +765,5 @@ class AsteriskInterface:
         elif etype == "ChannelHangupRequest":
             channel_id = event.get("channel", {}).get("id")
             if channel_id == self.channel_id:
-                print("[asterisk] Hangup requested by caller.")
+                log.info("Hangup requested by caller")
                 self.channel_id = None

@@ -26,6 +26,7 @@ asterisk:
 debug:                        
   record_audio: false
   record_dir: "./debug_audio"
+  verbose: false
 
 voice:
   model_path: "./libs/voices/glados_piper_medium.onnx"
