@@ -221,12 +221,19 @@ def recipe_manage(
 ) -> str:
     """
     Add, edit, or delete a recipe.
-    - action='add': save a new recipe from ingredients and method steps.
-      Use after extracting a recipe from a photo or description.
+ 
+    action='add': save a new recipe from ingredients and method steps.
+      Use after the user describes or photographs a recipe.
       Returns an error if a recipe with that title already exists.
-    - action='edit': make a targeted change to one part of an existing recipe
-      without rewriting the whole thing.
-    - action='delete': remove a recipe permanently. Confirm with user first.
+ 
+    action='edit': make a targeted change to one part of an existing recipe.
+      Set operation to one of: set_field, add_tag, remove_tag,
+      add_ingredient, remove_ingredient, add_step, replace_step,
+      remove_step, append_notes.
+      Use field+value for set_field, value for ingredient/tag/step changes,
+      step_number+value for replace_step and remove_step.
+ 
+    action='delete': remove a recipe permanently. Confirm with user first.
     """
     ...
 
@@ -241,6 +248,8 @@ def _execute_search(tool_args: dict, session, core, tool_config: dict) -> str:
 
     files   = ToolBase.list_files('recipes', extension='.md')
     results = []
+
+    ToolBase.speak(core, session, "Looking up recipes.")
 
     for fname in files:
         content  = ToolBase.read_text('recipes', fname)
@@ -315,6 +324,8 @@ def _execute_get(tool_args: dict, session, core, tool_config: dict) -> str:
     if not fname:
         return ToolBase.error(core, 'recipe_get',
             f"No recipe found matching '{title}'. Try recipe_search to see what's available.")
+    
+    ToolBase.speak(core, session, f"Getting Recipe: {title}.")
 
     content  = ToolBase.read_text('recipes', fname)
     fm, body = _parse(content)
@@ -360,6 +371,8 @@ def _execute_manage(tool_args: dict, session, core, tool_config: dict) -> str:
             return ToolBase.error(core, 'recipe_manage',
                 f"A recipe called '{title}' already exists. "
                 f"Use action='edit' to modify it, or choose a different name.")
+        
+        ToolBase.speak(core, session, f"Saving Recipe: {title}.")
 
         content  = _build_recipe_markdown(
             title       = title,
@@ -398,6 +411,8 @@ def _execute_manage(tool_args: dict, session, core, tool_config: dict) -> str:
         fname = _find_recipe_file(title)
         if not fname:
             return ToolBase.error(core, 'recipe_manage', f"No recipe found matching '{title}'.")
+        
+        ToolBase.speak(core, session, f"Updating Recipe {title}.")
 
         content  = ToolBase.read_text('recipes', fname)
         fm, body = _parse(content)

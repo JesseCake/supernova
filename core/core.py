@@ -801,6 +801,18 @@ class CoreProcessor:
                 tool_calls       = tool_calls,
                 response_queue   = response_queue,
             )
+    def _send_retry_notice(self, session: dict):
+        """
+        Send a friendly retry message to the user via immediate_send (text
+        interfaces) or response_queue (voice). Called before looping back
+        on a malformed LLM response so the user knows something is happening.
+        """
+        msg     = "Oops, I made a mistake — let me try that again."
+        send_fn = session.get('immediate_send')
+        if send_fn:
+            send_fn(msg)
+        else:
+            session['response_queue'].put(msg)
 
     def _handle_ollama_error(self, error, session, response_content, tool_calls, response_queue) -> tuple:
         """
@@ -834,11 +846,14 @@ class CoreProcessor:
                 response_queue.put(f"\nError: {msg}")
                 return f"Error: {msg}", None, None
 
-            # 500 or None — may be malformed LLM tool call mid-stream
-            if tool_calls:
+            # 500 — usually a malformed tool call or bad JSON from the model.
+            # Loop back so the LLM can retry rather than surfacing a raw error.
+            if error.status_code == 500:
+                self._send_retry_notice(session)
                 return self._loop_back_bad_tool(
                     response_content, tool_calls, session,
-                    "Your response was malformed. Please retry the tool call with valid arguments."
+                    "Your previous response contained malformed JSON or an invalid tool call. "
+                    "Please try again with a valid response (check the formatting of the tool call carefully)."
                 )
 
             msg = f"Ollama server error ({error.status_code})"
