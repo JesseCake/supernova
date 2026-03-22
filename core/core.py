@@ -468,7 +468,7 @@ class CoreProcessor:
         # generate a natural-language response incorporating the tool's output.
         # Most turns complete in one iteration (no tool call).
         while True:
-            full_response, tool_msg, tool_name, chat_tool_calls = self.send_to_ollama(
+            full_response, tool_msg, chat_tool_calls = self.send_to_ollama(
                 prompt_text=prompt, 
                 prompt_tools=prompt_tools, 
                 session=session, 
@@ -493,21 +493,14 @@ class CoreProcessor:
                 conversation_history.append(history_entry)
 
             if tool_msg:
-                # Append the tool result and loop to let the model see it.
-                conversation_history.append(tool_msg)
-
-                # hangup_call is the one tool whose result ends the session
-                # rather than generating a follow-up response — break immediately.
-                if tool_name == "hangup_call":
+                for msg in tool_msg:
+                    conversation_history.append(msg)
+                if any(m.get('tool_name') == 'hangup_call' for m in tool_msg):
                     break
-
-                # Rebuild prompt with the updated history so the next call
-                # to send_to_ollama() includes the tool result.
                 prompt = conversation_history
                 continue
-
             else:
-                # No tool call → model gave a final response → done.
+                # no tool call
                 break
 
         # Signal the TTS drain loop in voice_remote that there's nothing more coming.
@@ -641,11 +634,11 @@ class CoreProcessor:
         Returns:
           (full_response: str,
            tool_message: dict | None,
-           tool_name: str | None,
            chat_tool_calls: list | None)
  
         full_response is everything the model said (useful for history even if empty).
-        tool_message is the {role:'tool', tool_name:…, content:…} dict to append.
+        tool_messages is a list of {role:'tool', tool_name:…, content:…} dicts to append,
+        or None if no tools were called.
         """
         response_queue = session['response_queue']
         cancel_event = session['cancel_event']
@@ -718,57 +711,60 @@ class CoreProcessor:
 
             # ── Tool execution ────────────────────────────────────────────────
             if tool_calls:
-                # Only the first tool call is executed per loop iteration.
-                # If the model requests multiple, the others are silently dropped.
-                # This is a deliberate simplification — most models only emit one.
-                tc                  = tool_calls[0]
-                tool_name_detected  = tc.function.name
-                tool_args           = {
-                    'name': tool_name_detected,
-                    'parameters': dict(tc.function.arguments) if tc.function.arguments else {},
-                }
-
-                log.info("Tool call detected", **self._elapsed(session, f"{tool_name_detected} args={tool_args}"))
-
-                try:
-                    fn = self.tool_loader.get_executor(tool_name_detected)
-                    if fn is None:
-                        log.warning("Tool not found", extra={'data': tool_name_detected})
-                        wrapped = self._wrap_tool_result(tool_name_detected, {"text": "Unknown tool"})
-                    else:
-                        log.info("Executing tool", **self._elapsed(session, tool_name_detected))
-                        t_tool = time.perf_counter()
-                        wrapped = fn(tool_args=tool_args, session=session, core=self)
-                        dt_tool = time.perf_counter() - t_tool
-                        log.info("Tool finished", **self._elapsed(session, f"{tool_name_detected} dur={dt_tool:.3f}s"))
-
-                    # Format the tool result as an Ollama 'tool' role message.
-                    if wrapped is None:
-                        tool_message = {
-                            'role': 'tool',
-                            'tool_name': tool_name_detected,
-                            'content': json.dumps({"text": "ok"}),
-                        }
-                    else:
-                        tool_message = {
-                            'role': 'tool',
-                            'tool_name': tool_name_detected,
-                            'content': json.dumps(
-                                json.loads(wrapped).get('tool_result', {}).get('content', {})
-                            ),
-                        }
-
-                except Exception as e:
-                    tool_message = {
-                        'role': 'tool',
-                        'tool_name': tool_name_detected,
-                        'content': json.dumps({"text": f"Tool error: {e}"}),
-                    }
+                # Now handling multiple tool calls if wanted by agent
+                tool_messages       = []
                 
-                return response_content, tool_message, tool_name_detected, tool_calls
+                for tc in tool_calls:
+                    tool_name_detected  = tc.function.name
+                    tool_args           = {
+                        'name': tool_name_detected,
+                        'parameters': dict(tc.function.arguments) if tc.function.arguments else {},
+                    }
+
+                    log.info("Tool call detected", **self._elapsed(session, f"{tool_name_detected} args={tool_args}"))
+
+                    try:
+                        fn = self.tool_loader.get_executor(tool_name_detected)
+                        if fn is None:
+                            log.warning("Tool not found", extra={'data': tool_name_detected})
+                            wrapped = self._wrap_tool_result(tool_name_detected, {"text": "Unknown tool"})
+                        else:
+                            log.info("Executing tool", **self._elapsed(session, tool_name_detected))
+                            t_tool = time.perf_counter()
+                            wrapped = fn(tool_args=tool_args, session=session, core=self)
+                            dt_tool = time.perf_counter() - t_tool
+                            log.info("Tool finished", **self._elapsed(session, f"{tool_name_detected} dur={dt_tool:.3f}s"))
+
+                        # Format the tool result as an Ollama 'tool' role message.
+                        if wrapped is None:
+                            tool_message = {
+                                'role': 'tool',
+                                'tool_name': tool_name_detected,
+                                'content': json.dumps({"text": "ok"}),
+                            }
+                        else:
+                            tool_message = {
+                                'role': 'tool',
+                                'tool_name': tool_name_detected,
+                                'content': json.dumps(
+                                    json.loads(wrapped).get('tool_result', {}).get('content', {})
+                                ),
+                            }
+
+                    except Exception as e:
+                        tool_message = {
+                            'role': 'tool',
+                            'tool_name': tool_name_detected,
+                            'content': json.dumps({"text": f"Tool error: {e}"}),
+                        }
+
+                    tool_messages.append(tool_message)   #  collect each result
+                    last_tool_name = tool_name_detected  #  track last tool name
+                
+                return response_content, tool_messages, tool_calls
 
             # No tool call — return the full streamed text for history.
-            return response_content, None, None, None
+            return response_content, None, None
 
         except Exception as e:
             session['ollama_stream'] = None
@@ -789,13 +785,13 @@ class CoreProcessor:
             msg = "Cannot connect to Ollama — is it running? Try: ollama serve"
             log.error("Ollama connection error", extra={'data': str(error)})
             response_queue.put(f"\nError: {msg}")
-            return f"Error: {msg}", None, None, None
+            return f"Error: {msg}", None, None
 
         if ollama and isinstance(error, ollama.RequestError):
             msg = f"Bad request to Ollama: {error.error}"
             log.error("Ollama request error", extra={'data': msg})
             response_queue.put(f"\nError: {msg}")
-            return f"Error: {msg}", None, None, None
+            return f"Error: {msg}", None, None
 
         if ollama and isinstance(error, ollama.ResponseError):
             log.error("Ollama response error", extra={'data': f"status={error.status_code} {error.error}"})
@@ -810,7 +806,7 @@ class CoreProcessor:
                     msg = f"Model '{self.model}' not found and pull failed: {pull_err}"
                     log.error("Model pull failed", extra={'data': str(pull_err)})
                 response_queue.put(f"\nError: {msg}")
-                return f"Error: {msg}", None, None, None
+                return f"Error: {msg}", None, None
 
             # 500 or None — may be malformed LLM tool call mid-stream
             if tool_calls:
@@ -821,7 +817,7 @@ class CoreProcessor:
 
             msg = f"Ollama server error ({error.status_code})"
             response_queue.put(f"\nError: {msg}")
-            return f"Error: {msg}", None, None, None
+            return f"Error: {msg}", None, None
 
         # General exception — malformed tool call or unexpected error
         if tool_calls:
@@ -833,7 +829,7 @@ class CoreProcessor:
         msg = str(error)
         log.error("Unexpected Ollama exception", extra={'data': msg})
         response_queue.put(f"\nError: {msg}")
-        return f"Error: {msg}", None, None, None
+        return f"Error: {msg}", None, None
 
     def _loop_back_bad_tool(self, response_content, tool_calls, session, message) -> tuple:
         """Return a tool error that loops back to the LLM so it can retry."""
@@ -849,7 +845,7 @@ class CoreProcessor:
             'tool_name': tool_name,
             'content':   json.dumps({"text": message}),
         }
-        return response_content, tool_message, tool_name, tool_calls    
+        return response_content, tool_message, tool_calls    
 
     # ──────────────────────────────────────────────────────────────────────────
     # Queue helpers (called by voice_remote at the end of _contact_core)
