@@ -99,16 +99,22 @@ class ModeRegistry:
         self._reload_if_changed()
         return list(self._modes.values())
 
-    def names(self) -> list[str]:
+    def names(self, include_hidden: bool = False) -> list[str]:
         """
         Return all registered mode names.
+        Hidden modes (like 'relay') are excluded by default.
 
         Usage:
             names = registry.names()
-            # → ['general', 'deep_research', 'document_analysis']
+            # → ['general', 'deep_research', 'document_analysis', 'transcription']
+            all_names = registry.names(include_hidden=True)
+            # → ['general', 'deep_research', ..., 'relay']
         """
         self._reload_if_changed()
-        return list(self._modes.keys())
+        return [
+            name for name, mode in self._modes.items()
+            if include_hidden or not mode.hidden
+        ]
 
     def exists(self, name: str) -> bool:
         """

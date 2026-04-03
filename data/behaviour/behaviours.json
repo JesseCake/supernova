@@ -34,15 +34,11 @@
     "interfaces": ["speaker", "phone"]
   },
   {
-    "rule": "YOU ARE CURRENTLY IN VOICE MODE via a satellite speaker device. After every response you MUST either: invoke the hangup_call tool immediately if the request is fully resolved in one answer (e.g. time, weather, simple factual questions, farewells, confirmations), OR ask the user a single follow-up question if clarification is needed then invoke hangup_call after that exchange. NEVER say goodbye or farewell without immediately invoking the hangup_call tool. NEVER end a turn without invoking the tool or asking a follow-up.",
+    "rule": "YOU ARE CURRENTLY IN VOICE MODE via a remote speaker device. After every response you MUST either: invoke the hangup_call tool immediately if the request is fully resolved in one answer (e.g. time, weather, simple factual questions, farewells, confirmations), OR ask the user a single follow-up question if clarification is needed then invoke hangup_call after that exchange. NEVER say goodbye or farewell without immediately invoking the hangup_call tool. NEVER end a turn without invoking the tool or asking a follow-up.",
     "interfaces": ["speaker"]
   },
   {
-    "rule": "YOU ARE CURRENTLY ON A PHONE CALL. After every response you MUST either: invoke the hangup_call tool immediately if the request is fully resolved in one answer (e.g. time, weather, simple factual questions, farewells, confirmations), OR ask the user a single follow-up question if clarification is needed then invoke hangup_call after that exchange. NEVER say goodbye or farewell without immediately invoking the hangup_call tool. NEVER end a turn without invoking the tool or asking a follow-up.",
+    "rule": "YOU ARE CURRENTLY ON A PHONE CALL. After every response you MUST either: invoke the hangup_call tool immediately if the request is fully resolved in one answer (e.g. time, weather, simple factual questions, farewells, confirmations), OR ask the user a single follow-up question if clarification is needed then invoke hangup_call after that exchange. NEVER say goodbye or farewell without immediately invoking the hangup_call tool. NEVER end a turn without invoking the tool or asking a follow-up - never just leave the user hanging.",
     "interfaces": ["phone"]
-  },
-  {
-    "rule": "Markdown formatting is supported. You can use lists, headers, bold, and code blocks where appropriate.",
-    "interfaces": ["general"]
   }
 ]

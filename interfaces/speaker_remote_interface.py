@@ -130,6 +130,11 @@ class ClientSession:
     # ── Core session (resets on CLOS, persists across turns within a session) ─
     session_id: Optional[str] = None
 
+    # ── Session stack (for relay sessions) ───────────────────────────────────
+    # When a relay is initiated, the current session is pushed here and
+    # restored when the relay completes.
+    session_stack: list = field(default_factory=list)
+
     # ── Audio accumulation ────────────────────────────────────────────────────
     frames_np:     np.ndarray      = field(default_factory=lambda: np.array([], dtype=np.float32))
     recording:     bool            = False
@@ -400,6 +405,59 @@ class SpeakerRemoteInterface:
         cs.writer.write(pack_frame(b'CLOS'))
         await cs.writer.drain()
 
+    def push_session(self, endpoint_id: str) -> str | None:
+        """
+        Suspend the current session for an endpoint by pushing it onto the stack.
+        Returns the suspended session_id, or None if no session was active.
+        Called by contact_user when initiating a relay to this endpoint.
+        """
+        cs = self.get_endpoint(endpoint_id)
+        if cs is None or cs.session_id is None:
+            return None
+        cs.session_stack.append(cs.session_id)
+        suspended = cs.session_id
+        cs.session_id = None
+        log.info("Session pushed to stack",
+                 extra={'data': f"endpoint={endpoint_id} session={suspended}"})
+        return suspended
+
+    def pop_session(self, endpoint_id: str, context_note: str = None) -> str | None:
+        """
+        Resume the most recently suspended session for an endpoint.
+        Optionally injects a context note into the resumed session history.
+        Returns the resumed session_id, or None if stack was empty.
+        Called by reply_to_caller when the relay completes.
+        """
+        cs = self.get_endpoint(endpoint_id)
+        if cs is None or not cs.session_stack:
+            return None
+        session_id    = cs.session_stack.pop()
+        cs.session_id = session_id
+
+        if context_note:
+            session = self.core_processor.get_session(session_id)
+            if session:
+                from core.session_state import get_history
+                get_history(session).append({
+                    'role':    'system',
+                    'content': context_note,
+                })
+
+        log.info("Session popped from stack",
+                 extra={'data': f"endpoint={endpoint_id} session={session_id}"})
+        return session_id
+
+    def set_relay_session(self, endpoint_id: str, session_id: str):
+        """
+        Set a relay session as the active session for an endpoint.
+        Called by contact_user after creating the relay session.
+        """
+        cs = self.get_endpoint(endpoint_id)
+        if cs:
+            cs.session_id = session_id
+            log.info("Relay session set active",
+                     extra={'data': f"endpoint={endpoint_id} session={session_id}"})
+
     # ── LLM dispatch ─────────────────────────────────────────────────────────
 
     async def _contact_core(self, cs: ClientSession, input_text: str, silent_start: bool = False) -> bool:
@@ -413,6 +471,7 @@ class SpeakerRemoteInterface:
             core_session['interface']        = InterfaceMode.SPEAKER.value
             if cs._identified_speaker:
                 core_session['speaker'] = cs._identified_speaker
+
             if not silent_start:
                 await self._speak_text(cs, "Working")
                 # Satellite moved to SPEAKING during "Working" — send THNK
@@ -528,6 +587,23 @@ class SpeakerRemoteInterface:
         cs._identified_speaker = cs._speaker_id.result(timeout=1.0)
         if cs._identified_speaker:
             log.info("Speaker identified", extra={'data': f"{cs.endpoint_id} {cs._identified_speaker}"})
+            # Update presence registry with confirmed voice ID
+            if hasattr(self.core_processor, 'presence_registry'):
+                user_id = self.core_processor.presence_registry.find_user_by_contact(
+                    'speaker', 'endpoint_id', cs.endpoint_id
+                )
+                if not user_id:
+                    # Try matching by friendly name from speaker profiles
+                    from core.presence_registry import PresenceRegistry
+                    for uid in self.core_processor.presence_registry.all_users():
+                        name = self.core_processor.presence_registry.get_friendly_name(uid)
+                        if name.lower() == cs._identified_speaker.lower():
+                            user_id = uid
+                            break
+                if user_id:
+                    self.core_processor.presence_registry.set_last_seen(
+                        user_id, cs.endpoint_id, confidence='voice_confirmed'
+                    )
 
         await self._contact_core(cs, text)
 
@@ -633,6 +709,25 @@ class SpeakerRemoteInterface:
                 await writer.wait_closed()
             except Exception:
                 pass
+
+    def send_relay_message(self, endpoint_id: str, message: str):
+        """
+        Deliver a relay opening message to an endpoint by initiating a call.
+        Called by contact_user generically across interfaces.
+        """
+        loop = getattr(self, '_loop', None)
+        if loop is None:
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                log.error("No event loop available for send_relay_message")
+                return
+        import asyncio
+        asyncio.run_coroutine_threadsafe(
+            self.initiate_call(endpoint_id, message),
+            loop,
+        )
 
     # ── Server entry point ────────────────────────────────────────────────────
 

@@ -30,7 +30,8 @@ class TelegramInterface:
         self.token          = config.telegram.token
         self.base_url       = f"https://api.telegram.org/bot{self.token}"
         self._offset        = 0
-        self._sessions      = {}   # chat_id → session_id
+        self._sessions      = {}   # chat_id → session_id (current active session)
+        self._session_stack = {}   # chat_id → [session_id, ...] (suspended sessions)
         self._last_active   = {}   # chat_id → loop timestamp of last message
         self._last_typing   = {}   # chat_id → loop timestamp of last typing indicator
         self._chat_locks: dict = {}   # chat_id → asyncio.Lock
@@ -83,7 +84,7 @@ class TelegramInterface:
             idle = now - self._last_active.get(chat_id, 0)
             if idle > self.SESSION_TTL:
                 log.info("Session expired", extra={'data': f"chat_id={chat_id} idle={idle/60:.1f}min"})
-                await self._reset_session(chat_id)
+                await self._expire_session(chat_id)
 
         self._last_active[chat_id] = now
 
@@ -97,16 +98,16 @@ class TelegramInterface:
             )
             core_session = self.core_processor.create_session(session_id)
             if core_session is not None:
-                core_session[KEY_INTERFACE_MODE]     = InterfaceMode.GENERAL
-                core_session['endpoint_id']          = chat_id
-                core_session['interface']            = InterfaceMode.GENERAL.value
+                core_session[KEY_INTERFACE_MODE]    = InterfaceMode.GENERAL
+                core_session['endpoint_id']         = chat_id
+                core_session['interface']           = InterfaceMode.GENERAL.value
                 loop = asyncio.get_event_loop()
                 core_session['immediate_send'] = lambda text, _loop=loop, _chat_id=chat_id: \
                     asyncio.run_coroutine_threadsafe(
                         self.send_message(_chat_id, text),
                         _loop,
                     )
-                core_session['immediate_send_only']  = True
+                core_session['immediate_send_only'] = True
                 if friendly_name:
                     core_session['speaker'] = friendly_name
             self._sessions[chat_id] = session_id
@@ -131,7 +132,7 @@ class TelegramInterface:
             # Clears conversation history and sends a visual separator so the user
             # knows the bot has forgotten the previous conversation.
             if text.lower() in ("/reset", "/start"):
-                await self._reset_session(chat_id)
+                await self._expire_session(chat_id)
                 await self.send_message(
                     chat_id,
                     "——————————————\n"
@@ -244,16 +245,123 @@ class TelegramInterface:
 
     # ── Session management ────────────────────────────────────────────────────
 
+    async def _expire_session(self, chat_id: str):
+        """
+        Expire a session due to inactivity. If it's a relay session,
+        notify both Dean (relay target) and Jesse (caller) before closing.
+        """
+        session_id = self._sessions.get(chat_id)
+        if session_id:
+            session = self.core_processor.get_session(session_id)
+            if session and session.get('relay_caller_session_id'):
+                # This is a relay session that timed out
+                log.info("Relay session expired",
+                         extra={'data': f"chat_id={chat_id} session={session_id}"})
+
+                # Tell Dean it expired
+                await self.send_message(chat_id,
+                    "The request has timed out — no reply needed.")
+
+                # Tell Jesse that Dean didn't respond
+                caller_session_id = session.get('relay_caller_session_id')
+                target_user       = session.get('relay_target_user', 'unknown')
+                question          = session.get('relay_question', '')
+                target_friendly   = target_user
+
+                if hasattr(self.core_processor, 'presence_registry'):
+                    target_friendly = self.core_processor.presence_registry\
+                        .get_friendly_name(target_user)
+                    self.core_processor.presence_registry.mark_unavailable(
+                        target_user, 'telegram', ttl=300
+                    )
+
+                if caller_session_id:
+                    import threading
+                    thread = threading.Thread(
+                        target  = self.core_processor.process_input,
+                        kwargs  = {
+                            'input_text': (
+                                f"[RELAY TIMEOUT]\n"
+                                f"{target_friendly} did not respond to your question "
+                                f"'{question}' in time. The relay has been cancelled. "
+                                f"Let the user know naturally."
+                            ),
+                            'session_id': caller_session_id,
+                        },
+                        daemon = True,
+                    )
+                    thread.start()
+
+                # Restore any suspended session for Dean
+                self.pop_session(chat_id)
+
+        await self._reset_session(chat_id)
+
     async def _reset_session(self, chat_id: str):
         """
         Clear the LLM session and local state for a chat_id.
-        Called on /reset, /start, or session timeout.
+        Called on /reset, /start, or after _expire_session.
         """
         session_id = self._sessions.pop(chat_id, None)
         if session_id:
             self.core_processor.sessions.pop(session_id, None)
+        self._session_stack.pop(chat_id, None)
         self._last_active.pop(chat_id, None)
         self._last_typing.pop(chat_id, None)
+
+    def push_session(self, chat_id: str) -> str | None:
+        """
+        Suspend the current session for chat_id by pushing it onto the stack.
+        Returns the suspended session_id, or None if no session was active.
+        Called by contact_user when initiating a relay to this user.
+        """
+        session_id = self._sessions.pop(chat_id, None)
+        if session_id:
+            self._session_stack.setdefault(chat_id, []).append(session_id)
+            log.info("Session pushed to stack",
+                     extra={'data': f"chat_id={chat_id} session={session_id}"})
+        return session_id
+
+    def pop_session(self, chat_id: str, context_note: str = None) -> str | None:
+        """
+        Resume the most recently suspended session for chat_id.
+        Optionally injects a context note into the resumed session's history
+        so Supernova knows what happened while it was paused.
+        Returns the resumed session_id, or None if stack was empty.
+        Called by reply_to_caller when the relay completes.
+        """
+        stack = self._session_stack.get(chat_id, [])
+        if not stack:
+            return None
+        session_id = stack.pop()
+        if not stack:
+            self._session_stack.pop(chat_id, None)
+        self._sessions[chat_id] = session_id
+
+        # Inject context note into resumed session history
+        if context_note:
+            session = self.core_processor.get_session(session_id)
+            if session:
+                from core.session_state import get_history
+                get_history(session).append({
+                    'role':    'system',
+                    'content': context_note,
+                })
+
+        log.info("Session popped from stack",
+                 extra={'data': f"chat_id={chat_id} session={session_id}"})
+        return session_id
+
+    def set_relay_session(self, chat_id: str, session_id: str):
+        """
+        Set a relay session as the active session for a chat_id.
+        Called by contact_user after creating the relay session.
+        """
+        import time
+        self._sessions[chat_id]    = session_id
+        self._last_active[chat_id] = time.monotonic()
+        log.info("Relay session set active",
+                 extra={'data': f"chat_id={chat_id} session={session_id}"})
 
     def _get_lock(self, chat_id: str) -> asyncio.Lock:
         if chat_id not in self._chat_locks:
@@ -298,3 +406,23 @@ class TelegramInterface:
                     log.error("Send error", extra={'data': await r.text()})
         except Exception as e:
             log.error("Send error", exc_info=True)
+
+    def send_relay_message(self, endpoint_id: str, message: str):
+        """
+        Deliver a relay opening message to a user on this interface.
+        endpoint_id for Telegram is the chat_id.
+        Called by contact_user generically across interfaces.
+        """
+        loop = getattr(self, '_loop', None)
+        if loop is None:
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                log.error("No event loop available for send_relay_message")
+                return
+        import asyncio
+        asyncio.run_coroutine_threadsafe(
+            self.send_message(endpoint_id, message),
+            loop,
+        )

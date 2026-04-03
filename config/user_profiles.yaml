@@ -1,0 +1,38 @@
+# config/user_profiles.yaml — Known users and contact preferences.
+#
+# This file defines WHO the users are and HOW to prioritise reaching them.
+# The actual contact details (chat_id, endpoint_id, email address) live in
+# their respective interface/tool config files:
+#   - Telegram chat_id  → config/telegram_interface.yaml (endpoints block)
+#   - Speaker endpoint  → discovered from HELO frame + speaker_profiles.json
+#   - Email address     → config/send_email.yaml (contacts block)
+#
+# contact_priority: order to try interfaces when no preference is specified.
+#   First active interface wins, then first configured interface.
+#
+# retry_policy:
+#   max_attempts:        attempts per interface before giving up or falling back
+#   attempt_gap_seconds: wait between retries on same interface
+#   fallback_on_failure: move to next in contact_priority if interface fails
+#   silence_timeout:     seconds to wait for WAKE after CALL sent to speaker
+#   session_timeout:     seconds to wait for reply after relay message spoken
+
+jesse:
+  friendly_name: "Jesse"
+  contact_priority: [telegram, speaker, email]
+  retry_policy:
+    max_attempts: 2
+    attempt_gap_seconds: 30
+    fallback_on_failure: true
+    silence_timeout: 15
+    session_timeout: 30
+
+dean:
+  friendly_name: "Dean"
+  contact_priority: [telegram, speaker, email]
+  retry_policy:
+    max_attempts: 2
+    attempt_gap_seconds: 30
+    fallback_on_failure: true
+    silence_timeout: 15
+    session_timeout: 30

@@ -52,10 +52,11 @@ class AgentMode:
     """
     name:            str
     description:     str
-    precontext:      str          # relative path to .md personality file
+    precontext:      str
     max_tool_loops:  int  = 5
     is_default:      bool = False
-    trigger_phrases: str  = ""    # hint for LLM — injected via provide_context
+    hidden:          bool = False    # if True, excluded from switch_agent_mode listings
+    trigger_phrases: str  = ""
 
     def __str__(self) -> str:
         """Return the mode name — useful for system message injection."""
@@ -95,5 +96,6 @@ class AgentMode:
             precontext      = data.get('precontext', ''),
             max_tool_loops  = int(data.get('max_tool_loops', 5)),
             is_default      = bool(data.get('is_default', False)),
+            hidden          = bool(data.get('hidden', False)),
             trigger_phrases = data.get('trigger_phrases', ''),
         )

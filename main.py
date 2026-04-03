@@ -46,6 +46,9 @@ if __name__ == "__main__":
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
+    # Store loop on core so tools can post coroutines onto it from threads
+    core_processor._loop = loop
+
     # ── Asterisk interface ────────────────────────────────────────────────────
     if config.interfaces.asterisk:
         asterisk = AsteriskInterface(
@@ -86,8 +89,8 @@ if __name__ == "__main__":
         # Store loop reference so the scheduler can post initiate_call() onto it
         vr._loop = loop
 
-        # Store vr on core so tools can reach it if needed
-        core_processor.speaker_remote = vr
+        # Register interface so tools can reach it generically
+        core_processor.register_interface('speaker', vr)
 
         # Register the voice call handler for scheduled events
         def _voice_call_handler(event):
@@ -110,6 +113,34 @@ if __name__ == "__main__":
             port=config.server.remote_voice_port,
         ))
         log.info("Speaker remote starting", extra={'data': f"{config.server.remote_voice_host}:{config.server.remote_voice_port}"})
+
+    # ── Telegram IM interface ─────────────────────────────────────────────────
+    if config.telegram.enabled:
+        telegram = TelegramInterface(
+            core_processor,
+            config=config,
+        )
+        loop.create_task(telegram.run())
+
+        # Register interface so tools can reach it generically
+        core_processor.register_interface('telegram', telegram)
+        telegram._loop = loop
+
+        def _telegram_handler(event):
+            chat_id      = event.get('endpoint_id', '')
+            announcement = event.get('announcement', '')
+            if not chat_id:
+                return
+            asyncio.run_coroutine_threadsafe(
+                telegram.send_message(chat_id, announcement),
+                loop,
+            )
+
+        core_processor.register_event_handler('telegram', _telegram_handler)
+        core_processor.register_presence_check('telegram',
+            lambda endpoint_id: True
+        )
+        log.info("Telegram interface starting")
 
     # ── Web / Gradio interface ────────────────────────────────────────────────
     if config.interfaces.web:

@@ -53,6 +53,7 @@ from core.session_state import (
 )
 from core.event_store import EventStore
 from core.scheduler import Scheduler
+from core.presence_registry import PresenceRegistry
 from core.logger import get_logger
 
 log = get_logger('core')
@@ -102,9 +103,14 @@ class CoreProcessor:
         self.scheduler   = Scheduler(self.event_store, self._on_event_fired)
         self.scheduler.start()
 
+        # ── Presence registry ─────────────────────────────────────────────────
+        # Tracks known users, active sessions, and contact resolution.
+        self.presence_registry = PresenceRegistry(config_dir)
+
         # ── Interface references ───────────────────────────────────────────────
-        # Set by main.py after interfaces are created.
-        self.voice_remote = None
+        # Interfaces register themselves by name via register_interface().
+        # Tools use get_interface() to reach them generically.
+        self._interfaces: dict = {}
 
         self._event_handlers  = {}
         self._presence_checks = {}
@@ -160,6 +166,32 @@ class CoreProcessor:
         if event_type:
             return self.scheduler.list_type(event_type)
         return self.event_store.all()
+
+    def register_interface(self, name: str, interface):
+        """
+        Register an interface instance by name so tools can reach it generically.
+        Called by main.py after each interface is created.
+
+        Usage (main.py):
+            core_processor.register_interface('speaker', vr)
+            core_processor.register_interface('telegram', telegram)
+
+        Usage (tools):
+            iface = core.get_interface('telegram')
+        """
+        self._interfaces[name] = interface
+        log.info("Interface registered", extra={'data': f"name={name!r}"})
+
+    def get_interface(self, name: str):
+        """
+        Return a registered interface by name, or None if not registered.
+
+        Usage:
+            iface = core.get_interface('telegram')
+            if iface:
+                iface.send_relay_message(endpoint_id, message)
+        """
+        return self._interfaces.get(name)
 
     def register_event_handler(self, callback_type: str, handler):
         """
