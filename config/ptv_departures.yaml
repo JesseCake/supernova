@@ -7,3 +7,5 @@ direction: "citybound"
 gtfs_zip_folder: "2"
 walk_minutes: 7
 # cache file is now auto set to live in tools path
+
+agent_modes: [general]

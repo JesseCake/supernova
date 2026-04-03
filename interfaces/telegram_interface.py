@@ -2,7 +2,8 @@ import asyncio
 import aiohttp
 import uuid
 import threading
-from core.precontext import VoiceMode
+from core.interface_mode import InterfaceMode
+from core.session_state import KEY_INTERFACE_MODE, get_response_queue
 
 from core.logger import get_logger
 log = get_logger('telegram')
@@ -94,18 +95,18 @@ class TelegramInterface:
                  if ep.chat_id == chat_id),
                 None
             )
-            self.core_processor.create_session(session_id)
-            core_session = self.core_processor.get_session(session_id)
+            core_session = self.core_processor.create_session(session_id)
             if core_session is not None:
-                core_session['endpoint_id'] = chat_id
-                core_session['interface']   = 'telegram'
+                core_session[KEY_INTERFACE_MODE]     = InterfaceMode.GENERAL
+                core_session['endpoint_id']          = chat_id
+                core_session['interface']            = InterfaceMode.GENERAL.value
                 loop = asyncio.get_event_loop()
                 core_session['immediate_send'] = lambda text, _loop=loop, _chat_id=chat_id: \
                     asyncio.run_coroutine_threadsafe(
                         self.send_message(_chat_id, text),
                         _loop,
                     )
-                core_session['immediate_send_only'] = True
+                core_session['immediate_send_only']  = True
                 if friendly_name:
                     core_session['speaker'] = friendly_name
             self._sessions[chat_id] = session_id
@@ -154,7 +155,6 @@ class TelegramInterface:
                 kwargs={
                     "input_text": text,
                     "session_id": session_id,
-                    "mode":       VoiceMode.PLAIN,
                 },
                 daemon=True,
             )
@@ -165,7 +165,7 @@ class TelegramInterface:
             core_session = self.core_processor.get_session(session_id)
             response     = []
             while True:
-                chunk = await asyncio.to_thread(core_session['response_queue'].get)
+                chunk = await asyncio.to_thread(get_response_queue(core_session).get)
                 if chunk is None:
                     break
                 response.append(chunk)
@@ -206,7 +206,6 @@ class TelegramInterface:
                 kwargs={
                     "input_text": prompt,
                     "session_id": session_id,
-                    "mode":       VoiceMode.PLAIN,
                     "images":     [image_bytes],
                 },
                 daemon=True,
@@ -216,7 +215,7 @@ class TelegramInterface:
             core_session = self.core_processor.get_session(session_id)
             response     = []
             while True:
-                chunk = await asyncio.to_thread(core_session['response_queue'].get)
+                chunk = await asyncio.to_thread(get_response_queue(core_session).get)
                 if chunk is None:
                     break
                 response.append(chunk)

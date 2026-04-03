@@ -6,3 +6,6 @@ default_location: "Brunswick, VIC, Australia"
 home_coords:
   lat: -37.7746
   lon: 144.9631
+
+# mode restriction:
+agent_modes: [general]

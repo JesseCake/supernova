@@ -1,6 +1,7 @@
 enabled: true
-voice_only: true
 
 # Fallback endpoint if session doesn't have one set.
 # Leave empty to require the session endpoint (recommended).
 default_endpoint: ""
+
+agent_modes: [general]

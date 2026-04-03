@@ -5,12 +5,12 @@ from core.core import CoreProcessor
 # Config
 from core.settings import load_config
 
-# Logger:
+# Logger
 from core.logger import setup_logging, get_logger
 
 # Interfaces
 from interfaces.web_interface import WebInterface
-from interfaces.voice_remote import VoiceRemoteInterface
+from interfaces.speaker_remote_interface import SpeakerRemoteInterface
 from interfaces.asterisk_interface import AsteriskInterface
 from interfaces.telegram_interface import TelegramInterface
 
@@ -19,7 +19,6 @@ from interfaces.telegram_interface import TelegramInterface
 from faster_whisper import WhisperModel
 from whisper_live.vad import VoiceActivityDetector
 from piper import PiperVoice
-
 
 if __name__ == "__main__":
 
@@ -48,7 +47,7 @@ if __name__ == "__main__":
     asyncio.set_event_loop(loop)
 
     # ── Asterisk interface ────────────────────────────────────────────────────
-    if config.asterisk.enabled:
+    if config.interfaces.asterisk:
         asterisk = AsteriskInterface(
             core_processor,
             config,
@@ -65,7 +64,7 @@ if __name__ == "__main__":
             if event.get('missed'):
                 announcement = f"[Missed while offline] {announcement}"
             if not caller_number:
-                log.warning("Asterisk event has no endpoint_id")
+                log.warning("Asterisk call event has no endpoint_id")
                 return
             asyncio.run_coroutine_threadsafe(
                 asterisk.initiate_call(caller_number, announcement),
@@ -76,8 +75,8 @@ if __name__ == "__main__":
         log.info("Asterisk interface starting", extra={'data': f"{config.asterisk.ari_host}:{config.asterisk.ari_port}"})
 
     # ── Voice remote interface ────────────────────────────────────────────────
-    if config.interfaces.voice_remote:
-        vr = VoiceRemoteInterface(
+    if config.interfaces.speaker:
+        vr = SpeakerRemoteInterface(
             core_processor, 
             transcriber=whisper_model, 
             vad=vad,
@@ -88,7 +87,7 @@ if __name__ == "__main__":
         vr._loop = loop
 
         # Store vr on core so tools can reach it if needed
-        core_processor.voice_remote = vr
+        core_processor.speaker_remote = vr
 
         # Register the voice call handler for scheduled events
         def _voice_call_handler(event):
@@ -97,44 +96,20 @@ if __name__ == "__main__":
             if event.get('missed'):
                 announcement = f"[Missed while server was offline] {announcement}"
             if not endpoint_id:
-                log.warning("Voice call event has no endpoint_id", extra={'data': f"label={event.get('label')!r}"})
+                log.warning("Speaker call event has no endpoint_id", extra={'data': f"label={event.get('label')!r}"})
                 return
             asyncio.run_coroutine_threadsafe(
                 vr.initiate_call(endpoint_id, announcement),
                 loop,
             )
 
-        core_processor.register_event_handler('voice_remote', _voice_call_handler)
+        core_processor.register_event_handler('speaker', _voice_call_handler)
 
         loop.create_task(vr.run(
             host=config.server.remote_voice_host,
             port=config.server.remote_voice_port,
         ))
-        log.info("Voice remote starting", extra={'data': f"{config.server.remote_voice_host}:{config.server.remote_voice_port}"})
-
-    # ── Telegram IM interface ─────────────────────────────────────────────────
-    if config.telegram.enabled:
-        telegram = TelegramInterface(
-            core_processor,
-            config=config,
-        )
-        loop.create_task(telegram.run())
-
-        def _telegram_handler(event):
-            chat_id      = event.get('endpoint_id', '')
-            announcement = event.get('announcement', '')
-            if not chat_id:
-                return
-            asyncio.run_coroutine_threadsafe(
-                telegram.send_message(chat_id, announcement),
-                loop,
-            )
-
-        core_processor.register_event_handler('telegram', _telegram_handler)
-        core_processor.register_presence_check('telegram',
-            lambda endpoint_id: True
-        )
-        log.info("Telegram interface starting")
+        log.info("Speaker remote starting", extra={'data': f"{config.server.remote_voice_host}:{config.server.remote_voice_port}"})
 
     # ── Web / Gradio interface ────────────────────────────────────────────────
     if config.interfaces.web:

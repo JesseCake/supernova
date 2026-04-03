@@ -1,5 +1,5 @@
 """
-voice_remote.py — TCP voice interface server (runs on the central server).
+speaker_remote_interface.py — TCP voice interface server (runs on the central server).
 
 Persistent-connection + endpoint registry model
 ─────────────────────────────────────────────────
@@ -51,15 +51,19 @@ import json
 
 from piper import PiperVoice, SynthesisConfig
 
-from core.precontext import VoiceMode
+from core.interface_mode import InterfaceMode
+from core.session_state import (
+    KEY_INTERFACE_MODE, KEY_AGENT_MODE,
+    hangup_requested, clear_hangup,
+    get_response_queue,
+)
 from core.speaker_id import SpeakerIdentifier, load_profiles
 
 from whisper_live.vad import VoiceActivityDetector
 from faster_whisper import WhisperModel
 
-# Logging:
 from core.logger import get_logger
-log = get_logger('voice_remote')
+log = get_logger('speaker_remote')
 
 
 # ── Frame protocol ────────────────────────────────────────────────────────────
@@ -120,8 +124,7 @@ class ClientSession:
     addr:   tuple
 
     # ── Endpoint identity (set on HELO) ───────────────────────────────────────
-    # None until the first HELO frame is received. Used as the registry key.
-    endpoint_id: Optional[str] = None
+    endpoint_id:   Optional[str] = None
     friendly_name: Optional[str] = None
 
     # ── Core session (resets on CLOS, persists across turns within a session) ─
@@ -136,8 +139,8 @@ class ClientSession:
     rx_paused: bool = True   # starts True; opened after HELO greeting
 
     # ── Barge-in ──────────────────────────────────────────────────────────────
-    interrupt_event: asyncio.Event        = field(default_factory=asyncio.Event)
-    _last_int0_ts:   float                = 0.0
+    interrupt_event: asyncio.Event          = field(default_factory=asyncio.Event)
+    _last_int0_ts:   float                  = 0.0
     _speak_task:     Optional[asyncio.Task] = None
 
     # ── Speaker identification ────────────────────────────────────────────────
@@ -167,41 +170,36 @@ class ClientSession:
 
 # ── Main server class ─────────────────────────────────────────────────────────
 
-class VoiceRemoteInterface:
+class SpeakerRemoteInterface:
     """
     Multi-connection TCP voice server with persistent connections and an
     endpoint registry.
 
     Public API for server-initiated interactions:
-        await vr.initiate_call(endpoint_id, announcement="")
-        vr.list_endpoints() -> list[str]
-        vr.endpoint_count() -> int
+        await sri.initiate_call(endpoint_id, announcement="")
+        sri.list_endpoints() -> list[str]
+        sri.endpoint_count() -> int
     """
 
     def __init__(
         self,
         core_processor,
-        listening_rate:          int = 16000,
-        transcriber              = None,
-        vad                      = None,
-        piper_voice              = None,
-        whisper_model_size:      str = 'base.en',
-        piper_max_concurrent:    int = 1,
-        whisper_max_concurrent:  int = 1,
+        listening_rate:         int = 16000,
+        transcriber             = None,
+        vad                     = None,
+        piper_voice             = None,
+        whisper_model_size:     str = 'base.en',
+        piper_max_concurrent:   int = 1,
+        whisper_max_concurrent: int = 1,
     ):
         self.core_processor = core_processor
         self.listening_rate = listening_rate
 
         # ── Endpoint registry ─────────────────────────────────────────────────
-        # Maps endpoint_id → ClientSession for all currently connected satellites.
-        # Protected by _registry_lock for thread-safe reads from non-async code.
-        self._endpoints: Dict[str, ClientSession] = {}
-        self._registry_lock = threading.Lock()
+        self._endpoints:     Dict[str, ClientSession] = {}
+        self._registry_lock: threading.Lock           = threading.Lock()
 
         # ── Shared config ─────────────────────────────────────────────────────
-        # Store VAD config for per-connection instantiation.
-        # We don't share a single VAD instance — it's stateful — but we use
-        # the passed-in instance to copy threshold/frame_rate settings from.
         self._vad_threshold  = vad.threshold  if vad else 0.5
         self._vad_frame_rate = vad.frame_rate if vad else listening_rate
         self.vad_timeout     = 0.7
@@ -289,19 +287,8 @@ class VoiceRemoteInterface:
         Push a CALL frame to a connected satellite to start a server-initiated
         session — without the user needing to say the wake word.
 
-        Use cases:
-          - Announcements: "Dinner is ready"
-          - Alerts: "Your timer has gone off"
-          - Proactive interactions: "You have a meeting in 10 minutes"
-          - Any server-side event that should speak to the user
-
-        The satellite treats CALL the same as a locally detected wake word: it
-        sends WAKE back, and the normal session flow begins. If announcement is
-        non-empty the satellite can optionally display or pre-populate it
-        (currently just logged; future work could inject it as the opening line).
-
-        Returns True if the CALL was sent, False if the endpoint is not connected
-        or is currently in an active session (rx_paused = True means it's busy).
+        Returns True if the CALL was sent, False if endpoint is not connected
+        or is currently busy.
         """
         cs = self.get_endpoint(endpoint_id)
         if cs is None:
@@ -388,12 +375,7 @@ class VoiceRemoteInterface:
     # ── Channel lifecycle ─────────────────────────────────────────────────────
 
     async def _open_channel(self, cs: ClientSession):
-        """
-        Greet the satellite and send RDY0.
-
-        Called both on HELO (first connect) and on WAKE (subsequent sessions
-        on the same persistent connection after a previous CLOS).
-        """
+        """Greet the satellite and send RDY0."""
         cs.rx_paused = True
         await self._speak_text(cs, "I'm here")
         cs.writer.write(pack_frame(b'RDY0'))
@@ -404,12 +386,8 @@ class VoiceRemoteInterface:
         """
         Server-initiated call path — no greeting, no mic open.
         Goes straight to the LLM with the announcement as the opening turn.
-        The LLM speaks the announcement naturally, then either closes the
-        channel (if the announcement text says to) or sends RDY0 to open
-        the mic for a follow-up conversation.
         """
         cs.rx_paused = True
-        # No "I'm here", no RDY0 — jump straight to LLM
         await self._contact_core(cs, announcement, silent_start=True)
 
     async def _close_channel(self, cs: ClientSession):
@@ -428,15 +406,14 @@ class VoiceRemoteInterface:
         """Send transcript to LLM, stream TTS back. Returns True if session should close."""
         if cs.session_id is None:
             cs.session_id = str(uuid.uuid4())
-            self.core_processor.create_session(cs.session_id)
-            core_session = self.core_processor.get_session(cs.session_id)
-            if core_session is not None:
-                core_session['endpoint_id'] = cs.endpoint_id
-                core_session['interface']   = 'voice_remote'
-            if core_session is not None and cs._identified_speaker:
+            core_session  = self.core_processor.create_session(cs.session_id)
+            # Set interface mode and identity
+            core_session[KEY_INTERFACE_MODE] = InterfaceMode.SPEAKER
+            core_session['endpoint_id']      = cs.endpoint_id
+            core_session['interface']        = InterfaceMode.SPEAKER.value
+            if cs._identified_speaker:
                 core_session['speaker'] = cs._identified_speaker
             if not silent_start:
-                # so that we don't say "working" with inbound calls to endpoints:
                 await self._speak_text(cs, "Working")
                 # Satellite moved to SPEAKING during "Working" — send THNK
                 # so it transitions back to THINKING while the LLM generates.
@@ -446,7 +423,7 @@ class VoiceRemoteInterface:
         log.info("Sending to core", extra={'data': f"{cs.endpoint_id} {input_text!r}"})
         thread = threading.Thread(
             target=self.core_processor.process_input,
-            kwargs={"input_text": input_text, "session_id": cs.session_id, "mode": VoiceMode.SPEAKER},
+            kwargs={"input_text": input_text, "session_id": cs.session_id},
             daemon=True,
         )
         thread.start()
@@ -456,7 +433,7 @@ class VoiceRemoteInterface:
         cs.rx_paused = True
 
         while True:
-            chunk = await asyncio.to_thread(core_session['response_queue'].get)
+            chunk = await asyncio.to_thread(get_response_queue(core_session).get)
             if chunk is None:
                 break
             buffer += chunk
@@ -475,9 +452,10 @@ class VoiceRemoteInterface:
         if buffer.strip():
             await self._speak_text(cs, buffer.strip())
 
-        close = core_session['close_voice_channel'].is_set()
+        # Check if hangup was requested via tool
+        close = hangup_requested(core_session)
         if close:
-            core_session['close_voice_channel'].clear()
+            clear_hangup(core_session)
             await self._close_channel(cs)
         else:
             cs.rx_paused = False
@@ -510,7 +488,7 @@ class VoiceRemoteInterface:
             os.makedirs(record_dir, exist_ok=True)
             filename = os.path.join(
                 record_dir,
-                f"remote_{cs.endpoint_id or cs.addr[0]}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.wav"
+                f"speaker_{cs.endpoint_id or cs.addr[0]}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.wav"
             )
             with wave.open(filename, 'wb') as wf:
                 wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(self.listening_rate)
@@ -558,17 +536,12 @@ class VoiceRemoteInterface:
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """
         Coroutine for one persistent satellite connection.
-
-        Handles the full connection lifetime:
-          - Waits for HELO to get endpoint_id and register in the registry.
-          - Dispatches all subsequent frames (AUD0, WAKE, INT0, STOP).
-          - Multiple WAKE/CLOS cycles are handled on the same connection.
-          - Unregisters on disconnect.
+        Handles the full connection lifetime including multiple WAKE/CLOS cycles.
         """
         addr = writer.get_extra_info('peername')
         log.info("Satellite connected", extra={'data': str(addr)})
 
-        cs             = ClientSession(reader=reader, writer=writer, addr=addr)
+        cs              = ClientSession(reader=reader, writer=writer, addr=addr)
         cs.vad_detector = VoiceActivityDetector(threshold=self._vad_threshold, frame_rate=self._vad_frame_rate)
         cs._speaker_id  = SpeakerIdentifier(self._speaker_profiles)
 
@@ -579,11 +552,10 @@ class VoiceRemoteInterface:
                 # ── HELO: endpoint registration ───────────────────────────────
                 if ftype == b'HELO':
                     try:
-                        helo           = json.loads(payload.decode("utf-8", errors="replace"))
-                        endpoint_id    = helo.get("id", "unknown")
-                        friendly_name  = helo.get("name", endpoint_id)
+                        helo          = json.loads(payload.decode("utf-8", errors="replace"))
+                        endpoint_id   = helo.get("id", "unknown")
+                        friendly_name = helo.get("name", endpoint_id)
                     except Exception:
-                        # Fall back to plain string for backwards compatibility
                         endpoint_id   = payload.decode("utf-8", errors="replace").strip()
                         friendly_name = endpoint_id
                     cs.endpoint_id   = endpoint_id
@@ -595,10 +567,8 @@ class VoiceRemoteInterface:
                 elif ftype in (b'WAKE', b'OPEN'):
                     announcement = payload.decode("utf-8", errors="replace").strip() if payload else ""
                     if announcement:
-                        # Server-initiated call — skip greeting, go straight to LLM
                         await self._open_channel_silent(cs, announcement)
                     else:
-                        # Normal wake word — greet and open mic as usual
                         await self._open_channel(cs)
 
                 # ── AUD0: microphone audio ────────────────────────────────────
@@ -611,32 +581,21 @@ class VoiceRemoteInterface:
                                    .astype(np.float32) / 32768.0)
 
                     vad_result = cs.vad_detector(audio_frame=audio_frame)
-                    
-                    # Debugging for receiving audio frames:
-                    #print(f"[aud0] vad={vad_result} recording={cs.recording} frames={cs.frames_np.size}")
 
                     if vad_result:
                         if not cs.recording:
-                            # Debug checking VAD rising edge
-                            #print(f"[aud0] VAD rising edge — start recording")
                             cs.recording = True
                             cs.clear_interrupt()
                             cs._speaker_id.start(
-                                get_frames=lambda: cs.frames_np,
-                                is_recording=lambda: cs.recording,
+                                get_frames    = lambda: cs.frames_np,
+                                is_recording  = lambda: cs.recording,
                             )
                         cs.last_voice_ts = time.monotonic()
                         cs.add_frames(audio_frame)
 
                     elif cs.recording:
                         silence_s = (time.monotonic() - cs.last_voice_ts) if cs.last_voice_ts else 0
-                        
-                        # Debugging for silence timing before firing:
-                        #print(f"[aud0] silence={silence_s:.2f}s (threshold={self.vad_timeout}s)")
-                        
                         if (cs.last_voice_ts is not None and silence_s > self.vad_timeout):
-                            # Debug vad ending trigger (falling edge)
-                            #print(f"[aud0] VAD timeout — triggering transcription")
                             await self._transcribe_buffer(cs)
                             cs.recording     = False
                             cs.last_voice_ts = None
@@ -662,8 +621,6 @@ class VoiceRemoteInterface:
                         cs.recording     = False
                         cs.last_voice_ts = None
 
-                # Unknown tags silently ignored.
-
         except asyncio.IncompleteReadError:
             pass   # normal disconnect
 
@@ -681,12 +638,12 @@ class VoiceRemoteInterface:
 
     async def run(self, host: str = '0.0.0.0', port: int = 10400):
         """Start the server. Initialises inference pools inside the running loop."""
-        self._piper_pool   = _InferencePool(self._piper_voice_instance,   self._piper_max_concurrent)
+        self._piper_pool   = _InferencePool(self._piper_voice_instance,  self._piper_max_concurrent)
         self._whisper_pool = _InferencePool(self._whisper_instance, self._whisper_max_concurrent)
 
         server = await asyncio.start_server(self._handle_client, host, port)
         addr   = ', '.join(str(sock.getsockname()) for sock in server.sockets)
-        log.info("Listening", extra={'data': f"{addr}"})
+        log.info("Listening", extra={'data': addr})
         async with server:
             await server.serve_forever()
 
@@ -697,5 +654,5 @@ if __name__ == '__main__':
 
     config = AppConfig.load()
     core   = CoreProcessor(config)
-    vr     = VoiceRemoteInterface(core)
-    asyncio.run(vr.run())
+    sri    = SpeakerRemoteInterface(core)
+    asyncio.run(sri.run())

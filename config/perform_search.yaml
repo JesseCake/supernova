@@ -1,3 +1,6 @@
 enabled: true
 
 searxng_url: "http://localhost:8888"
+
+# we will restrict ourselves to these modes:
+agent_modes: [deep_research, general]

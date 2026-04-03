@@ -8,3 +8,5 @@ from_address: "supernova@supernova.supernova"  # change this to whatever you wan
 
 contacts:
   John: "person@example.com"
+
+agent_modes: [general, deep_research]

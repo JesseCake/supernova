@@ -1,20 +1,26 @@
 """
 core.py — Central LLM processing hub for Supernova.
- 
+
 Responsibilities:
   - Owns all active session state (conversation history, response queues, cancel events).
-  - Builds prompts and system messages, loads speaker profiles, injects context.
+  - Builds prompts and system messages, injects context from tools.
   - Calls the Ollama streaming chat API and forwards token chunks to the response_queue
-    so that voice_remote.py can speak them as they arrive (streaming TTS pipeline).
+    so that voice interfaces can speak them as they arrive (streaming TTS pipeline).
   - Detects and executes tool calls inline, loops back for the model's follow-up.
   - Provides cancel_active_response() so voice_remote can interrupt mid-stream on barge-in.
   - Owns the EventStore and Scheduler so tools can persist and fire future events.
   - Provides schedule_event() and schedule_call() as the clean public API for tools.
- 
+
 Threading model:
   core.py runs inside whichever thread calls process_input().
-  interfaces should always call process_input() in a daemon Thread so the asyncio
+  Interfaces should always call process_input() in a daemon Thread so the asyncio
   event loop stays free to stream TTS concurrently.
+
+Mode model:
+  interface_mode — set once at session creation by the interface (SPEAKER/PHONE/GENERAL).
+                   Controls which tools are available and is injected into the system prompt.
+  agent_mode     — can change mid-session via switch_agent_mode tool.
+                   Controls which personality file is loaded and max tool loop iterations.
 """
 
 import json
@@ -29,101 +35,84 @@ from datetime import datetime, timezone, timedelta
 import os
 import uuid
 
-# AppConfig: dataclass / pydantic model parsed from config.yaml — holds ollama host/model,
-# voice model path, debug flags, etc.
 from core.settings import AppConfig
-
-# ToolLoader: scans the tools/ directory and dynamically imports tool modules.
-# Each tool exposes get_definition() (returns the JSON schema shown to the model)
-# and execute() (called when the model requests it).
 from core.tool_loader import ToolLoader
-
-# PrecontextLoader: reads personality/*.md files so personality can be edited without
-# a server restart. VoiceMode controls which system-prompt variant is loaded
-# (PLAIN = text API, SPEAKER = voice interface).
-from core.precontext import PrecontextLoader, VoiceMode
-
-# Voice ID: load_profiles: reads config/speaker_profiles.json and returns
-# {name: {'embedding': ndarray, 'email': str, 'notes': str}}.
-# Used here only to inject the identified speaker's name into the system prompt.
-from core.speaker_id import load_profiles
-
-# Event scheduling: For managing and spinning off event scheduling as needed/called
+from core.precontext import PrecontextLoader
+from core.mode_registry import ModeRegistry
+from core.interface_mode import InterfaceMode
+from core.session_state import (
+    get_interface_mode, get_agent_mode,
+    get_history, set_history, clear_history as ss_clear_history,
+    get_speaker, get_endpoint_id,
+    request_hangup, clear_hangup, hangup_requested,
+    get_response_queue, get_cancel_event, get_immediate_send,
+    is_immediate_send_only, get_ts_start,
+    KEY_HISTORY, KEY_RESPONSE_QUEUE, KEY_RESPONSE_DONE,
+    KEY_CLOSE_CHANNEL, KEY_CANCEL, KEY_OLLAMA_STREAM, KEY_TS_START,
+    KEY_INTERFACE_MODE, KEY_AGENT_MODE,
+)
 from core.event_store import EventStore
 from core.scheduler import Scheduler
-
-# Logging
 from core.logger import get_logger
+
 log = get_logger('core')
 
 
 class CoreProcessor:
     """
     Stateful hub that manages sessions and runs the LLM loop.
- 
+
     One CoreProcessor is created at server startup and shared across all connections.
     Session isolation is achieved via the self.sessions dict, keyed by session_id
     (a UUID assigned per connection by voice_remote.py).
- 
-    Public API for tools:
+
+    Public API for tools (via ToolBase — do not call directly from tools):
         core.schedule_event(...)  — persist + schedule a future event
         core.schedule_call(...)   — convenience wrapper: schedule a voice call
         core.cancel_event(id)     — cancel a scheduled event by id
         core.list_events(type)    — list pending events, optionally by type
-        core.voice_remote         — set by main.py; gives tools access to initiate_call()
     """
+
     def __init__(self, config: AppConfig):
-        # Dict of session_id → session dict. Each session holds its own history,
-        # queue, and events so concurrent sessions don't interfere.
         self.sessions = {}
 
-        # Resolve absolute paths relative to this file so the server can be
-        # launched from any working directory.
-        tools_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../tools')
+        tools_dir  = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../tools')
         config_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../config')
 
         self.config = config
-        self.model = config.ollama.model
+        self.model  = config.ollama.model
 
-        # Synchronous ollama.Client — we use it in streaming mode (stream=True)
-        # but the streaming itself is blocking-iterator-based, so we run it inside
-        # a worker thread (see voice_remote._contact_core).
         self.ollama_client = ollama.Client(host=config.ollama.host)
 
-        # PrecontextLoader caches the parsed .md files; call .get(mode) each turn
-        # so file edits are picked up without a restart.
+        # Agent mode registry — loads config/modes.yaml, hot-reloads on change
+        self.mode_registry = ModeRegistry(config_dir)
+
+        # Personality loader — loads agent mode .md files, hot-reloads on change
         self.precontext_loader = PrecontextLoader(config_dir)
- 
-        # ToolLoader discovers tools at construction time, but tool execution is
-        # lazy (tools are imported the first time they're called).
+
+        # Tool loader — scans tools/, hot-reloads on change
         self.tool_loader = ToolLoader(
-            tools_dir=tools_dir,
-            config_dir=config_dir,
-            app_config=config,
+            tools_dir  = tools_dir,
+            config_dir = config_dir,
+            app_config = config,
         )
 
         # ── Event system ──────────────────────────────────────────────────────
-        # EventStore persists events to config/scheduled_events.json.
-        # Scheduler fires them at the right time and calls _on_event_fired().
-        # Both are started here so they're available to tools immediately.
         self.event_store = EventStore(config_dir)
         self.scheduler   = Scheduler(self.event_store, self._on_event_fired)
         self.scheduler.start()
- 
-        # ── voice_remote reference ─────────────────────────────────────────────
-        # Set by main.py after VoiceRemoteInterface is created, e.g.:
-        #   core_processor.voice_remote = vr
-        # Gives _on_event_fired() access to initiate_call() without importing
-        # voice_remote here (which would create a circular dependency).
+
+        # ── Interface references ───────────────────────────────────────────────
+        # Set by main.py after interfaces are created.
         self.voice_remote = None
 
         self._event_handlers  = {}
         self._presence_checks = {}
 
     # ──────────────────────────────────────────────────────────────────────────
-    # Event scheduling API  (called by tools)
+    # Event scheduling API  (called by tools via ToolBase)
     # ──────────────────────────────────────────────────────────────────────────
- 
+
     def schedule_event(
         self,
         event_type:    str,
@@ -133,28 +122,10 @@ class CoreProcessor:
         announcement:  str,
         extra:         dict = None,
     ) -> str:
-        """
-        Schedule a future event that fires after delay_seconds.
- 
-        Persists to disk so it survives a server reboot. Returns the event id
-        which can be passed to cancel_event() to cancel it before it fires.
- 
-        Args:
-            event_type:    Category string, e.g. 'timer', 'reminder', 'alert'.
-                           Used for filtering in list_events().
-            label:         Human-readable name shown in listings, e.g. 'pasta'.
-            delay_seconds: Seconds from now until the event fires.
-            endpoint_id:   Which registered satellite to call when it fires.
-            announcement:  Text passed as context to the LLM when initiating
-                           the voice call, e.g. "The pasta timer is done.
-                           Announce this naturally."
-            extra:         Optional extra fields stored on the event dict,
-                           e.g. {'duration_str': '5m'} for display in listings.
-        """
+        """Schedule a future event. Returns event_id."""
         due_at = (
             datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
         ).isoformat()
- 
         return self.scheduler.schedule(
             event_type   = event_type,
             label        = label,
@@ -163,7 +134,7 @@ class CoreProcessor:
             announcement = announcement,
             extra        = extra or {},
         )
- 
+
     def schedule_call(
         self,
         endpoint_id:   str,
@@ -171,13 +142,7 @@ class CoreProcessor:
         delay_seconds: float = 0,
         label:         str   = "call",
     ) -> str:
-        """
-        Convenience wrapper: schedule a voice call to an endpoint.
- 
-        For immediate calls (delay_seconds=0) this still goes through the
-        scheduler so it is non-blocking and consistent with deferred calls.
-        Returns the event id.
-        """
+        """Convenience wrapper: schedule a voice call to an endpoint."""
         return self.schedule_event(
             event_type    = 'call',
             label         = label,
@@ -185,67 +150,45 @@ class CoreProcessor:
             endpoint_id   = endpoint_id,
             announcement  = announcement,
         )
- 
+
     def cancel_event(self, event_id: str) -> bool:
         """Cancel a scheduled event by id. Returns True if it existed."""
         return self.scheduler.cancel(event_id)
- 
+
     def list_events(self, event_type: str = None) -> list:
-        """
-        Return pending scheduled events, optionally filtered by type.
-        Used by tools to answer "what timers do I have set?"
-        """
+        """Return pending scheduled events, optionally filtered by type."""
         if event_type:
             return self.scheduler.list_type(event_type)
         return self.event_store.all()
- 
+
     def register_event_handler(self, callback_type: str, handler):
         """
         Register a handler for a given callback_type.
-
         handler signature: handler(event: dict) -> None
         Called from the scheduler thread — must be non-blocking.
-
-        Example:
-            core.register_event_handler('voice_call', my_voice_handler)
-            core.register_event_handler('sms',        my_sms_handler)
         """
         self._event_handlers[callback_type] = handler
         log.info("Event handler registered", extra={'data': f"type={callback_type!r}"})
-
 
     def _on_event_fired(self, event: dict):
         callback_type = event.get('callback_type', 'voice_remote')
         log.info("Event fired", extra={'data': f"id={event.get('id')} label={event.get('label')!r} callback_type={callback_type!r}"})
         handler = self._event_handlers.get(callback_type)
-
         if handler is None:
             log.warning("No handler for event", extra={'data': f"callback_type={callback_type!r} id={event.get('id')}"})
             return
-
         try:
             handler(event)
         except Exception as e:
             log.error("Event handler error", extra={'data': f"{callback_type}: {e}"})
 
     def register_presence_check(self, interface: str, checker):
-        """
-        Register a presence checker for an interface.
-
-        checker signature: checker(endpoint_id: str) -> bool
-        Returns True if the endpoint is currently reachable.
-
-        Example:
-            core.register_presence_check('telegram', lambda endpoint_id: True)
-            core.register_presence_check('voice_remote', lambda eid: vr.get_endpoint(eid) is not None)
-        """
+        """Register a presence checker. checker(endpoint_id: str) -> bool"""
         self._presence_checks[interface] = checker
         log.info("Presence check registered", extra={'data': f"interface={interface!r}"})
 
     def is_endpoint_reachable(self, interface: str, endpoint_id: str) -> bool:
         """Check if an endpoint is currently reachable via its interface."""
-        if not hasattr(self, '_presence_checks'):
-            return False
         checker = self._presence_checks.get(interface)
         if checker is None:
             return False
@@ -254,13 +197,14 @@ class CoreProcessor:
         except Exception as e:
             log.warning("Presence check error", extra={'data': f"{interface}: {e}"})
             return False
+
     # ──────────────────────────────────────────────────────────────────────────
     # Logging
     # ──────────────────────────────────────────────────────────────────────────
 
     def _elapsed(self, session: dict, extra: str = None) -> dict:
         """Build logging kwargs with elapsed time since session start."""
-        start = session.get('_ts_start') if session else None
+        start = get_ts_start(session)
         parts = []
         if start:
             parts.append(f"elapsed={time.perf_counter() - start:.3f}s")
@@ -271,114 +215,87 @@ class CoreProcessor:
     # ──────────────────────────────────────────────────────────────────────────
     # Session management
     # ──────────────────────────────────────────────────────────────────────────
-    def create_session(self, session_id):
+
+    def create_session(self, session_id: str) -> dict:
         """
         Create a fresh isolated state bucket for one conversation.
- 
-        Key fields:
-          conversation_history  - list of {role, content} dicts that grows each turn.
-          response_queue        - Queue[str | None]. Core puts text chunks here;
-                                  voice_remote drains it for TTS.
-                                  None is the end-of-stream sentinel.
-          response_finished     - Event set when process_input() returns. Not currently
-                                  used by the TTS path (queue None sentinel is used
-                                  instead), but useful for testing / future features.
-          close_voice_channel   - Event set by hangup_call tool to signal that the
-                                  session should end after this response.
-          cancel_event          - Event set by cancel_active_response() to make the
-                                  streaming loop break early on barge-in.
-          ollama_stream         - Stored reference to the live ollama stream so that
-                                  cancel_active_response() can call .close() on it.
-          _ts_start             - perf_counter timestamp at session creation, used by
-                                  _log() for elapsed timing.
+
+        Returns the session dict. Interfaces must set interface_mode immediately
+        after creation — it defaults to GENERAL as a safe fallback:
+
+            session = core.create_session(session_id)
+            session[KEY_INTERFACE_MODE] = InterfaceMode.SPEAKER
         """
         log.info("Session created", extra={'data': f"id={session_id}"})
-        self.sessions[session_id] = {
-            'conversation_history':     [],
-            'response_queue':           queue.Queue(),
-            'response_finished':        threading.Event(),
-            'close_voice_channel':      threading.Event(),
-            'cancel_event':             threading.Event(),
-            'ollama_stream':            None,
-            '_ts_start':                time.perf_counter(),
+        session = {
+            KEY_HISTORY:        [],
+            KEY_RESPONSE_QUEUE: queue.Queue(),
+            KEY_RESPONSE_DONE:  threading.Event(),
+            KEY_CLOSE_CHANNEL:  threading.Event(),
+            KEY_CANCEL:         threading.Event(),
+            KEY_OLLAMA_STREAM:  None,
+            KEY_TS_START:       time.perf_counter(),
+            # Modes — interfaces must override interface_mode after creation
+            KEY_INTERFACE_MODE: InterfaceMode.GENERAL,
+            KEY_AGENT_MODE:     self.mode_registry.default(),
         }
+        self.sessions[session_id] = session
+        return session
 
     def _flush_queue(self, q: queue.Queue):
-        """
-        Atomically drain all items from a Queue without blocking.
- 
-        Used by cancel_active_response() to discard any TTS chunks that were
-        already enqueued but haven't been spoken yet, so the speaker stops
-        mid-sentence rather than finishing the old response before hearing the
-        new one.
-        """
+        """Atomically drain all items from a Queue without blocking."""
         try:
             with q.mutex:
                 q.queue.clear()
         except Exception:
             pass
-    
-    def get_session(self, session_id):
+
+    def get_session(self, session_id: str) -> dict | None:
         """Return the session dict for session_id, or None if not found."""
         return self.sessions.get(session_id)
 
-    def clear_history(self, session_id):
-        """Wipe conversation history for a session (used by tools or admin commands)."""
+    def clear_history(self, session_id: str):
+        """Wipe conversation history for a session."""
         session = self.get_session(session_id)
         if session is not None:
-            session['conversation_history'] = []
-           
+            ss_clear_history(session)
+
     # ──────────────────────────────────────────────────────────────────────────
     # Tool result formatting
     # ──────────────────────────────────────────────────────────────────────────
-    def _wrap_tool_result(self, name, payload):
-        """
-        Wrap a tool result in the JSON envelope that send_to_ollama() expects.
- 
-        The 'tool_result' wrapper lets the generic deserialization in send_to_ollama()
-        stay simple regardless of which tool ran.
-        ensure_ascii=False allows Unicode (e.g. names, emoji) through without escaping.
-        """
+
+    def _wrap_tool_result(self, name: str, payload) -> str:
+        """Wrap a tool result in the standard JSON envelope."""
         return json.dumps({
             "tool_result": {
-                "name": name,
-                "content": payload
+                "name":    name,
+                "content": payload,
             }
-        }, ensure_ascii=False)  # added so that non ascii characters pass through properly
+        }, ensure_ascii=False)
 
     # ──────────────────────────────────────────────────────────────────────────
     # Barge-in / cancel
     # ──────────────────────────────────────────────────────────────────────────
+
     def cancel_active_response(self, session_id: str):
         """
         Hard-abort any in-flight LLM streaming and discard queued TTS text.
- 
-        Called by voice_remote when it receives an INT0 (barge-in) frame from
-        the satellite.  Three things must happen in order:
- 
-          1. Set cancel_event so the for-chunk loop in send_to_ollama() breaks
-             at the next iteration (very fast — within one token's latency).
-          2. Flush response_queue so voice_remote's TTS drain loop sees an empty
-             queue immediately and stops speaking.
-          3. Close the underlying HTTP stream on the ollama client so the server-
-             side generation stops and we don't waste GPU cycles.
- 
-        Note: flush happens twice intentionally — once before stream.close()
-        (to stop TTS quickly) and once after (to discard anything that arrived
-        in the tiny race window between the two).
+        Called by voice_remote when it receives an INT0 (barge-in) frame.
+
+        Note: flush happens twice — once before stream.close() for fast TTS
+        stop, and once after to catch tokens in the race window.
         """
         session = self.get_session(session_id)
         if not session:
             return
-        
-        # 1. Signal the streaming loop to stop at the next token boundary.
-        session['cancel_event'].set()
 
-        # 2. Drop any text already queued to speak — first flush (fast path).
-        self._flush_queue(session['response_queue'])
+        cancel = get_cancel_event(session)
+        if cancel:
+            cancel.set()
 
-        # 3. Hard-abort the ollama HTTP stream if one is active.
-        stream = session.get('ollama_stream')
+        self._flush_queue(get_response_queue(session))
+
+        stream = session.get(KEY_OLLAMA_STREAM)
         if stream is not None:
             try:
                 close = getattr(stream, "close", None)
@@ -387,129 +304,108 @@ class CoreProcessor:
             except Exception as e:
                 log.warning("Error closing ollama stream", extra={'data': str(e)})
             finally:
-                session['ollama_stream'] = None
+                session[KEY_OLLAMA_STREAM] = None
 
-        # Second flush — catches any tokens that slipped through the race window
-        # between cancel_event.set() and stream.close().
-        self._flush_queue(session['response_queue'])
-
-        return
+        self._flush_queue(get_response_queue(session))
 
     # ──────────────────────────────────────────────────────────────────────────
     # Main entry point
     # ──────────────────────────────────────────────────────────────────────────
-    def process_input(self, input_text, session_id, mode: VoiceMode = VoiceMode.PLAIN, images: list = None):
+
+    def process_input(self, input_text: str, session_id: str, images: list = None):
         """
         Run the full LLM loop for one user utterance and push output to the
-        session's response_queue for TTS consumption.
- 
-        Called in a daemon thread by voice_remote._contact_core() so the asyncio
-        event loop stays free to drain and speak the queue concurrently.
- 
-        Flow:
-          1. Reset per-turn events (response_finished, cancel_event, close_voice_channel).
-          2. Build the system message (personality + speaker injection + time).
-          3. Build the full prompt (system + history + new user message).
-          4. Enter the tool loop:
-               a. Call send_to_ollama() → streams chunks → response_queue.
-               b. If a tool was called, execute it, append result to history, loop.
-               c. If no tool, break.
-          5. Push None sentinel to response_queue so TTS drain loop terminates.
-          6. Set response_finished event (for any waiters).
+        session's response_queue for consumption by the interface.
+
+        interface_mode and agent_mode are read from the session — interfaces
+        set them at session creation. No mode parameter needed here.
         """
         session = self.get_session(session_id)
         if session is None:
-            # Defensive: create a session on-the-fly if somehow missing.
             log.warning("Session not found, creating on the fly", extra={'data': f"id={session_id}"})
-            self.create_session(session_id)
-            session = self.get_session(session_id)
-            log.info("Session created on the fly", extra={'data': f"id={session_id}"})
+            session = self.create_session(session_id)
 
-        # Reset per-turn events — must happen before any await so the queue
-        # reader in voice_remote doesn't see stale state.
-        session['response_finished'].clear()
-        session['cancel_event'].clear()
+        # Reset per-turn events
+        session[KEY_RESPONSE_DONE].clear()
+        session[KEY_CANCEL].clear()
 
-        # Also clear the channel-close flag for voice turns so a previous
-        # hangup doesn't accidentally re-trigger.
-        if mode != VoiceMode.PLAIN:
-            session['close_voice_channel'].clear()
+        # Clear hangup flag at start of each turn for voice interfaces
+        interface_mode = get_interface_mode(session)
+        if interface_mode.is_voice():
+            clear_hangup(session)
 
-        conversation_history = session['conversation_history']
+        conversation_history = get_history(session)
 
-        # Defensive init — history should always be a list but guard against
-        # accidental None assignment by a tool.
-        if conversation_history is None:
-            conversation_history = []
+        # Build system message fresh each turn
+        system_message = self.create_system_message(session=session)
 
-
-        # Build the system message fresh each turn so personality file edits,
-        # speaker identification updates, and the current time are always current.
-        system_message = self.create_system_message(mode=mode, session=session)
-
-        # Prepend system message to conversation history for this call.
-        # history_section is a list of prior {role, content} dicts;
-        # create_prompt appends the new user message at the end.
         prompt = [system_message] + self.create_prompt(
-            input_text=input_text,
-            conversation_history=conversation_history,
+            input_text           = input_text,
+            conversation_history = conversation_history,
         )
 
-        # Get tool schemas for this mode. Voice mode gets a different subset
-        # of tools vs plain text mode (e.g. hangup_call is voice-only).
-        prompt_tools = self.tool_loader.get_tools(mode=mode)
+        # Get tools filtered by both interface_mode and agent_mode
+        agent_mode   = get_agent_mode(session)
+        prompt_tools = self.tool_loader.get_tools(
+            interface_mode = interface_mode,
+            agent_mode     = agent_mode,
+        )
 
-        # record that we had images so we can add a message that they existed without 
-        # sending them again in history:
+        # max_tool_loops from agent mode config
+        max_loops  = agent_mode.max_tool_loops if agent_mode else 5
+        loop_count = 0
         had_images = bool(images)
 
         # ── Tool loop ─────────────────────────────────────────────────────────
-        # We loop because a tool result must be fed back to the model so it can
-        # generate a natural-language response incorporating the tool's output.
-        # Most turns complete in one iteration (no tool call).
-        while True:
+        while loop_count < max_loops:
             full_response, tool_msg, chat_tool_calls = self.send_to_ollama(
-                prompt_text=prompt, 
-                prompt_tools=prompt_tools, 
-                session=session, 
-                images=images,
-                )
-            images = None  # clear after first turn
+                prompt_text  = prompt,
+                prompt_tools = prompt_tools,
+                session      = session,
+                images       = images,
+            )
+            images     = None
+            loop_count += 1
 
-            # After the LLM has seen the image, annotate the last user message
-            # in history so future turns know an image was part of that turn.
+            # Annotate last user message in history if images were attached
             if had_images:
-                for msg in reversed(conversation_history):
+                for msg in reversed(get_history(session)):
                     if msg.get('role') == 'user':
                         msg['content'] = f"[image was attached] {msg['content']}"
                         break
                 had_images = False
 
-            # Append assistant turn to history (text and/or tool_calls).
+            # Append assistant turn to history
             if full_response or chat_tool_calls:
                 history_entry = {'role': 'assistant', 'content': full_response or ''}
                 if chat_tool_calls:
                     history_entry['tool_calls'] = chat_tool_calls
-                conversation_history.append(history_entry)
+                get_history(session).append(history_entry)
+
+            # Flush pre-tool LLM text immediately for text interfaces
+            # (already handled inside send_to_ollama before tool execution,
+            # but kept here as belt-and-braces for any edge cases)
+            if tool_msg and full_response and full_response.strip():
+                send_fn = get_immediate_send(session)
+                if send_fn:
+                    send_fn(full_response.strip())
+                    self._flush_queue(get_response_queue(session))
 
             if tool_msg:
                 for msg in tool_msg:
-                    conversation_history.append(msg)
+                    get_history(session).append(msg)
                 if any(m.get('tool_name') == 'hangup_call' for m in tool_msg):
                     break
-                prompt = conversation_history
+                prompt = get_history(session)
                 continue
             else:
-                # no tool call
                 break
 
-        # For text interfaces using immediate_send (IM etc), fire the final response directly
-        # rather than leaving it in the queue to be drained.
-        send_fn = session.get('immediate_send')
+        # Fire final response via immediate_send for text interfaces
+        send_fn = get_immediate_send(session)
         if send_fn:
-            # Drain whatever is in the queue now and send it immediately
             final_chunks = []
-            q = session['response_queue']
+            q = get_response_queue(session)
             while not q.empty():
                 try:
                     chunk = q.get_nowait()
@@ -524,170 +420,128 @@ class CoreProcessor:
         log.info("Response finished", **self._elapsed(session))
         self.response_finished(session)
 
+    # ──────────────────────────────────────────────────────────────────────────
+    # Headless (background tasks)
+    # ──────────────────────────────────────────────────────────────────────────
 
-    def run_headless(self, prompt, tools=None):
+    def run_headless(self, prompt: str, endpoint_id: str = '') -> str:
         """
-        Run a prompt through the LLM with no user present.
-        Returns the text response. The LLM can call tools like schedule_call or notify_user, whatever a tool needs assessed.
+        Run a prompt through the LLM with no live user present.
+        Returns the text response. Tools can still fire callbacks/notifications.
         """
         session_id = f"headless_{uuid.uuid4().hex[:8]}"
-        self.create_session(session_id)
-        session = self.get_session(session_id)
-        
-        # Mark as headless so tools know there's no live user
-        session['interface']   = 'headless'
-        session['endpoint_id'] = 'jesse_im'   # where to route any notifications
-        
-        self.process_input(prompt, session_id, mode=VoiceMode.PLAIN)
-        
-        # Drain the response queue
+        session    = self.create_session(session_id)
+
+        session[KEY_INTERFACE_MODE] = InterfaceMode.GENERAL
+        session['interface']        = 'headless'
+        session['endpoint_id']      = endpoint_id
+
+        self.process_input(prompt, session_id)
+
         result = []
+        q = get_response_queue(session)
         while True:
-            chunk = session['response_queue'].get(timeout=30)
-            if chunk is None:
+            try:
+                chunk = q.get(timeout=30)
+                if chunk is None:
+                    break
+                result.append(chunk)
+            except Exception:
                 break
-            result.append(chunk)
-        
+
         self.sessions.pop(session_id, None)
         return "".join(result)
-
 
     # ──────────────────────────────────────────────────────────────────────────
     # Prompt builders
     # ──────────────────────────────────────────────────────────────────────────
 
-    def create_prompt(self, input_text, conversation_history):
-        """
-        Assemble the message list for the first call to Ollama in a turn.
- 
-        Ollama's chat endpoint takes a list of {role, content} dicts.
-        We append the new user message after all prior history.
-        The system message is prepended by process_input() before this list.
- 
-        Returns a list of message dicts (NOT including the system message).
-        """
+    def create_prompt(self, input_text: str, conversation_history: list) -> list:
+        """Assemble the message list for the first Ollama call in a turn."""
+        return conversation_history + [{'role': 'user', 'content': input_text}]
 
-        user_input_section = {
-            'role': 'user',
-            'content': input_text
-        }
-                # Concatenate prior history + new user message.
-        # conversation_history is mutated in-place elsewhere, so we don't copy it —
-        # this is intentional; process_input() owns the lifetime.
-        prompt = conversation_history + [user_input_section]
-        return prompt
-
-    def create_system_message(self, mode: VoiceMode = VoiceMode.PLAIN, session: dict = None):
+    def create_system_message(self, session: dict) -> dict:
         """
         Build the system message dict for this turn.
- 
-        Called fresh every turn so that:
-          - Personality file edits take effect immediately (precontext_loader.get()).
-          - Context injections from tools (e.g. behaviour tool) are current.
-          - The timestamp is accurate.
-          - The identified speaker's name is injected if known.
- 
-        Returns a {role: 'system', content: str} dict ready to prepend to the prompt.
+
+        Assembly order:
+          1. Agent personality (.md file selected by agent_mode)
+          2. Tool context injections (behaviour rules, home automation entities, etc.)
+          3. Interface declaration (LLM knows which interface it's on)
+          4. Current time
+          5. Speaker identification (if known)
         """
-        # Load base personality text. PrecontextLoader handles caching and
-        # file-watching internally.
-        full_pre_context = self.precontext_loader.get(mode)
- 
-        # Let registered tools inject additional context into the system prompt.
-        # This is the "context injection" pattern: tools that maintain state
-        # (e.g. a behaviour/mood tool) can influence the system prompt without
-        # core.py knowing about their internals. Each injection is a plain string.
-        for injection in self.tool_loader.get_context_injections(self):
-            full_pre_context += f"\n\n{injection}"
- 
-        # Inject current time. Doing this in the system prompt means the model
-        # can answer "what time is it?" without a tool call, saving a round-trip.
-        day      = datetime.now().strftime("%A")
-        date     = datetime.now().strftime("%d %B %Y")   # e.g. 01 January 2024
-        time     = datetime.now().strftime("%I:%M%p")    # e.g. 01:00PM
-        timezone = "AEST"
- 
-        full_pre_context += (
-            f"\n\nCurrent Time: (use these for user answers as needed)\n"
-            f" Time: {time}\nDate: {date}\nDay: {day}\n"
-            f"Timezone (if needed): {timezone}\n"
+        interface_mode = get_interface_mode(session)
+        agent_mode     = get_agent_mode(session)
+
+        # 1. Agent personality
+        full_context = self.precontext_loader.get(agent_mode)
+
+        # 2. Tool context injections — session-aware
+        for injection in self.tool_loader.get_context_injections(self, session):
+            full_context += f"\n\n{injection}"
+
+        # 3. Interface declaration
+        full_context += f"\n\n[INTERFACE]\nThe user is interacting via: {interface_mode}"
+
+        # 4. Current time
+        now      = datetime.now()
+        day      = now.strftime("%A")
+        date     = now.strftime("%d %B %Y")
+        time_str = now.strftime("%I:%M%p")
+        full_context += (
+            f"\n\nCurrent Time:\n"
+            f"Time: {time_str}\nDate: {date}\nDay: {day}\nTimezone: AEST\n"
         )
 
-        # Inject the identified speaker's name so the model can address them by name
-        # and tools can use the identity without an extra lookup.
-        if session and session.get('speaker'):
-            speaker     = session['speaker']
-            block       = f"[SPEAKER IDENTIFIED]\nYou are speaking with {speaker}."
-            # Email and notes are loaded but intentionally not injected yet —
-            # they'll be passed directly to tools that need them when that feature lands.
-            full_pre_context += f"\n\n{block}"
+        # 5. Speaker identification
+        speaker = get_speaker(session)
+        if speaker:
+            full_context += f"\n\n[SPEAKER IDENTIFIED]\nYou are speaking with {speaker}."
 
-        return {
-            'role':    'system',
-            'content': full_pre_context,
-        }
-    
+        return {'role': 'system', 'content': full_context}
 
     # ──────────────────────────────────────────────────────────────────────────
     # Ollama streaming
     # ──────────────────────────────────────────────────────────────────────────
 
-    def send_to_ollama(self, prompt_text, prompt_tools, session, images=None):
+    def send_to_ollama(
+        self,
+        prompt_text:  list,
+        prompt_tools: list,
+        session:      dict,
+        images:       list = None,
+    ) -> tuple:
         """
         Stream a chat completion from Ollama and forward tokens to response_queue.
- 
-        This is the hot path — everything that adds latency here is felt by the user
-        as a pause before they hear speech.  Key design decisions:
- 
-          - stream=True: we get tokens as they arrive rather than waiting for the
-            full response, so TTS can start speaking the first sentence while the
-            model is still generating the rest.
-          - cancel_event: checked on every token so barge-in stops generation within
-            one token's latency (~10-50ms for typical models).
-          - tool calls: when the model emits a tool call, we execute it here
-            synchronously (in the same worker thread) and return early so that
-            process_input()'s tool loop can feed the result back.
- 
+
         Returns:
-          (full_response: str,
-           tool_message: dict | None,
-           chat_tool_calls: list | None)
- 
-        full_response is everything the model said (useful for history even if empty).
-        tool_messages is a list of {role:'tool', tool_name:…, content:…} dicts to append,
-        or None if no tools were called.
+            (full_response: str, tool_messages: list | None, chat_tool_calls: list | None)
         """
-        response_queue = session['response_queue']
-        cancel_event = session['cancel_event']
+        response_queue = get_response_queue(session)
+        cancel_event   = get_cancel_event(session)
 
         try:
             response_content = ""
-            tool_calls = []
+            tool_calls       = []
 
-            # attach images to the last user message if provided
+            # Attach images to last user message if provided
             if images:
                 for msg in reversed(prompt_text):
                     if msg.get('role') == 'user':
                         msg['images'] = images
                         break
 
-            # Use the chat endpoint (not raw completion) — it handles tool schemas
-            # natively and the structured response is easier to parse.
-            # keep_alive=-1: keep the model loaded in VRAM indefinitely between calls.
-            # think=False: disable chain-of-thought (faster, less verbose for voice, only possibly to disable in chat mode).
             response_stream = self.ollama_client.chat(
-                model=self.model,
-                messages=prompt_text,
-                stream=True,
-                keep_alive=-1,
-                think=False,
-                tools=prompt_tools,
+                model      = self.model,
+                messages   = prompt_text,
+                stream     = True,
+                keep_alive = -1,
+                think      = False,
+                tools      = prompt_tools,
             )
 
-            # Store the live stream reference so cancel_active_response() can
-            # call .close() on it to abort the HTTP connection immediately.
-            session['ollama_stream'] = response_stream
-
+            session[KEY_OLLAMA_STREAM] = response_stream
             log.debug("Stream started", **self._elapsed(session))
             first_chunk_yet = False
 
@@ -695,60 +549,42 @@ class CoreProcessor:
                 if not first_chunk_yet:
                     log.debug("First chunk received", **self._elapsed(session))
                     first_chunk_yet = True
-                    # Print inline token stream header for console debugging.
                     print(f"[STREAM] ", end="", flush=True)
 
-                # ── Barge-in check ────────────────────────────────────────────
-                # cancel_event is set by cancel_active_response() when INT0 arrives.
-                # We check it on every token so we stop within one token's time.
+                # Barge-in check
                 if cancel_event and cancel_event.is_set():
-                    # add that the user interrupted:
                     log.debug("Response cancelled by user", **self._elapsed(session))
                     response_content += "\n[User interrupted]\n"
                     break
 
-                # ── Text chunk ────────────────────────────────────────────────
                 if chunk.message.content:
                     print(chunk.message.content, end="", flush=True)
                     response_content += chunk.message.content
-                    # Put the raw token on the queue — voice_remote drains this
-                    # and buffers into sentences for TTS.
                     response_queue.put(chunk.message.content)
 
-                # ── Tool call chunk ───────────────────────────────────────────
-                # Tool calls arrive as structured objects, not text tokens.
-                # We collect them and process after the stream ends.
                 if chunk.message.tool_calls:
                     tool_calls.extend(chunk.message.tool_calls)
 
             log.debug("Stream ended", extra={'data': f"chars={len(response_content)} tools={len(tool_calls)}"})
-
-            # Clear the stream reference now that iteration is complete.
-            session['ollama_stream'] = None
+            session[KEY_OLLAMA_STREAM] = None
 
             # ── Tool execution ────────────────────────────────────────────────
             if tool_calls:
-                # Fire any pre-tool LLM text immediately before tools run
-                # so text interfaces see it before tool feedback arrives.
-                # Needed on chunk style message interface like IM where you 
-                # want to see the text before tool responses in order
+                # Fire pre-tool LLM text immediately before tools run
                 if response_content.strip():
-                    send_fn = session.get('immediate_send')
+                    send_fn = get_immediate_send(session)
                     if send_fn:
                         send_fn(response_content.strip())
-                        self._flush_queue(session['response_queue'])
+                        self._flush_queue(response_queue)
 
-                # Now handling multiple tool calls if wanted by agent
-                tool_messages       = []
-                
+                tool_messages = []
                 for tc in tool_calls:
-                    tool_name_detected  = tc.function.name
-                    tool_args           = {
-                        'name': tool_name_detected,
+                    tool_name_detected = tc.function.name
+                    tool_args          = {
+                        'name':       tool_name_detected,
                         'parameters': dict(tc.function.arguments) if tc.function.arguments else {},
                     }
-
-                    log.info("Tool call detected", **self._elapsed(session, f"{tool_name_detected} args={tool_args}"))
+                    log.info("Tool call detected", **self._elapsed(session, tool_name_detected))
 
                     try:
                         fn = self.tool_loader.get_executor(tool_name_detected)
@@ -757,43 +593,41 @@ class CoreProcessor:
                             wrapped = self._wrap_tool_result(tool_name_detected, {"text": "Unknown tool"})
                         else:
                             log.info("Executing tool", **self._elapsed(session, tool_name_detected))
-                            t_tool = time.perf_counter()
+                            t_tool  = time.perf_counter()
                             wrapped = fn(tool_args=tool_args, session=session, core=self)
                             dt_tool = time.perf_counter() - t_tool
                             log.info("Tool finished", **self._elapsed(session, f"{tool_name_detected} dur={dt_tool:.3f}s"))
 
-                        # Format the tool result as an Ollama 'tool' role message.
                         if wrapped is None:
                             tool_message = {
-                                'role': 'tool',
+                                'role':      'tool',
                                 'tool_name': tool_name_detected,
-                                'content': json.dumps({"text": "ok"}),
+                                'content':   json.dumps({"text": "ok"}),
                             }
                         else:
                             tool_message = {
-                                'role': 'tool',
+                                'role':      'tool',
                                 'tool_name': tool_name_detected,
-                                'content': json.dumps(
+                                'content':   json.dumps(
                                     json.loads(wrapped).get('tool_result', {}).get('content', {})
                                 ),
                             }
-
                     except Exception as e:
+                        log.error("Tool execution error", extra={'data': f"{tool_name_detected}: {e}"})
                         tool_message = {
-                            'role': 'tool',
+                            'role':      'tool',
                             'tool_name': tool_name_detected,
-                            'content': json.dumps({"text": f"Tool error: {e}"}),
+                            'content':   json.dumps({"text": f"Tool error: {e}"}),
                         }
 
-                    tool_messages.append(tool_message)   #  collect each result
-                
+                    tool_messages.append(tool_message)
+
                 return response_content, tool_messages, tool_calls
 
-            # No tool call — return the full streamed text for history.
             return response_content, None, None
 
         except Exception as e:
-            session['ollama_stream'] = None
+            session[KEY_OLLAMA_STREAM] = None
             return self._handle_ollama_error(
                 error            = e,
                 session          = session,
@@ -801,24 +635,9 @@ class CoreProcessor:
                 tool_calls       = tool_calls,
                 response_queue   = response_queue,
             )
-    def _send_retry_notice(self, session: dict):
-        """
-        Send a friendly retry message to the user via immediate_send (text
-        interfaces) or response_queue (voice). Called before looping back
-        on a malformed LLM response so the user knows something is happening.
-        """
-        msg     = "Oops, I made a mistake — let me try that again."
-        send_fn = session.get('immediate_send')
-        if send_fn:
-            send_fn(msg)
-        else:
-            session['response_queue'].put(msg)
 
     def _handle_ollama_error(self, error, session, response_content, tool_calls, response_queue) -> tuple:
-        """
-        Classify an Ollama exception and return the appropriate response tuple.
-        Called from send_to_ollama's except block.
-        """
+        """Classify an Ollama exception and return the appropriate response tuple."""
         if isinstance(error, ConnectionError):
             msg = "Cannot connect to Ollama — is it running? Try: ollama serve"
             log.error("Ollama connection error", extra={'data': str(error)})
@@ -846,21 +665,17 @@ class CoreProcessor:
                 response_queue.put(f"\nError: {msg}")
                 return f"Error: {msg}", None, None
 
-            # 500 — usually a malformed tool call or bad JSON from the model.
-            # Loop back so the LLM can retry rather than surfacing a raw error.
             if error.status_code == 500:
                 self._send_retry_notice(session)
                 return self._loop_back_bad_tool(
                     response_content, tool_calls, session,
-                    "Your previous response contained malformed JSON or an invalid tool call. "
-                    "Please try again with a valid response (check the formatting of the tool call carefully)."
+                    "Your previous response contained malformed JSON or an invalid tool call. Please try again."
                 )
 
             msg = f"Ollama server error ({error.status_code})"
             response_queue.put(f"\nError: {msg}")
             return f"Error: {msg}", None, None
 
-        # General exception — malformed tool call or unexpected error
         if tool_calls:
             return self._loop_back_bad_tool(
                 response_content, tool_calls, session,
@@ -876,7 +691,7 @@ class CoreProcessor:
         """Return a tool error that loops back to the LLM so it can retry."""
         tool_name = "unknown"
         try:
-            if tool_calls[0].function:
+            if tool_calls and tool_calls[0].function:
                 tool_name = tool_calls[0].function.name
         except Exception:
             pass
@@ -886,27 +701,26 @@ class CoreProcessor:
             'tool_name': tool_name,
             'content':   json.dumps({"text": message}),
         }
-        return response_content, [tool_message], tool_calls    
+        return response_content, [tool_message], tool_calls
+
+    def _send_retry_notice(self, session: dict):
+        """Send a friendly retry message to the user before looping back."""
+        msg     = "Oops, I made a mistake — let me try that again."
+        send_fn = get_immediate_send(session)
+        if send_fn:
+            send_fn(msg)
+        else:
+            get_response_queue(session).put(msg)
 
     # ──────────────────────────────────────────────────────────────────────────
-    # Queue helpers (called by voice_remote at the end of _contact_core)
+    # Queue helpers
     # ──────────────────────────────────────────────────────────────────────────
 
-    def send_whole_response(self, response_text, session):
-        """
-        Push a complete pre-formed string to the response_queue.
-        Useful for tool-generated canned responses that bypass LLM streaming.
-        """
-        session['response_queue'].put(f"{response_text}")
+    def send_whole_response(self, response_text: str, session: dict):
+        """Push a complete pre-formed string to the response_queue."""
+        get_response_queue(session).put(str(response_text))
 
-    def response_finished(self, session):
-        """
-        Push the None sentinel to the response_queue and set response_finished.
- 
-        None is the end-of-stream signal: voice_remote's drain loop breaks on it.
-        response_finished is set for any other waiters (tests, admin endpoints).
-        """
-        session['response_queue'].put(None)
-        session['response_finished'].set()
-
-
+    def response_finished(self, session: dict):
+        """Push the None sentinel and set response_finished event."""
+        get_response_queue(session).put(None)
+        session[KEY_RESPONSE_DONE].set()

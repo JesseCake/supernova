@@ -1,2 +1,2 @@
 enabled: true
-voice_only: true
+interfaces: [speaker, phone]

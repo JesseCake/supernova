@@ -1,6 +1,6 @@
 # Which interfaces to run:
 interfaces:
-  voice_remote: true
+  speaker: true
   voice_local: false
   web: true
   asterisk: true

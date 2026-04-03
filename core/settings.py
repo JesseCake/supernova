@@ -21,14 +21,11 @@ class ServerConfig:
 
 @dataclass
 class InterfacesConfig:
-    """
-    Legacy interface enable flags — kept for backwards compatibility.
-    New interfaces declare enabled: true/false in their own yaml file.
-    """
-    voice_remote: bool = True
-    voice_local:  bool = False
-    web:          bool = True
-    asterisk:     bool = False
+    """Interface enable flags."""
+    speaker:     bool = True
+    voice_local: bool = False
+    web:         bool = True
+    asterisk:    bool = False
 
 
 @dataclass
@@ -57,7 +54,6 @@ class AsteriskConfig:
     ari_password:       str  = "changeme"
     rtp_local_ip:       str  = "127.0.0.1"
     outbound_caller_id: str  = ""
-    # Populated from endpoints: block in asterisk_interface.yaml
     endpoints: dict = field(default_factory=dict)
 
 
@@ -115,10 +111,11 @@ def load_config(path: str = None) -> AppConfig:
     """
     Load configuration from:
       core_config.yaml          — ollama, server, interfaces, voice, debug, speaker_id
-      asterisk_interface.yaml   — asterisk settings + endpoints (enabled flag lives here)
+      asterisk_interface.yaml   — asterisk settings + endpoints
+      telegram_interface.yaml   — telegram settings + endpoints
 
-    The interfaces block in core_config.yaml is kept for backwards compatibility
-    but each interface's own yaml file takes precedence for its enabled flag.
+    The interfaces block in core_config.yaml controls which interfaces are
+    enabled. Each interface's own yaml file takes precedence for its enabled flag.
     """
     if path is None:
         path = os.path.join(os.path.dirname(__file__), "../config/core_config.yaml")
@@ -129,17 +126,14 @@ def load_config(path: str = None) -> AppConfig:
         raw = yaml.safe_load(f)
 
     # ── Asterisk ──────────────────────────────────────────────────────────────
-    # Load from asterisk_interface.yaml, fall back to asterisk: block in core config
     asterisk_raw = _load_yaml(os.path.join(config_dir, "asterisk_interface.yaml"))
     if not asterisk_raw:
         asterisk_raw = dict(raw.get("asterisk") or {})
 
-    # enabled: can live in the interface yaml or fall back to interfaces block
     asterisk_enabled = asterisk_raw.pop("enabled", None)
     if asterisk_enabled is None:
         asterisk_enabled = bool((raw.get("interfaces") or {}).get("asterisk", False))
 
-    # endpoints: block → dict of AsteriskEndpointConfig
     endpoints_raw = asterisk_raw.pop("endpoints", {}) or {}
     asterisk = _dataclass_from_dict(AsteriskConfig, asterisk_raw)
     asterisk.enabled = asterisk_enabled
@@ -180,13 +174,15 @@ def load_config(path: str = None) -> AppConfig:
     # ── Speaker ID ────────────────────────────────────────────────────────────
     speaker_id = _dataclass_from_dict(SpeakerConfig, raw.get("speaker_id") or {})
 
-    # ── Interfaces (legacy enable flags) ──────────────────────────────────────
+    # ── Interfaces ────────────────────────────────────────────────────────────
     interfaces_raw = dict(raw.get("interfaces") or {})
-    # Sync asterisk enabled flag so existing code using config.interfaces.asterisk still works
+    # Rename voice_remote → speaker in yaml for backwards compat
+    if "voice_remote" in interfaces_raw and "speaker" not in interfaces_raw:
+        interfaces_raw["speaker"] = interfaces_raw.pop("voice_remote")
+    # Sync asterisk and telegram enabled flags
     interfaces_raw["asterisk"] = asterisk_enabled
-    # telegram
     interfaces_raw["telegram"] = telegram_enabled
-    
+
     interfaces = InterfacesConfig(**{
         k: v for k, v in interfaces_raw.items()
         if k in InterfacesConfig.__dataclass_fields__

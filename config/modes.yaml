@@ -1,0 +1,41 @@
+# config/modes.yaml — Agent mode definitions for Supernova.
+#
+# Each mode defines a complete working personality for Supernova.
+# The precontext file is loaded as the base system prompt for that mode.
+# Modes can be switched mid-session via the switch_agent_mode tool.
+#
+# Fields:
+#   description:     Short description shown to the LLM and in listings.
+#   precontext:      Path to the personality .md file (relative to project root).
+#   max_tool_loops:  Maximum tool call iterations per turn. Higher for research/analysis.
+#   is_default:      true for exactly one mode — the starting mode for all sessions.
+#   trigger_phrases: Example phrases that should trigger switching to this mode.
+#                    Injected into system prompt to guide the LLM's mode switching.
+
+general:
+  description:     "Default conversational mode — helpful, warm, and responsive."
+  precontext:      "personality/agent_general.md"
+  max_tool_loops:  5
+  is_default:      true
+  trigger_phrases: "general mode, go back to normal, stop what you're doing, back to normal"
+
+deep_research:
+  description:     "Focused research mode — thorough analysis and web research to answer questions completely."
+  precontext:      "personality/agent_deep_research.md"
+  max_tool_loops:  20
+  is_default:      false
+  trigger_phrases: "research mode, deep research, investigate this, look into this thoroughly, research this for me"
+
+document_analysis:
+  description:     "Document analysis mode — extract and structure information from documents and images."
+  precontext:      "personality/agent_document.md"
+  max_tool_loops:  10
+  is_default:      false
+  trigger_phrases: "analyse this document, document mode, extract data from this, process this document"
+
+transcription:
+  description:     "Transcription mode — distil a conversation or content into a clean formatted document."
+  precontext:      "personality/agent_transcription.md"
+  max_tool_loops:  5
+  is_default:      false
+  trigger_phrases: "transcription mode, transcribe this, write this up, summarise our conversation, document this"

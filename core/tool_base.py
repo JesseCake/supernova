@@ -51,8 +51,7 @@ needs to be imported or loaded manually.
 Example: tools/my_tool.py → config/my_tool.yaml
 
     enabled:          true    # false to disable without deleting the file
-    voice_only:       false   # true = satellite voice only (VoiceMode.SPEAKER)
-    phone_only:       false   # true = phone calls only (VoiceMode.PHONE)
+    interfaces:       []      # [] = all, ['speaker','phone','general'] to restrict
     requires_config:  ""      # skip tool if AppConfig lacks this attribute
     context_priority: 50      # lower = earlier in system prompt (default 50)
 
@@ -64,24 +63,22 @@ Example: tools/my_tool.py → config/my_tool.yaml
 INTERFACE MODE FLAGS — set in the tool's yaml sidecar:
 
     # Available on all interfaces (default)
-    voice_only: false
-    phone_only: false
+    interfaces: []
 
-    # Satellite voice only (VoiceMode.SPEAKER)
-    voice_only: true
+    # Satellite voice + phone only
+    interfaces: [speaker, phone]
 
-    # Phone calls only (VoiceMode.PHONE)
-    phone_only: true
+    # Phone calls only
+    interfaces: [phone]
+
+    # Text interfaces only
+    interfaces: [general]
 
 ────────────────────────────────────────────────────────────────────────────────
 CONTEXT INJECTION — add provide_context to inject into the system prompt:
 
-    def provide_context(core, tool_config):
-        return ToolBase.context_for_modes(
-            core,
-            text  = "[MY TOOL]\\nRelevant context here.",
-            modes = ('plain', 'speaker', 'phone'),  # all modes
-        )
+    def provide_context(core, tool_config, session):
+        return "[MY TOOL]\\nRelevant context here."
 
 ────────────────────────────────────────────────────────────────────────────────
 """
@@ -89,6 +86,12 @@ CONTEXT INJECTION — add provide_context to inject into the system prompt:
 import os
 import logging
 from core.logger import get_logger
+from core.session_state import (
+    get_interface_mode, get_agent_mode,
+    request_hangup, get_history, set_history, clear_history,
+    get_speaker, get_endpoint_id,
+    KEY_INTERFACE_MODE, KEY_AGENT_MODE,
+)
 
 
 class ToolBase:
@@ -231,7 +234,7 @@ class ToolBase:
             )
         """
         resolved_endpoint  = endpoint_id or session.get('endpoint_id', '') or tool_config.get('default_endpoint', '')
-        resolved_interface = interface   or session.get('interface', 'voice_remote')
+        resolved_interface = interface   or get_interface_mode(session).value
 
         return core.schedule_event(
             event_type    = event_type,
@@ -278,19 +281,19 @@ class ToolBase:
             if name:
                 log.info(f"Speaking with {name}")
         """
-        return session.get('speaker')
+        return get_speaker(session)
 
     @staticmethod
     def interface(session: dict) -> str:
         """
         Return the interface type for this session.
-        One of: 'voice_remote', 'asterisk', 'telegram', 'headless', or 'web'.
+        One of: 'speaker', 'phone', 'general', 'headless'.
 
         Usage:
-            if ToolBase.interface(session) == 'telegram':
+            if ToolBase.interface(session) == 'general':
                 # format response for text
         """
-        return session.get('interface', 'unknown')
+        return get_interface_mode(session).value
 
     @staticmethod
     def endpoint(session: dict) -> str:
@@ -302,31 +305,51 @@ class ToolBase:
         """
         return session.get('endpoint_id', '')
 
-    # ── Context injection helpers ─────────────────────────────────────────────
+    # ── Session boundary methods ──────────────────────────────────────────────
+    # Tools must never access the session dict directly. Use these methods
+    # as the boundary so session internals can change without breaking tools.
 
     @staticmethod
-    def context_for_modes(core, text: str, modes: tuple = ('plain', 'speaker', 'phone')) -> str:
+    def request_hangup(session: dict):
         """
-        Return context text only when the current session interface matches
-        one of the specified modes. Pass this from provide_context().
-
-        Modes map to interfaces:
-            'plain'   → telegram, web, headless
-            'speaker' → voice_remote
-            'phone'   → asterisk
+        Signal the voice interface to close the channel after this response.
+        Only meaningful for speaker and phone interfaces — safe to call on any.
 
         Usage:
-            def provide_context(core, tool_config):
-                return ToolBase.context_for_modes(
-                    core,
-                    text  = "[CONTACTS]\\nJesse: jesse@example.com",
-                    modes = ('plain', 'speaker', 'phone'),
-                )
+            ToolBase.request_hangup(session)
         """
-        # provide_context is called without a session so we return for all
-        # modes by default. Tool authors can filter by checking core state
-        # if needed — but most context is relevant everywhere.
-        return text.strip() if text else ""
+        request_hangup(session)
+
+    @staticmethod
+    def get_history(session: dict) -> list:
+        """Return the conversation history for this session."""
+        return get_history(session)
+
+    @staticmethod
+    def set_history(session: dict, history: list):
+        """Replace the conversation history for this session."""
+        set_history(session, history)
+
+    @staticmethod
+    def clear_history(session: dict):
+        """Clear the conversation history for this session."""
+        clear_history(session)
+
+    @staticmethod
+    def get_agent_mode(session: dict):
+        """Return the current AgentMode for this session."""
+        return get_agent_mode(session)
+
+    @staticmethod
+    def set_agent_mode(session: dict, mode):
+        """
+        Switch the session to a different agent mode.
+        mode can be an AgentMode instance or a mode name string.
+
+        Usage:
+            ToolBase.set_agent_mode(session, 'deep_research')
+        """
+        session[KEY_AGENT_MODE] = mode
 
     # ── File storage ──────────────────────────────────────────────────────────
     # All tool data lives under data/{tool_name}/ at the project root.
