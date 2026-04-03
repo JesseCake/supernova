@@ -39,3 +39,11 @@ transcription:
   max_tool_loops:  5
   is_default:      false
   trigger_phrases: "transcription mode, transcribe this, write this up, summarise our conversation, document this"
+
+relay:
+  description:     "Single-purpose relay mode — collect a response and return it to the caller."
+  precontext:      "personality/agent_relay.md"
+  max_tool_loops:  3
+  is_default:      false
+  hidden:          true
+  trigger_phrases: ""

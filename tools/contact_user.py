@@ -15,6 +15,7 @@ Config (config/contact_user.yaml):
 """
 
 import uuid
+import asyncio
 from typing import Annotated
 from pydantic import Field
 from core.tool_base import ToolBase
@@ -45,7 +46,7 @@ def contact_user(
         description=(
             "Optional. The interface to use: 'telegram', 'speaker', 'email'. "
             "Also accepts natural language: 'IM', 'message', 'voice', 'mail'. "
-            "IMPORTANT: Leave empty to use the user's preferred contact method automatically unless specifically requested otherwise by the user."
+            "IMPORTANT: Leave empty to use the user's preferred contact method automatically unless asked by user."
         )
     )] = "",
 ) -> str:
@@ -75,7 +76,7 @@ def execute(tool_args: dict, session, core, tool_config: dict) -> str:
 
     if not hasattr(core, 'presence_registry'):
         return ToolBase.error(core, 'contact_user',
-            "Presence registry not available.")
+            "Presence registry not available. Do not retry.")
 
     registry = core.presence_registry
 
@@ -85,13 +86,19 @@ def execute(tool_args: dict, session, core, tool_config: dict) -> str:
     # Resolve best contact method
     result = registry.get_best_contact(user_id, preferred=preferred)
     if result is None:
-        friendly = registry.get_friendly_name(user_id)
+        friendly  = registry.get_friendly_name(user_id)
+        all_users = registry.all_users()
+        if user_id not in all_users:
+            return ToolBase.error(core, 'contact_user',
+                f"Unknown user '{user_id}'. "
+                f"Known users: {', '.join(all_users)}. Do not retry.")
         if preferred:
             return ToolBase.error(core, 'contact_user',
-                f"{friendly} is not available via {preferred}. "
-                f"Try a different interface or leave it unspecified.")
+                f"{friendly} is not configured for '{preferred}'. "
+                f"Try without specifying preferred_interface instead.")
         return ToolBase.error(core, 'contact_user',
-            f"No contact method available for {friendly}.")
+            f"No contact method available for {friendly}. "
+            f"Tell the user you were unable to reach {friendly} and do not retry.")
 
     interface, details  = result
     friendly            = registry.get_friendly_name(user_id)
@@ -141,35 +148,42 @@ def execute(tool_args: dict, session, core, tool_config: dict) -> str:
     if relay_mode:
         relay_session[KEY_AGENT_MODE] = relay_mode
 
-    # Pre-populate history so Supernova knows exactly what's happening
-    # when Dean's first reply arrives. Without this, the session is blank
-    # and Supernova has no idea what question to relay.
+    # Pre-populate history so Supernova has context when Dean's reply arrives.
+    # The opening message is already delivered by send_relay_message below —
+    # we just record it in history so the LLM sees the full exchange.
     from core.session_state import get_history
+    opening = f"{caller_name} wants to ask you: {message}"
     get_history(relay_session).append({
         'role':    'system',
         'content': (
-            f"[RELAY CONTEXT]\n"
-            f"Caller: {caller_name}\n"
-            f"Question to relay: {message}\n"
-            f"Ask {friendly} this question. When they answer, use reply_to_caller immediately."
+            f"[RELAY IDENTITY]\n"
+            f"You are speaking with {friendly}.\n"
+            f"{caller_name} has asked you to relay a question to {friendly}.\n"
+            f"Do not call {friendly} by any other name. "
+            f"Do not confuse {friendly} with {caller_name}."
         ),
     })
     get_history(relay_session).append({
         'role':    'assistant',
-        'content': f"{caller_name} wants to know: {message}",
+        'content': opening,
     })
 
-    # Set up immediate_send if the interface supports it
+    # Set up immediate_send for relay session responses
     _setup_immediate_send(relay_session, iface_obj, interface, endpoint_id, core)
 
     # Push any existing session to the stack
+    log.info("Pushing existing session to stack",
+             extra={'data': f"{friendly} {interface} endpoint={endpoint_id}"})
     iface_obj.push_session(endpoint_id)
 
     # Activate relay session on this endpoint
+    log.info("Activating relay session",
+             extra={'data': f"relay_session={relay_session_id} endpoint={endpoint_id}"})
     iface_obj.set_relay_session(endpoint_id, relay_session_id)
 
     # Deliver the opening message
-    opening = f"{caller_name} wants to ask you something: {message}"
+    log.info("Sending relay opening message",
+             extra={'data': f"to={friendly} endpoint={endpoint_id}"})
     iface_obj.send_relay_message(endpoint_id, opening)
 
     log.info("Relay initiated",

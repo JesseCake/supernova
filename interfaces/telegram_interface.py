@@ -107,7 +107,9 @@ class TelegramInterface:
                         self.send_message(_chat_id, text),
                         _loop,
                     )
-                core_session['immediate_send_only'] = True
+                # Note: immediate_send_only is NOT set — main LLM response
+                # still goes through the queue drain in _handle_message.
+                # immediate_send is only for ToolBase.speak() pre-tool text.
                 if friendly_name:
                     core_session['speaker'] = friendly_name
             self._sessions[chat_id] = session_id

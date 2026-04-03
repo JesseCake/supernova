@@ -1,2 +1,2 @@
 enabled: true
-agent_modes: [all]
+blocked_modes: [relay]
