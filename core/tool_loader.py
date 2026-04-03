@@ -15,7 +15,7 @@ Each tool module must follow this convention:
     config/my_tool.yaml  (optional sidecar)
     ├── enabled:          true
     ├── interfaces:       []           # [] = all, ['speaker','phone','general']
-    ├── agent_modes:      []           # [] = all, ['general','deep_research'] to whitelist
+    ├── agent_modes:      []           # [] or absent = general only, [all] = all modes, ['deep_research'] = whitelist
     ├── blocked_modes:    []           # ['deep_research'] to exclude from specific modes
     ├── requires_config:  ptv          # skip if AppConfig lacks this attribute
     ├── context_priority: 50           # lower = earlier in system prompt
@@ -144,27 +144,29 @@ class ToolLoader:
         """
         Return True if this tool entry should be included for the given agent mode.
 
-        agent_modes: []                  → all modes (default)
-        agent_modes: [deep_research]     → that mode only (whitelist)
-        blocked_modes: [deep_research]   → all modes EXCEPT deep_research (blacklist)
+        agent_modes not set or []:    → general only (default)
+        agent_modes: [all]            → all modes
+        agent_modes: [deep_research]  → that mode only (whitelist)
+        blocked_modes: [deep_research] → all modes EXCEPT deep_research (blacklist)
 
         blocked_modes takes precedence over agent_modes if both are set.
         """
-        mode_name     = str(agent_mode) if agent_mode else None
-        agent_modes   = entry.get('agent_modes', [])
+        mode_name     = str(agent_mode) if agent_mode else 'general'
+        raw           = entry.get('agent_modes', [])
         blocked_modes = entry.get('blocked_modes', [])
 
+        # Normalise — empty or absent → general only
+        agent_modes = raw if raw else ['general']
+
         # blocked_modes takes precedence
-        if blocked_modes and mode_name and mode_name in blocked_modes:
+        if blocked_modes and mode_name in blocked_modes:
             return False
 
-        # agent_modes whitelist
-        if agent_modes:
-            if mode_name is None:
-                return True
-            return mode_name in agent_modes
+        # 'all' keyword — available in every mode
+        if 'all' in agent_modes:
+            return True
 
-        return True
+        return mode_name in agent_modes
 
     # ── Change detection ──────────────────────────────────────────────────────
 
