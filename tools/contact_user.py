@@ -152,12 +152,17 @@ def execute(tool_args: dict, session, core, tool_config: dict) -> str:
     # we just record it in history so the LLM sees the full exchange.
     from core.session_state import get_history
     opening = f"{caller_name} wants to ask you: {message}"
+
+    # Anchor speaker identity so create_prompt injects it every turn
+    relay_session['speaker'] = friendly
+
     get_history(relay_session).append({
         'role':    'system',
         'content': (
             f"[RELAY IDENTITY]\n"
-            f"{caller_name} has asked you to relay a question to {friendly} and seek a reply.\n"
-            f"You are speaking with {friendly} and the person asking the question is {caller_name}."
+            f"You are speaking directly with {friendly}.\n"
+            f"{caller_name} asked you to put this question to {friendly}: {message}\n"
+            f"You have already asked {friendly} the question. Wait for their answer, then call reply_to_caller."
         ),
     })
     get_history(relay_session).append({
@@ -191,7 +196,7 @@ def execute(tool_args: dict, session, core, tool_config: dict) -> str:
         "user":         friendly,
         "interface":    interface,
         "instructions": (
-            f"Tell {friendly} you've reached out to via "
+            f"Tell {caller_name} you've reached out to {friendly} via "
             f"{interface} and will let them know when you get a reply."
         ),
     })

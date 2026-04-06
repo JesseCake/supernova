@@ -93,9 +93,9 @@ def execute(tool_args: dict, session, core, tool_config: dict) -> str:
 
     relay_message = (
         f"[RELAY REPLY]\n"
-        f"{target_friendly} replied to the question '{question}':\n"
-        f"\"{message}\"\n"
-        f"Relay the answer to {caller_name} naturally."
+        f"{target_friendly} replied: \"{message}\"\n"
+        f"Tell {caller_name} this directly and naturally, as if reporting back to them. "
+        f"You are speaking to {caller_name}. Do not refer to {caller_name} in third person."
     )
     _inject_into_caller(
         core, 
@@ -117,7 +117,7 @@ def execute(tool_args: dict, session, core, tool_config: dict) -> str:
     return ToolBase.result(core, 'reply_to_caller', {
         "status":       "sent",
         "instructions": (
-            f"Thank {target_friendly} for their reply and end the conversation naturally."
+            f"Say only: 'Thanks, I'll pass that on!' and nothing else."
         ),
     })
 
