@@ -28,15 +28,15 @@ WRONG_PERSON = "WRONG_PERSON"
 def reply_to_caller(
     message: Annotated[str, Field(
         description=(
-            "Your reply to the question. Send exactly what you want the caller "
-            "to hear. If you are not the intended recipient, send 'WRONG_PERSON'."
+            "The reply to the question. Send exactly the respondant's answer as you would say it naturally, without mentioning the relay or instructions. "
+            "If they not the intended recipient, send 'WRONG_PERSON'."
         )
     )],
 ) -> str:
     """
     Send your reply back to the person who asked the question.
     Use this as soon as you have an answer — do not delay.
-    If you are not the person being asked, send message='WRONG_PERSON'.
+    If you find you have reached the wrong person, send message='WRONG_PERSON'.
     """
     ...
 
@@ -84,7 +84,7 @@ def execute(tool_args: dict, session, core, tool_config: dict) -> str:
 
         return ToolBase.result(core, 'reply_to_caller', {
             "status": "wrong_person",
-            "instructions": "Tell the user you are not the intended recipient and end the conversation.",
+            "instructions": "Tell the user they are not the intended recipient and end the conversation.",
         })
 
     # ── Inject reply into caller's session ────────────────────────────────────
@@ -93,17 +93,23 @@ def execute(tool_args: dict, session, core, tool_config: dict) -> str:
 
     relay_message = (
         f"[RELAY REPLY]\n"
-        f"{target_friendly} replied to your question '{question}':\n"
+        f"{target_friendly} replied to the question '{question}':\n"
         f"\"{message}\"\n"
         f"Relay the answer to {caller_name} naturally."
     )
-    _inject_into_caller(core, caller_session_id, relay_message)
+    _inject_into_caller(
+        core, 
+        caller_session_id, 
+        relay_message,
+        caller_interface = caller_interface,
+        caller_endpoint  = caller_endpoint,
+        )
 
     # ── Restore target's suspended session ────────────────────────────────────
     context_note = (
         f"[RELAY COMPLETED]\n"
         f"While this conversation was paused, {caller_name} asked: '{question}'. "
-        f"You replied: '{message}'. This has been passed back to {caller_name}. "
+        f"They replied: '{message}'. This has been passed back to {caller_name}. "
         f"Resume your conversation naturally — do not mention this unless brought up."
     )
     _restore_target_session(core, session, context_note=context_note)
@@ -118,21 +124,33 @@ def execute(tool_args: dict, session, core, tool_config: dict) -> str:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _inject_into_caller(core, caller_session_id: str, message: str):
-    """
-    Inject a message into the caller's session by calling process_input
-    in a background thread so the caller hears the reply naturally.
-    """
+def _inject_into_caller(core, caller_session_id: str, message: str,
+                        caller_interface: str = '', caller_endpoint: str = ''):
     if not caller_session_id:
         log.warning("No caller session id — cannot inject reply")
         return
 
     caller_session = core.get_session(caller_session_id)
+
     if caller_session is None:
-        log.warning("Caller session not found",
-                    extra={'data': caller_session_id})
+        # Session is gone (caller hung up). If we have routing info,
+        # fire the event handler directly — same path as the timer callback.
+        log.warning("Caller session gone — attempting callback via event handler",
+                    extra={'data': f"interface={caller_interface!r} endpoint={caller_endpoint!r}"})
+        if caller_interface and caller_endpoint:
+            handler = core._event_handlers.get(caller_interface)
+            if handler:
+                handler({
+                    'endpoint_id':  caller_endpoint,
+                    'announcement': message,
+                    'missed':       False,
+                })
+            else:
+                log.warning("No event handler for caller interface",
+                            extra={'data': caller_interface})
         return
 
+    # Session still alive — inject normally
     log.info("Injecting reply into caller session",
              extra={'data': caller_session_id})
 

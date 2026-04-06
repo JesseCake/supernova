@@ -31,14 +31,13 @@ def contact_user(
     user: Annotated[str, Field(
         description=(
             "The user to contact. Use their name as defined in user_profiles "
-            "e.g. 'jesse' or 'dean'."
         )
     )],
     message: Annotated[str, Field(
         description=(
             "The question or message to relay to the user. "
             "Write it as you would say it to them directly, "
-            "e.g. 'Jesse wants to know what you would like for dinner tonight.'"
+            "e.g. 'X wants to know what you would like for dinner tonight.'"
         )
     )],
     preferred_interface: Annotated[str, Field(
@@ -46,7 +45,7 @@ def contact_user(
         description=(
             "Optional. The interface to use: 'telegram', 'speaker', 'email'. "
             "Also accepts natural language: 'IM', 'message', 'voice', 'mail'. "
-            "IMPORTANT: Leave empty to use the user's preferred contact method automatically unless asked by user."
+            "IMPORTANT: Leave this empty to use the user's preferred contact method automatically unless asked by user."
         )
     )] = "",
 ) -> str:
@@ -157,10 +156,8 @@ def execute(tool_args: dict, session, core, tool_config: dict) -> str:
         'role':    'system',
         'content': (
             f"[RELAY IDENTITY]\n"
-            f"You are speaking with {friendly}.\n"
-            f"{caller_name} has asked you to relay a question to {friendly}.\n"
-            f"Do not call {friendly} by any other name. "
-            f"Do not confuse {friendly} with {caller_name}."
+            f"{caller_name} has asked you to relay a question to {friendly} and seek a reply.\n"
+            f"You are speaking with {friendly} and the person asking the question is {caller_name}."
         ),
     })
     get_history(relay_session).append({
@@ -194,7 +191,7 @@ def execute(tool_args: dict, session, core, tool_config: dict) -> str:
         "user":         friendly,
         "interface":    interface,
         "instructions": (
-            f"Tell the user you've reached out to {friendly} via "
+            f"Tell {friendly} you've reached out to via "
             f"{interface} and will let them know when you get a reply."
         ),
     })
@@ -250,7 +247,7 @@ def _route_email(core, session, details: dict, message: str,
             "user":         friendly,
             "interface":    "email",
             "instructions": (
-                f"Tell the user you've emailed {friendly} at {address}. "
+                f"Tell {friendly} you've emailed {address}. "
                 f"Note that email doesn't support a live reply."
             ),
         })

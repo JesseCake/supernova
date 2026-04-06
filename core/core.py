@@ -374,6 +374,7 @@ class CoreProcessor:
         prompt = [system_message] + self.create_prompt(
             input_text           = input_text,
             conversation_history = conversation_history,
+            session              = session,
         )
 
         # Get tools filtered by both interface_mode and agent_mode
@@ -488,9 +489,25 @@ class CoreProcessor:
     # Prompt builders
     # ──────────────────────────────────────────────────────────────────────────
 
-    def create_prompt(self, input_text: str, conversation_history: list) -> list:
-        """Assemble the message list for the first Ollama call in a turn."""
-        return conversation_history + [{'role': 'user', 'content': input_text}]
+    def create_prompt(self, input_text: str, conversation_history: list, session: dict) -> list:
+        """
+        Assemble the message list for the first Ollama call in a turn. 
+        We add the time here because it was slowing down startup when included in the system message (wasn't caching).
+        """
+
+        now      = datetime.now()
+        day      = now.strftime("%A")
+        date     = now.strftime("%d %B %Y")
+        time_str = now.strftime("%I:%M%p")
+        speaker  = get_speaker(session)
+
+        context = f"Current Time:\nTime: {time_str}\nDate: {date}\nDay: {day}\nTimezone: AEST"
+        if speaker:
+            context += f"\n\n[SPEAKER IDENTIFIED]\nYou are speaking with {speaker}."
+
+        time_message = {'role': 'system', 'content': context}
+
+        return conversation_history + [time_message, {'role': 'user', 'content': input_text}]
 
     def create_system_message(self, session: dict) -> dict:
         """
@@ -516,17 +533,7 @@ class CoreProcessor:
         # 3. Interface declaration
         full_context += f"\n\n[INTERFACE]\nThe user is interacting via: {interface_mode}"
 
-        # 4. Current time
-        now      = datetime.now()
-        day      = now.strftime("%A")
-        date     = now.strftime("%d %B %Y")
-        time_str = now.strftime("%I:%M%p")
-        full_context += (
-            f"\n\nCurrent Time:\n"
-            f"Time: {time_str}\nDate: {date}\nDay: {day}\nTimezone: AEST\n"
-        )
-
-        # 5. Speaker identification
+        # 4. Speaker identification
         speaker = get_speaker(session)
         if speaker:
             full_context += f"\n\n[SPEAKER IDENTIFIED]\nYou are speaking with {speaker}."
