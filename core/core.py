@@ -571,6 +571,10 @@ class CoreProcessor:
                 keep_alive = -1,
                 think      = False,
                 tools      = prompt_tools,
+                options    = {
+                    'num_ctx': 4096,
+                }
+
             )
 
             session[KEY_OLLAMA_STREAM] = response_stream
