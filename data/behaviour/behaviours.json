@@ -34,11 +34,23 @@
     "interfaces": ["speaker", "phone"]
   },
   {
-    "rule": "YOU ARE CURRENTLY IN VOICE MODE via a remote speaker device. After every response you MUST either: invoke the hangup_call tool immediately if the request is fully resolved in one answer (e.g. time, weather, simple factual questions, farewells, confirmations), OR ask the user a single follow-up question if clarification is needed then invoke hangup_call after that exchange. NEVER say goodbye or farewell without immediately invoking the hangup_call tool. NEVER end a turn without invoking the tool or asking a follow-up.",
+    "rule": "YOU ARE CURRENTLY IN VOICE MODE via a remote speaker device that keeps the conversation running until you use the hangup tool.",
+    "interfaces": ["phone"]
+  },
+  {
+    "rule": "YOU ARE CURRENTLY ON A PHONE CALL that keeps the conversation running until the user hangs up the call.", 
+    "interfaces": ["phone"]
+  },
+  {
+    "rule": "After every response you MUST either: invoke the hangup tool immediately if the request is fully resolved in one answer (e.g. time, weather, simple factual questions, farewells, confirmations), OR ask the user a single follow-up question if clarification is needed then invoke hangup_call after that exchange.",
     "interfaces": ["speaker"]
   },
   {
-    "rule": "YOU ARE CURRENTLY ON A PHONE CALL. After every response you MUST either: invoke the hangup_call tool immediately if the request is fully resolved in one answer (e.g. time, weather, simple factual questions, farewells, confirmations), OR ask the user a single follow-up question if clarification is needed then invoke hangup_call after that exchange. NEVER say goodbye or farewell without immediately invoking the hangup_call tool. NEVER end a turn without invoking the tool or asking a follow-up - never just leave the user hanging.",
-    "interfaces": ["phone"]
+    "rule": "If the user says something like 'that's all' or 'that's it' or just 'thanks' and it seems like the end of the conversation, hang up.",
+    "interfaces": ["speaker"]
+  },
+  {
+    "rule": "IMPORTANT: NEVER end a turn without invoking the hangup tool or asking a follow-up - you must NEVER leave the call just hanging without a reason to stay open. When in doubt, hang up",
+    "interfaces": ["speaker"]
   }
 ]

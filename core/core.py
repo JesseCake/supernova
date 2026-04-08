@@ -418,11 +418,11 @@ class CoreProcessor:
             # Flush pre-tool LLM text immediately for text interfaces
             # (already handled inside send_to_ollama before tool execution,
             # but kept here as belt-and-braces for any edge cases)
-            if tool_msg and full_response and full_response.strip():
-                send_fn = get_immediate_send(session)
-                if send_fn:
-                    send_fn(full_response.strip())
-                    self._flush_queue(get_response_queue(session))
+            #if tool_msg and full_response and full_response.strip():
+            #    send_fn = get_immediate_send(session)
+            #    if send_fn:
+            #        send_fn(full_response.strip())
+            #        self._flush_queue(get_response_queue(session))
 
             if tool_msg:
                 for msg in tool_msg:
@@ -436,7 +436,7 @@ class CoreProcessor:
 
         # Fire final response via immediate_send for text interfaces
         send_fn = get_immediate_send(session)
-        if send_fn:
+        if send_fn and is_immediate_send_only(session):
             final_chunks = []
             q = get_response_queue(session)
             while not q.empty():
@@ -503,7 +503,7 @@ class CoreProcessor:
 
         context = f"Current Time:\nTime: {time_str}\nDate: {date}\nDay: {day}\nTimezone: AEST"
         if speaker:
-            context += f"\n\n[SPEAKER IDENTIFIED]\nYou are speaking with {speaker}."
+            context += f"\n\n[USER IDENTIFIED]\nYou are speaking with {speaker}."
 
         time_message = {'role': 'system', 'content': context}
 
@@ -534,9 +534,9 @@ class CoreProcessor:
         full_context += f"\n\n[INTERFACE]\nThe user is interacting via: {interface_mode}"
 
         # 4. Speaker identification
-        speaker = get_speaker(session)
-        if speaker:
-            full_context += f"\n\n[SPEAKER IDENTIFIED]\nYou are speaking with {speaker}."
+        #speaker = get_speaker(session)
+        #if speaker:
+        #    full_context += f"\n\n[SPEAKER IDENTIFIED]\nYou are speaking with {speaker}."
 
         return {'role': 'system', 'content': full_context}
 
