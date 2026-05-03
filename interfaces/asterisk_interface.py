@@ -474,8 +474,11 @@ class AsteriskInterface:
 
     async def _hangup(self):
         log.info("Hanging up")
+        session_id     = self.session_id
         self.session_id = None
-        self.rx_paused = False
+        self.rx_paused  = False
+        if session_id:
+            self.core_processor.close_session(session_id)
         if self._ws_session and self.channel_id:
             try:
                 await self._ari_delete(self._ws_session, f"/channels/{self.channel_id}")
@@ -747,8 +750,12 @@ class AsteriskInterface:
         elif etype == "StasisEnd":
             channel_id = event.get("channel", {}).get("id")
             if channel_id == self.channel_id:
-                print("[asterisk] StasisEnd — call ended by remote.")
-                self.channel_id = None
+                log.info("StasisEnd — call ended by remote.")
+                self.channel_id  = None
+                session_id       = self.session_id
+                self.session_id  = None
+                if session_id:
+                    self.core_processor.close_session(session_id)
 
         # we can dial 0 for an outside line:
         elif etype == "ChannelDtmfReceived":
@@ -764,5 +771,9 @@ class AsteriskInterface:
         elif etype == "ChannelHangupRequest":
             channel_id = event.get("channel", {}).get("id")
             if channel_id == self.channel_id:
-                print("[asterisk] Hangup requested by caller.")
-                self.channel_id = None
+                log.info("Hangup requested by caller.")
+                self.channel_id  = None
+                session_id       = self.session_id
+                self.session_id  = None
+                if session_id:
+                    self.core_processor.close_session(session_id)
