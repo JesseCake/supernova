@@ -62,6 +62,7 @@ class ToolLoader:
         self._tool_configs:     dict       = {}   # name → yaml dict
         self._context_providers: list      = []   # (priority, name, fn, tool_config)
         self._turn_context_providers: list = []   # for those tools that inject some context just before agent turn
+        self._session_end_handlers:   list = []   # for those tools that need to clean up after a session ends
         self._last_mtime:       float      = 0.0
         self._core_ref                     = None  # set on first get_context_injections call
 
@@ -146,6 +147,20 @@ class ToolLoader:
             except Exception as e:
                 log.error(f"Turn context provider error in {name}", extra={'data': str(e)})
         return results
+    
+    def call_session_end_handlers(self, core, session: dict):
+        """
+        Call all registered on_session_end handlers.
+        Called by CoreProcessor.close_session() when a session ends cleanly.
+        Plugins use this hook to summarise, persist, or clean up session data.
+        """
+        self._reload_if_changed()
+        for name, fn, tool_config in self._session_end_handlers:
+            try:
+                fn(core, tool_config, session)
+            except Exception as e:
+                log.error(f"Session end handler error in {name}",
+                        extra={'data': str(e)})
 
     # ── Filtering helpers ─────────────────────────────────────────────────────
 
@@ -228,6 +243,7 @@ class ToolLoader:
         tool_configs     = {}
         context_providers = []
         turn_providers   = []
+        session_end_handlers = []
 
         try:
             tool_files = sorted(
@@ -287,6 +303,12 @@ class ToolLoader:
                 priority = tool_config.get('turn_context_priority', 50)
                 turn_providers.append((priority, name, turn_fn, tool_config))
                 log.debug(f"Registered turn context provider: {name} (priority={priority})")
+
+            # ── Session end handler (optional) ───────────────────────────────
+            end_fn = getattr(module, 'on_session_end', None)
+            if end_fn is not None and callable(end_fn):
+                session_end_handlers.append((name, end_fn, tool_config))
+                log.debug(f"Registered session end handler: {name}")
 
             # ── Executor closure ──────────────────────────────────────────────
             def make_executor(fn, tc):
@@ -363,6 +385,7 @@ class ToolLoader:
         self._tool_configs      = tool_configs
         self._context_providers = context_providers
         self._turn_context_providers = turn_providers
+        self._session_end_handlers   = session_end_handlers
         self._last_mtime        = self._current_mtime()
 
         general_count = sum(1 for t in tools if not t['_interfaces'])

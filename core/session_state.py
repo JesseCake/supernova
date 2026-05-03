@@ -66,6 +66,7 @@ KEY_SPEAKER          = 'speaker'
 KEY_ENDPOINT_ID      = 'endpoint_id'
 KEY_IMMEDIATE_SEND   = 'immediate_send'
 KEY_IMMEDIATE_ONLY   = 'immediate_send_only'
+KEY_SESSION_ID        = 'session_id'
 
 
 # ── Interface mode ─────────────────────────────────────────────────────────────
@@ -155,6 +156,10 @@ def get_speaker(session: dict) -> str | None:
 def get_endpoint_id(session: dict) -> str:
     """Return the endpoint_id for this session."""
     return session.get(KEY_ENDPOINT_ID, '')
+
+def get_session_id(session: dict) -> str:
+    """Return the session ID for this session."""
+    return session.get(KEY_SESSION_ID, 'unknown')
 
 
 # ── Voice channel control ─────────────────────────────────────────────────────

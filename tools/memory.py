@@ -128,6 +128,7 @@ def provide_turn_context(core, tool_config: dict, session: dict, user_input: str
 
     try:
         snippets = []
+        threshold = tool_config.get('similarity_threshold', 0.4)
 
         # User-private memories
         if user_id != 'unknown':
@@ -137,7 +138,7 @@ def provide_turn_context(core, tool_config: dict, session: dict, user_input: str
                 n_results   = top_k - 1,
                 include     = ["documents", "metadatas", "distances"],
             )
-            threshold = tool_config.get('similarity_threshold', 0.4)
+            
             for doc, meta, dist in zip(
                 private['documents'][0],
                 private['metadatas'][0],
@@ -165,7 +166,7 @@ def provide_turn_context(core, tool_config: dict, session: dict, user_input: str
             if dist <= threshold:
                 tag = f"[{meta['tags']}] " if meta.get('tags') else ""
                 snippets.append(f"- {tag}{doc}")
-            else:
+            elif tool_config.get('debug', False):
                 log.debug("Memory skipped — below threshold",
                           extra={'data': f"dist={dist:.3f} content={doc[:60]!r}"})
 

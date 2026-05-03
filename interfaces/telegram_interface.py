@@ -306,7 +306,7 @@ class TelegramInterface:
         """
         session_id = self._sessions.pop(chat_id, None)
         if session_id:
-            self.core_processor.sessions.pop(session_id, None)
+            self.core_processor.close_session(session_id)
         self._session_stack.pop(chat_id, None)
         self._last_active.pop(chat_id, None)
         self._last_typing.pop(chat_id, None)

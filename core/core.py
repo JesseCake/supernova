@@ -46,10 +46,10 @@ from core.session_state import (
     get_speaker, get_endpoint_id,
     request_hangup, clear_hangup, hangup_requested,
     get_response_queue, get_cancel_event, get_immediate_send,
-    is_immediate_send_only, get_ts_start,
+    is_immediate_send_only, get_ts_start, get_session_id,
     KEY_HISTORY, KEY_RESPONSE_QUEUE, KEY_RESPONSE_DONE,
     KEY_CLOSE_CHANNEL, KEY_CANCEL, KEY_OLLAMA_STREAM, KEY_TS_START,
-    KEY_INTERFACE_MODE, KEY_AGENT_MODE,
+    KEY_INTERFACE_MODE, KEY_AGENT_MODE, KEY_SESSION_ID
 )
 from core.event_store import EventStore
 from core.scheduler import Scheduler
@@ -270,6 +270,7 @@ class CoreProcessor:
             # Modes — interfaces must override interface_mode after creation
             KEY_INTERFACE_MODE: InterfaceMode.GENERAL,
             KEY_AGENT_MODE:     self.mode_registry.default(),
+            'session_id':       session_id,
         }
         self.sessions[session_id] = session
         return session
@@ -291,6 +292,27 @@ class CoreProcessor:
         session = self.get_session(session_id)
         if session is not None:
             ss_clear_history(session)
+
+    def close_session(self, session_id: str):
+        """
+        Called by interfaces when a session ends cleanly.
+        Fires all registered on_session_end plugin hooks then removes
+        the session. Runs in a daemon thread so it never blocks the interface.
+        """
+        session = self.get_session(session_id)
+        if session is None:
+            return
+
+        def _run():
+            try:
+                self.tool_loader.call_session_end_handlers(self, session)
+            except Exception as e:
+                log.error("Session end handler error", extra={'data': str(e)})
+            finally:
+                self.sessions.pop(session_id, None)
+                log.info("Session closed", extra={'data': f"id={session_id}"})
+
+        threading.Thread(target=_run, daemon=True).start()
 
     # ──────────────────────────────────────────────────────────────────────────
     # Tool result formatting

@@ -400,6 +400,8 @@ class SpeakerRemoteInterface:
         End a voice session. Sends CLOS but does NOT close the TCP connection.
         Resets session_id so the next WAKE starts a fresh conversation.
         """
+        if cs.session_id:
+            self.core_processor.close_session(cs.session_id)
         cs.session_id = None
         cs.rx_paused  = False
         cs.writer.write(pack_frame(b'CLOS'))
