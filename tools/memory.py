@@ -146,7 +146,7 @@ def provide_turn_context(core, tool_config: dict, session: dict, user_input: str
                 if dist <= threshold:
                     tag = f"[{meta['tags']}] " if meta.get('tags') else ""
                     snippets.append(f"- {tag}{doc}")
-                else:
+                elif tool_config.get('debug', False):
                     log.debug("Memory skipped — below threshold",
                               extra={'data': f"dist={dist:.3f} content={doc[:60]!r}"})
 
