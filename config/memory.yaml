@@ -1,9 +1,11 @@
 enabled:          true
 interfaces:       []     # all interfaces
 agent_modes:      [all]  # all agent modes
+debug:            false   # log memory retrievals and injections
 
 context_priority: 5
 turn_context_priority: 10   # inject early, before other turn context
 
 inject_top_k:  4        # memories auto-injected per turn
 search_top_k:  6        # memories returned on explicit search
+similarity_threshold: 0.9  # cosine distance — lower = more similar, 0=identical, 2=opposite

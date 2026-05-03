@@ -123,7 +123,8 @@ def provide_turn_context(core, tool_config: dict, session: dict, user_input: str
     collection = _get_collection(tool_config)
     top_k      = tool_config.get('inject_top_k', 4)
 
-    _debug_collection(collection)  # temporary — remove once confirmed working
+    if tool_config.get('debug', False):
+        _debug_collection(collection)  # temporary — remove once confirmed working
 
     try:
         snippets = []
@@ -134,26 +135,39 @@ def provide_turn_context(core, tool_config: dict, session: dict, user_input: str
                 query_texts = [user_input],
                 where       = {"user_id": user_id},
                 n_results   = top_k - 1,
+                include     = ["documents", "metadatas", "distances"],
             )
-            for doc, meta in zip(
+            threshold = tool_config.get('similarity_threshold', 0.4)
+            for doc, meta, dist in zip(
                 private['documents'][0],
                 private['metadatas'][0],
+                private['distances'][0],
             ):
-                tag = f"[{meta['tags']}] " if meta.get('tags') else ""
-                snippets.append(f"- {tag}{doc}")
+                if dist <= threshold:
+                    tag = f"[{meta['tags']}] " if meta.get('tags') else ""
+                    snippets.append(f"- {tag}{doc}")
+                else:
+                    log.debug("Memory skipped — below threshold",
+                              extra={'data': f"dist={dist:.3f} content={doc[:60]!r}"})
 
         # Global/shared memories
         shared = collection.query(
             query_texts = [user_input],
             where       = {"user_id": "global"},
             n_results   = 2,
+            include     = ["documents", "metadatas", "distances"],
         )
-        for doc, meta in zip(
+        for doc, meta, dist in zip(
             shared['documents'][0],
             shared['metadatas'][0],
+            shared['distances'][0],
         ):
-            tag = f"[{meta['tags']}] " if meta.get('tags') else ""
-            snippets.append(f"- {tag}{doc}")
+            if dist <= threshold:
+                tag = f"[{meta['tags']}] " if meta.get('tags') else ""
+                snippets.append(f"- {tag}{doc}")
+            else:
+                log.debug("Memory skipped — below threshold",
+                          extra={'data': f"dist={dist:.3f} content={doc[:60]!r}"})
 
         if not snippets:
             log.debug("Memory injection — nothing relevant found",
