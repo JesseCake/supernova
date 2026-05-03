@@ -78,14 +78,43 @@ def _ensure_schema(conn: sqlite3.Connection):
 
 # ── User identity ─────────────────────────────────────────────────────────────
 
-def _get_user_id(session: dict) -> str:
+def _get_user_id(session: dict, core=None) -> str:
+    """
+    Resolve a canonical user_id using the presence registry where possible.
+    Falls back to speaker name, then interface+endpoint, then 'unknown'.
+    Canonical IDs match user_profiles.yaml keys e.g. 'jesse', 'dean'.
+    """
+    if core and hasattr(core, 'presence_registry'):
+        registry = core.presence_registry
+
+        # Match by speaker name against friendly_name in profiles
+        speaker = get_speaker(session)
+        if speaker:
+            for uid in registry.all_users():
+                if registry.get_friendly_name(uid).lower() == speaker.lower():
+                    return uid
+
+        # Match by endpoint ID against interface contact details
+        endpoint  = get_endpoint_id(session)
+        interface = session.get('interface', '')
+        if endpoint and interface:
+            uid = (
+                registry.find_user_by_contact(interface, 'chat_id',   endpoint) or
+                registry.find_user_by_contact(interface, 'endpoint_id', endpoint)
+            )
+            if uid:
+                return uid
+
+    # Fallback — not canonical but still useful for logging/grouping
     speaker = get_speaker(session)
     if speaker:
         return f"speaker_{speaker.lower().replace(' ', '_')}"
+
     endpoint  = get_endpoint_id(session)
     interface = session.get('interface', 'unknown')
     if endpoint:
         return f"{interface}_{endpoint}"
+
     return "unknown"
 
 
@@ -128,12 +157,12 @@ def _parse_since(since: str) -> str:
 
 # ── Turn logging ──────────────────────────────────────────────────────────────
 
-def _log_turn(session: dict, role: str, content: str, tool_config: dict):
+def _log_turn(session: dict, role: str, content: str, tool_config: dict, core=None):
     """Write a single turn to the database."""
     if not content or not content.strip():
         return
 
-    user_id    = _get_user_id(session)
+    user_id    = _get_user_id(session, core)
     interface  = session.get('interface', 'unknown')
     session_id = get_session_id(session)
     timestamp  = datetime.now().isoformat()
@@ -156,9 +185,9 @@ def _log_turn(session: dict, role: str, content: str, tool_config: dict):
     except Exception as e:
         log.error("Failed to log turn", extra={'data': str(e)})
 
-def _store_session_summary(session_id: str, session: dict, summary: str):
+def _store_session_summary(session_id: str, session: dict, summary: str, core=None):
     """Store a generated summary for a completed session."""
-    user_id   = _get_user_id(session)
+    user_id   = _get_user_id(session, core)
     interface = session.get('interface', 'unknown')
     timestamp = datetime.now().isoformat()
 
@@ -217,7 +246,7 @@ def on_session_end(core, tool_config: dict, session: dict):
                  extra={'data': f"session={session_id[:8]} turns={len(lines)}"})
         summary = core.run_headless(prompt)
         if summary:
-            _store_session_summary(session_id, session, summary)
+            _store_session_summary(session_id, session, summary, core)
     except Exception as e:
         log.error("Session summary failed", extra={'data': str(e)})
 
@@ -238,7 +267,7 @@ def provide_turn_context(core, tool_config: dict, session: dict, user_input: str
 
     history    = get_history(session)
     session_id = get_session_id(session)
-    user_id    = _get_user_id(session)
+    user_id    = _get_user_id(session, core)
     interface  = session.get('interface', 'unknown')
     timestamp  = datetime.now().isoformat()
 
@@ -314,7 +343,7 @@ def provide_turn_context(core, tool_config: dict, session: dict, user_input: str
             log.error("Failed to log history diff", extra={'data': str(e)})
 
     # ── Log incoming user message ─────────────────────────────────────────────
-    _log_turn(session, 'user', user_input, tool_config)
+    _log_turn(session, 'user', user_input, tool_config, core)
 
     # ── Recent session hint ───────────────────────────────────────────────────
     # If a prior session for this user ended recently, inject a hint so the
@@ -347,12 +376,14 @@ def provide_turn_context(core, tool_config: dict, session: dict, user_input: str
             hint = (
                 f"[RECENT SESSION]\n"
                 f"You spoke with {user_id} recently "
-                f"(session {sid[:8]}, {started} → {ended}, {turns} turns). "
+                f"({started} → {ended}, {turns} turns). "
                 f"If they reference that conversation use "
-                f"recall_conversations or get_conversation_transcript('{sid}')."
+                f"recall_conversations or get_conversation_transcript. "
+                f"Session reference: {sid}"
             )
-            log.debug("Recent session hint injected",
-                      extra={'data': f"session={sid[:8]} ended={ended}"})
+            log.info("Recent session hint injected",
+                      extra={'data': f"session={sid[:8]} ended={ended} hint={hint}"})
+            
             return hint
 
     except Exception as e:
@@ -367,9 +398,10 @@ def recall_conversations(
     since: Annotated[str, Field(
         default="today",
         description=(
-            "How far back to search. Natural expressions: "
+            "How far back to search. Use natural expressions: "
             "'today', 'yesterday', 'this morning', "
-            "'2 hours ago', '7 days ago', '1 week ago', '1 month ago'."
+            "'2 hours ago', '7 days ago', '1 week ago', '1 month ago'." 
+            "Use this when the user references something from a past conversation or asks if you remember something they said before. If they are vague about time, default to 'today' to avoid irrelevant results from long ago conversations."
         )
     )] = "today",
     keywords: Annotated[str, Field(
@@ -398,6 +430,7 @@ def recall_conversations(
     'yesterday you helped me with Y',
     'last week we discussed Z',
     'do you remember what I said about X'.
+    'we were just talking about x'
     After getting summaries, use get_conversation_transcript with the
     relevant session ID to retrieve the full transcript before responding.
     """
@@ -432,7 +465,7 @@ def _recall_execute(tool_args: dict, session, core, tool_config: dict) -> str:
     since    = params.get('since', 'today')
     keywords = params.get('keywords', '').strip()
     scope    = params.get('scope', 'user')
-    user_id  = _get_user_id(session)
+    user_id  = _get_user_id(session, core)
     curr_sid = get_session_id(session)
 
     ToolBase.speak(core, session, "Searching conversations.")
@@ -552,10 +585,12 @@ def _recall_execute(tool_args: dict, session, core, tool_config: dict) -> str:
         return ToolBase.result(core, 'recall_conversations', {
             "sessions":     summaries,
             "instructions": (
-                "Summarise the matching sessions for the user. "
+                "Summarise the matching sessions for the user naturally — "
+                "describe them by time and topic only, never read out session IDs. "
+                "Say things like 'earlier today around 6pm' or 'this morning you asked about X'. "
                 "Then call get_conversation_transcript with the most relevant "
                 "session_id to retrieve the full transcript before answering "
-                "their question."
+                "their question. Do not mention session IDs to the user at all - these are internal to you only."
             ),
         })
 

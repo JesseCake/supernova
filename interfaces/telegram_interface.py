@@ -4,6 +4,7 @@ import uuid
 import threading
 from core.interface_mode import InterfaceMode
 from core.session_state import KEY_INTERFACE_MODE, get_response_queue
+from core.session_reaper import SessionReaper
 
 from core.logger import get_logger
 log = get_logger('telegram')
@@ -35,10 +36,23 @@ class TelegramInterface:
         self._last_active   = {}   # chat_id → loop timestamp of last message
         self._last_typing   = {}   # chat_id → loop timestamp of last typing indicator
         self._chat_locks: dict = {}   # chat_id → asyncio.Lock
+        self._last_active   = {}
+
+        self._reaper = SessionReaper(
+            get_active_sessions = lambda: self._sessions,
+            get_last_active     = lambda: self._last_active,
+            close_fn            = lambda chat_id: asyncio.run_coroutine_threadsafe(
+                self._expire_session(chat_id), self._loop
+            ),
+            ttl_seconds  = self.SESSION_TTL,
+            check_interval = 60,
+        )
 
     # ── Main loop ─────────────────────────────────────────────────────────────
 
     async def run(self):
+        log.info("Starting session reaper")
+        self._reaper.start()
         log.info("Bot started, polling for messages")
         async with aiohttp.ClientSession() as session:
             self._http = session

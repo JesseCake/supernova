@@ -64,12 +64,34 @@ def _debug_collection(collection):
 
 # ── User identity ─────────────────────────────────────────────────────────────
 
-def _get_user_id(session: dict) -> str:
+def _get_user_id(session: dict, core=None) -> str:
     """
-    Resolve a stable user identity from the session.
-    Voiceprint speaker name takes priority, then interface+endpoint.
-    Falls back to 'unknown' if nothing is identifiable.
+    Resolve a canonical user_id using the presence registry where possible.
+    Falls back to speaker name, then interface+endpoint, then 'unknown'.
+    Canonical IDs match user_profiles.yaml keys e.g. 'jesse', 'dean'.
     """
+    if core and hasattr(core, 'presence_registry'):
+        registry = core.presence_registry
+
+        # Match by speaker name against friendly_name in profiles
+        speaker = get_speaker(session)
+        if speaker:
+            for uid in registry.all_users():
+                if registry.get_friendly_name(uid).lower() == speaker.lower():
+                    return uid
+
+        # Match by endpoint ID against interface contact details
+        endpoint  = get_endpoint_id(session)
+        interface = session.get('interface', '')
+        if endpoint and interface:
+            uid = (
+                registry.find_user_by_contact(interface, 'chat_id',   endpoint) or
+                registry.find_user_by_contact(interface, 'endpoint_id', endpoint)
+            )
+            if uid:
+                return uid
+
+    # Fallback — not canonical but still useful for logging/grouping
     speaker = get_speaker(session)
     if speaker:
         return f"speaker_{speaker.lower().replace(' ', '_')}"
@@ -119,7 +141,7 @@ def provide_turn_context(core, tool_config: dict, session: dict, user_input: str
     if not tool_config.get('enabled', True):
         return None
 
-    user_id    = _get_user_id(session)
+    user_id    = _get_user_id(session, core)
     collection = _get_collection(tool_config)
     top_k      = tool_config.get('inject_top_k', 4)
 
@@ -194,7 +216,7 @@ def store_memory(
         description=(
             "The fact to store. Write it as a clear, self-contained statement "
             "that will make sense when read back with no other context. "
-            "Good: 'Jesse is vegan'. Good: 'Jesse has Hashimoto's thyroiditis'. "
+            "Examples only-> Good: 'Jesse is vegan'. Good: 'Jesse has X'. "
             "Bad: 'health thing'. Bad: 'dietary preference'."
         )
     )],
@@ -283,7 +305,7 @@ def _store_execute(tool_args: dict, session, core, tool_config: dict) -> str:
     if not content:
         return ToolBase.error(core, 'store_memory', "No content provided.")
 
-    user_id    = _get_user_id(session) if scope == 'private' else 'global'
+    user_id    = _get_user_id(session, core) if scope == 'private' else 'global'
     collection = _get_collection(tool_config)
 
     try:
@@ -331,7 +353,7 @@ def _search_execute(tool_args: dict, session, core, tool_config: dict) -> str:
     if not query:
         return ToolBase.error(core, 'search_memory', "No query provided.")
 
-    user_id    = _get_user_id(session)
+    user_id    = _get_user_id(session, core)
     collection = _get_collection(tool_config)
     top_k      = tool_config.get('search_top_k', 6)
 
@@ -392,7 +414,7 @@ def _delete_execute(tool_args: dict, session, core, tool_config: dict) -> str:
     params     = ToolBase.params(tool_args)
     ids        = params.get('ids', [])
     delete_all = params.get('delete_all_for_user', False)
-    user_id    = _get_user_id(session)
+    user_id    = _get_user_id(session, core)
     collection = _get_collection(tool_config)
 
     try:

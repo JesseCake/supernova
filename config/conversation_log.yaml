@@ -1,0 +1,7 @@
+enabled:               true
+interfaces:            []
+agent_modes:           [all]
+turn_context_priority: 20     # after memory (10)
+
+recency_hint_minutes:  120    # inject recent session hint if within this window
+debug:                 false
