@@ -235,10 +235,11 @@ def on_session_end(core, tool_config: dict, session: dict):
 
     transcript = "\n".join(lines)
     prompt = (
-        "Summarise the following conversation in 2-4 sentences. "
+        "Summarise the following conversation in ideally 2 sentences, 4 maximum. "
         "Focus on what was discussed, any decisions made, and any important "
-        "facts mentioned. Be concise and factual.\n\n"
-        f"{transcript}"
+        "facts mentioned. Be concise and factual. Speak in the third person. "
+        "If nothing more than testing or simple time checks etc happen, summarise very simply as routine detail.\n\n"
+        f"Transcript:\n{transcript}"
     )
 
     try:

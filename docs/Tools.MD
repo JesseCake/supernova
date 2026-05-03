@@ -39,15 +39,21 @@ config/
 Every tool file follows the same pattern:
 
 ```python
+from typing import Annotated
+from pydantic import Field
 from core.tool_base import ToolBase
 
-log = ToolBase.logger('my_tool')   # get a logger
+log = ToolBase.logger('my_tool')
 
-def my_tool(param: str) -> str:    # schema — shown to the LLM
+
+def my_tool(
+    param: Annotated[str, Field(description="What this parameter is for.")],
+) -> str:
     """What this tool does and when to use it."""
     ...
 
-def execute(tool_args, session, core, tool_config) -> str:   # implementation
+
+def execute(tool_args, session, core, tool_config) -> str:
     params = ToolBase.params(tool_args)
     value  = params.get('param', '')
     return ToolBase.result(core, 'my_tool', {"status": "done"})
@@ -61,13 +67,18 @@ That's the minimum. The sections below cover every feature available.
 
 The schema function is what the LLM sees. Its name, parameters, type annotations, and docstring become the tool definition sent to Ollama. **The body should always be empty (`...`)** — the real logic lives in `execute()`.
 
+Supernova uses **Pydantic-annotated function signatures** as schemas — not raw dicts. This is the canonical convention, matching the recipes, memory, and conversation_log plugins.
+
 ```python
 from typing import Annotated
 from pydantic import Field
 
 def my_tool(
     required_param: Annotated[str, Field(description="What this is for. Required.")],
-    optional_param: Annotated[str, Field(default="", description="Optional detail.")] = "",
+    optional_param: Annotated[str, Field(
+        default="",
+        description="Optional detail.",
+    )] = "",
     count: int = 3,
 ) -> str:
     """
@@ -75,11 +86,6 @@ def my_tool(
 
     Be specific about when the LLM should use it — include example phrases
     that should trigger it, e.g. "Use when the user asks about X or Y."
-
-    Args:
-        required_param: Description shown to the LLM.
-        optional_param: Description shown to the LLM.
-        count:          How many results to return.
     """
     ...
 ```
@@ -90,6 +96,7 @@ def my_tool(
 - Use plain type hints (`str`, `int`, `bool`) for simple parameters where the name is self-explanatory
 - Always provide defaults for optional parameters
 - Keep parameter names clear and unambiguous — the LLM uses them directly
+- The schema function name must match the tool name exactly — the loader uses `__name__` to register it
 
 ---
 
@@ -106,7 +113,6 @@ def my_tool(
 
 ```python
 def execute(tool_args: dict, session: dict, core, tool_config: dict) -> str:
-    # Always start with these two lines
     err = ToolBase.require_config(tool_config, 'api_key')   # if config is needed
     if err:
         return ToolBase.error(core, 'my_tool', err)
@@ -127,6 +133,56 @@ def execute(tool_args: dict, session: dict, core, tool_config: dict) -> str:
 
 ---
 
+## Plugin Hooks
+
+Beyond `execute()`, tool files can export optional hook functions that the loader detects and registers automatically. These are how plugins integrate with the broader agent lifecycle without touching core code.
+
+### `provide_context(core, tool_config, session) -> str`
+
+Injects static text into the **system prompt** at the start of every session. Use this for information that is always relevant — capability descriptions, persistent rules, known entities. Because this text is part of the static system prompt it is **cache-safe** and does not change turn-to-turn.
+
+```python
+def provide_context(core, tool_config: dict, session: dict) -> str:
+    if not tool_config.get('enabled', True):
+        return ""
+    return "[MY TOOL]\nRelevant context the LLM should always know."
+```
+
+The `context_priority` field in the yaml controls position — lower numbers appear earlier in the system prompt. Return an empty string `""` to inject nothing.
+
+### `provide_turn_context(core, tool_config, session, user_input) -> str | None`
+
+Injects dynamic text as a **system message immediately before each user message**. Unlike `provide_context`, this fires every turn and can vary based on the user's input. Because it is injected at the tail of the message list — not into the static system prompt — it does not bust the Ollama KV cache.
+
+Use this for per-turn context that depends on what the user just said — memory retrieval, recent session hints, live state.
+
+```python
+def provide_turn_context(core, tool_config: dict, session: dict, user_input: str) -> str | None:
+    if not tool_config.get('enabled', True):
+        return None
+    # ... query something based on user_input ...
+    if relevant:
+        return "[CONTEXT]\nSomething relevant to this turn."
+    return None  # return None to inject nothing
+```
+
+The `turn_context_priority` field in the yaml controls ordering when multiple plugins provide turn context. Lower numbers fire first.
+
+### `on_session_end(core, tool_config, session) -> None`
+
+Fires when a session closes cleanly via `CoreProcessor.close_session()`. Use this for end-of-session work — generating summaries, flushing logs, persisting state. Runs in a daemon thread so it never blocks the interface.
+
+```python
+def on_session_end(core, tool_config: dict, session: dict):
+    if not tool_config.get('enabled', True):
+        return
+    # ... do cleanup, summarisation, persistence ...
+```
+
+This hook is called by all interfaces that use `close_session()` — voice (on hangup), Telegram (on expiry or reset), and web (on clear). It is not called for headless sessions.
+
+---
+
 ## ToolBase Reference
 
 Import once at the top of your tool file:
@@ -141,16 +197,16 @@ from core.tool_base import ToolBase
 log = ToolBase.logger('my_tool')
 ```
 
-Returns a standard Python logger namespaced under `supernova.tools.my_tool`. Follows the same logging setup as the rest of Supernova — INFO and above goes to `logs/supernova.log`, DEBUG goes to `logs/debug.log` when verbose mode is on.
+Returns a standard Python logger namespaced under `supernova.tools.my_tool`.
 
 ```python
 log.debug("Detail only needed when debugging")
 log.info("Normal operational message", extra={'data': f"value={x}"})
 log.warning("Something unexpected but not fatal")
-log.error("Something failed", exc_info=True)   # exc_info=True includes the traceback
+log.error("Something failed", exc_info=True)
 ```
 
-Use `extra={'data': "..."}` to attach structured context alongside the message. Keep it short — key=value pairs work well.
+Use `extra={'data': "..."}` to attach structured context. Keep it short — `key=value` pairs work well.
 
 ---
 
@@ -162,7 +218,7 @@ if err:
     return ToolBase.error(core, 'my_tool', err)
 ```
 
-Checks that the specified keys exist and are non-empty in `tool_config`. Returns a human-readable error string if any are missing, or `None` if all present. Call this at the very top of `execute()` before doing any real work — it saves the user from cryptic `KeyError` crashes.
+Checks that the specified keys exist and are non-empty in `tool_config`. Returns a human-readable error string if any are missing, or `None` if all present. Call at the top of `execute()` before doing any real work.
 
 ---
 
@@ -189,14 +245,14 @@ return ToolBase.result(core, 'my_tool', {
 })
 ```
 
-The payload dict is returned to the LLM as the tool result. The LLM uses it to formulate its response. Including an `"instructions"` key is optional but useful — it guides exactly how the LLM should respond, which produces more consistent and natural output.
+The payload dict is returned to the LLM as the tool result. Including an `"instructions"` key guides exactly how the LLM should respond, producing more consistent output.
 
 **Error:**
 ```python
 return ToolBase.error(core, 'my_tool', "Something went wrong — please try again.")
 ```
 
-Returns a standardised error envelope. The LLM reads the message and relays it naturally to the user. Always return an error rather than raising an exception — exceptions bubble up and produce unfriendly output.
+Returns a standardised error envelope. The LLM reads the message and relays it naturally to the user. Always return an error rather than raising an exception.
 
 ---
 
@@ -206,150 +262,151 @@ Returns a standardised error envelope. The LLM reads the message and relays it n
 ToolBase.speak(core, session, "Fetching that now.")
 ```
 
-Pushes text directly to the response queue — the user hears or sees it immediately, before the LLM has generated its response. Use this for:
-
-- Operations that take a moment (searches, API calls, email sending)
-- Confirmations that don't need LLM rewording ("Timer set.")
-- Status updates during multi-step operations
-
-The LLM still runs afterward and generates its own response. If you want to suppress the LLM's follow-up response, include this in your result:
-
-```python
-return ToolBase.result(core, 'my_tool', {
-    "status":      "done",
-    "instruction": "Feedback already given. Acknowledge briefly only.",
-})
-```
+Pushes text directly to the response queue — the user hears or sees it immediately, before the LLM has generated its response. Use for operations that take a moment, or for confirmations that don't need LLM rewording. The LLM still runs afterward and generates its own response.
 
 ---
 
 ### Scheduling future callbacks
 
-Use this to fire an event in the future — a timer, reminder, or any scheduled notification back to the user.
-
 ```python
 event_id = ToolBase.schedule(
     core, session, tool_config,
-    label         = "pasta",           # human-readable name shown in listings
-    delay_seconds = 600,               # seconds from now
+    label         = "pasta",
+    delay_seconds = 600,
     announcement  = "The pasta timer has finished. Announce this naturally.",
-    event_type    = 'timer',           # used for filtering in list_scheduled
+    event_type    = 'timer',
 )
 ```
 
-The `announcement` text is injected as LLM context when the callback fires, so the response is natural rather than a flat canned message. Make it instructional: *"The pasta timer is done. Announce this to the user in a friendly way."*
-
-The callback is automatically routed to the same interface and endpoint the user is currently on — voice, phone, or Telegram — without any extra configuration. If you need to override the destination:
-
-```python
-event_id = ToolBase.schedule(
-    core, session, tool_config,
-    label         = "reminder",
-    delay_seconds = 3600,
-    announcement  = "Your reminder.",
-    event_type    = 'reminder',
-    endpoint_id   = 'supernova-voice',   # override destination
-    interface     = 'voice_remote',      # override interface
-)
-```
+The callback is automatically routed to the same interface and endpoint the user is currently on. The `announcement` text is injected as LLM context when the callback fires.
 
 **Cancelling:**
 ```python
 cancelled = ToolBase.cancel_schedule(core, event_id)
-# Returns True if found and cancelled, False if not found
 ```
 
 **Listing:**
 ```python
-timers   = ToolBase.list_scheduled(core, event_type='timer')
-all_events = ToolBase.list_scheduled(core)
+timers = ToolBase.list_scheduled(core, event_type='timer')
+all    = ToolBase.list_scheduled(core)
 ```
 
 ---
 
 ### Session helpers
 
-These give you context about the current user and interface:
-
 ```python
 speaker   = ToolBase.speaker(session)    # "Jesse" or None
-interface = ToolBase.interface(session)  # "voice_remote", "asterisk", "telegram", "web", "headless"
+interface = ToolBase.interface(session)  # "speaker", "phone", "general", "headless"
 endpoint  = ToolBase.endpoint(session)   # "supernova-voice", "286047661", etc.
 ```
 
-**`speaker`** — the identified speaker's name if voice ID has matched them, or None. Use this to personalise responses or look up user-specific data (e.g. their enrolled email address).
+**`speaker`** — the voice-identified speaker name, or None. Use to personalise responses or look up user-specific data.
 
-**`interface`** — which interface the user is on. Use this to format responses appropriately — voice responses should be short and spoken-word friendly, Telegram responses can use more text and formatting.
+**`interface`** — which interface the user is on. Use to format responses appropriately — voice responses should be short and spoken-word friendly, Telegram and web can use more text and markdown.
 
-**`endpoint`** — the unique identifier for this user's current connection. For voice it's the satellite name, for Telegram it's the chat_id, for phone it's the endpoint name from config.
+**`endpoint`** — the unique identifier for this connection. For voice it's the satellite name, for Telegram it's the chat_id.
+
+---
+
+### File storage
+
+All tool data lives under `data/{tool_name}/` at the project root. Use `data_path()` as the foundation — never hardcode paths.
+
+```python
+# Get the directory
+dir_path  = ToolBase.data_path('my_tool')
+
+# Get a specific file path (directory created automatically)
+file_path = ToolBase.data_path('my_tool', 'store.db')
+
+# JSON helpers
+state = ToolBase.read_json('my_tool', 'state.json', default={})
+ToolBase.write_json('my_tool', 'state.json', state)   # atomic write
+
+# Text/markdown helpers
+content = ToolBase.read_text('my_tool', 'notes.md')
+ToolBase.write_text('my_tool', 'notes.md', content)   # atomic write
+
+# List files
+all_files = ToolBase.list_files('my_tool')
+md_files  = ToolBase.list_files('my_tool', extension='.md')
+```
+
+All writes are atomic — they use a `.tmp` rename so partial writes never corrupt files.
+
+---
+
+### Session history and mode
+
+```python
+history = ToolBase.get_history(session)        # list of message dicts
+ToolBase.set_history(session, history)         # replace history
+ToolBase.clear_history(session)                # wipe history
+
+mode = ToolBase.get_agent_mode(session)        # current AgentMode
+ToolBase.set_agent_mode(session, 'deep_research')  # switch mode
+
+ToolBase.request_hangup(session)               # close voice channel after response
+```
 
 ---
 
 ## Config File
 
-Every tool can have a yaml config file at `config/{tool_name}.yaml`. It is loaded automatically — no code needed to read it. The full contents are passed as `tool_config` into `execute()` and `provide_context()`.
+Every tool can have a yaml config file at `config/{tool_name}.yaml`. It is loaded automatically — no code needed to read it. The full contents are passed as `tool_config` into `execute()`, `provide_context()`, `provide_turn_context()`, and `on_session_end()`.
 
-### Standard fields (recognised by the tool loader)
+### Standard fields recognised by the tool loader
 
 ```yaml
-enabled:          true    # Set false to disable without deleting the file
-voice_only:       false   # true = only available on satellite voice (VoiceMode.SPEAKER)
-phone_only:       false   # true = only available on phone calls (VoiceMode.PHONE)
-requires_config:  ""      # Skip this tool if AppConfig lacks this attribute
-context_priority: 50      # Lower number = earlier in system prompt (default 50)
+enabled:               true   # false to disable without deleting the file
+interfaces:            []     # [] = all interfaces, or restrict: [speaker, phone, general]
+agent_modes:           []     # [] = general mode only, [all] = every mode, [deep_research] = whitelist
+blocked_modes:         []     # exclude from specific modes e.g. [relay]
+requires_config:       ""     # skip tool if AppConfig lacks this attribute
+context_priority:      50     # position in system prompt — lower appears earlier (default 50)
+turn_context_priority: 50     # position in per-turn injection order (default 50)
 ```
+
+### Interface availability
+
+| `interfaces` value | Available on |
+|---|---|
+| `[]` or absent | All interfaces (default) |
+| `[speaker]` | Voice satellite only |
+| `[speaker, phone]` | Voice + phone |
+| `[general]` | Text interfaces only (Telegram, web) |
+| `[phone]` | Phone calls only |
+
+### Agent mode filtering
+
+| `agent_modes` value | Available in |
+|---|---|
+| `[]` or absent | General mode only |
+| `[all]` | Every agent mode |
+| `[deep_research]` | That mode only (whitelist) |
+
+`blocked_modes` takes precedence over `agent_modes` if both are set.
 
 ### Your own fields
 
-Any extra fields you add are passed straight through to your tool:
+Any extra fields are passed straight through to your tool:
 
 ```yaml
 enabled:          true
 api_key:          "your-api-key-here"
 default_location: "Brunswick, VIC, Australia"
 timeout:          10
-contacts:
-  Jesse: jesse@example.com
-  Dean:  dean@example.com
+debug:            false
 ```
 
-Access them in `execute()`:
+Access them in any hook or executor:
 
 ```python
-api_key  = tool_config.get('api_key', '')
-contacts = tool_config.get('contacts', {})
-timeout  = tool_config.get('timeout', 10)
+api_key = tool_config.get('api_key', '')
+debug   = tool_config.get('debug', False)
+timeout = tool_config.get('timeout', 10)
 ```
-
-### Interface availability
-
-| yaml setting | Available on |
-|---|---|
-| *(nothing set)* | All interfaces |
-| `voice_only: true` | Satellite voice only |
-| `phone_only: true` | Phone calls only |
-| `voice_only: false` `phone_only: false` | All interfaces (explicit) |
-
-The `hangup_call` tool is a good example of `voice_only: true` — it only makes sense in a voice context.
-
----
-
-## Context Injection
-
-If your tool needs to inject information into the system prompt on every turn — a contacts list, the user's current state, known entity names — add a `provide_context()` function:
-
-```python
-def provide_context(core, tool_config: dict) -> str:
-    contacts = tool_config.get('contacts', {})
-    if not contacts:
-        return ""
-    names = ", ".join(contacts.keys())
-    return f"[EMAIL CONTACTS]\nKnown contacts: {names}"
-```
-
-The `context_priority` field in the yaml controls where this text appears in the system prompt — lower numbers appear earlier. The default is `50`. Use a low number (e.g. `10`) for critical context the LLM needs to read first.
-
-Return an empty string `""` when there's nothing to inject — the loader skips empty strings.
 
 ---
 
@@ -375,13 +432,35 @@ TOOLS = [
 ]
 ```
 
-The `TOOLS` list must be at the **bottom** of the file — all functions it references must be defined before it. Name executor functions with a leading underscore (e.g. `_execute_one`) to make it clear they're not part of the public interface.
+The `TOOLS` list must be at the **bottom** of the file. The schema function name must match the `name` field exactly — the loader uses the function reference, and Ollama uses its `__name__` as the tool identifier. Name executor functions with a leading underscore to make it clear they are not part of the public interface.
+
+Plugin hooks (`provide_context`, `provide_turn_context`, `on_session_end`) work normally in multi-tool files — export them at module level alongside the `TOOLS` list.
+
+---
+
+## Dynamic Schemas
+
+For tools that need runtime data in their descriptions (e.g. a list of available modes, devices, or contacts), export a `get_schema` hook instead of a plain schema function:
+
+```python
+def get_schema(tool_config: dict, core) -> callable:
+    """Return a schema function built with current runtime data."""
+    options = ["option_a", "option_b"]  # fetch from config or core
+
+    def my_tool(choice: str = "option_a") -> str:
+        f"""Choose from: {', '.join(options)}."""
+        ...
+
+    return my_tool
+```
+
+The loader calls `get_schema` at reload time and registers the returned callable as the schema.
 
 ---
 
 ## Stateful Tools
 
-Tools that need to maintain state across calls (e.g. a behaviour rules list, a cache) can use module-level variables. These persist for the lifetime of the server process. The tool loader uses a stable module key so state survives hot-reloads when you edit the tool file.
+Tools that need to maintain state across calls can use module-level variables. These persist for the lifetime of the server process. Always protect shared state with a lock since multiple sessions can call tools concurrently.
 
 ```python
 import threading
@@ -399,13 +478,11 @@ def execute(tool_args, session, core, tool_config):
         ...
 ```
 
-Always protect shared state with a `threading.Lock()` — multiple sessions can call tools concurrently.
-
 ---
 
 ## Lazy-Loaded Dependencies
 
-If your tool has a heavy dependency (a large client library, a model, a database connection) that you don't want to load at startup, use a module-level singleton with lazy initialisation:
+For heavy dependencies (large client libraries, database connections, ML models) use a module-level singleton with lazy initialisation:
 
 ```python
 _client = None
@@ -436,60 +513,65 @@ This keeps startup fast and only pays the initialisation cost on first use.
 | `ToolBase.error(core, name, message)` | Error — LLM relays message to user |
 | `None` | Success with no data — LLM receives `"ok"` |
 
-The `payload` dict in `ToolBase.result()` is passed to the LLM verbatim. Useful keys:
+Useful keys in the `payload` dict:
 
 | Key | Purpose |
 |---|---|
-| `"text"` | Plain text the LLM can use directly |
-| `"status"` | A machine-readable status string |
+| `"status"` | Machine-readable status string |
 | `"instructions"` | Explicit guidance for how the LLM should respond |
-| `"instruction"` | Same as above (both spellings work) |
-| *(anything else)* | Structured data the LLM reads and interprets |
+| `"text"` | Plain text the LLM can use directly |
+| anything else | Structured data the LLM reads and interprets |
 
 ---
 
 ## Tips and Patterns
 
-**Validate early.** Check required config and parameters at the top of `execute()` before making any API calls or doing any work. Use `ToolBase.require_config()` for config and an explicit check for required parameters.
+**Validate early.** Check required config and parameters at the top of `execute()` before making any API calls. Use `ToolBase.require_config()` for config fields and an explicit check for required parameters.
 
 **Give immediate feedback for slow operations.** If your tool makes an HTTP request or does anything that takes more than a fraction of a second, call `ToolBase.speak()` first so the user knows something is happening.
 
-**Guide the LLM's response.** Include an `"instructions"` key in your result payload to tell the LLM exactly how to present the data. Without it, the LLM improvises — which is usually fine, but explicit instructions produce more consistent results.
+**Guide the LLM's response.** Include an `"instructions"` key in your result payload. Without it the LLM improvises — explicit instructions produce more consistent results and prevent the LLM from doing things like reading out internal IDs or reformatting data poorly.
 
-**Log at the right level.** Use `log.debug()` for per-call detail you'd only want when actively debugging. Use `log.info()` for normal operational events (tool called, result returned). Use `log.warning()` for unexpected but recoverable situations. Use `log.error()` with `exc_info=True` for exceptions.
+**Log at the right level.** Use `log.debug()` for per-call detail. Use `log.info()` for normal operational events. Use `log.warning()` for unexpected but recoverable situations. Use `log.error()` with `exc_info=True` for exceptions.
 
-**Keep schemas honest.** The LLM reads your schema function's docstring to decide when to call the tool. Be specific about what triggers it — vague descriptions lead to the LLM calling the wrong tool or missing opportunities to use the right one.
+**Keep schemas honest.** The LLM reads your docstring to decide when to call the tool. Be specific about what triggers it. Include example phrases. Vague descriptions lead to wrong tool selection or missed opportunities.
 
-**Don't raise exceptions.** Always catch exceptions in `execute()` and return `ToolBase.error()`. Unhandled exceptions propagate up and produce unhelpful output for the user.
+**Don't raise exceptions.** Always catch exceptions in `execute()` and return `ToolBase.error()`. Unhandled exceptions produce unhelpful output for the user.
 
-**Use `voice_only: true` for voice-specific tools.** Tools like `hangup_call` only make sense on voice interfaces. Setting `voice_only: true` in the yaml keeps them out of Telegram and web sessions where they'd be confusing.
+**Use `interfaces` to restrict voice-specific tools.** Tools like `hangup_call` only make sense on voice interfaces. Setting `interfaces: [speaker, phone]` keeps them out of Telegram and web sessions.
 
-**Disable without deleting.** Set `enabled: false` in the yaml to temporarily disable a tool without removing its file.
+**Disable without deleting.** Set `enabled: false` in the yaml to temporarily disable a tool without removing its file. Hot-reload picks this up immediately.
+
+**Use `debug` flags in yaml.** For tools with verbose logging (like the memory and conversation_log plugins), gate noisy log lines on `tool_config.get('debug', False)` and expose a `debug: false` field in the yaml. Users can flip it to `true` without touching code and the change takes effect on the next request.
 
 ---
 
 ## Complete Example
 
-A minimal but complete tool that fetches a joke from an API:
+A minimal but complete tool:
 
 **`tools/tell_joke.py`**
 ```python
 """
-tell_joke tool — fetches a random joke from an API.
+tell_joke — fetches a random joke from an API.
 """
 import requests
+from typing import Annotated
+from pydantic import Field
 from core.tool_base import ToolBase
 
 log = ToolBase.logger('tell_joke')
 
 
-def tell_joke(category: str = "general") -> str:
+def tell_joke(
+    category: Annotated[str, Field(
+        default="general",
+        description="Joke category. Options: 'general', 'programming', 'dad'.",
+    )] = "general",
+) -> str:
     """
     Fetch and tell a random joke.
     Use when the user asks for a joke, something funny, or to cheer them up.
-
-    Args:
-        category: The joke category. Options: 'general', 'programming', 'dad'.
     """
     ...
 
@@ -499,12 +581,13 @@ def execute(tool_args: dict, session: dict, core, tool_config: dict) -> str:
     category = params.get('category', 'general')
 
     log.info("Fetching joke", extra={'data': f"category={category!r}"})
+    ToolBase.speak(core, session, "Let me find a good one.")
 
     try:
         response = requests.get(
-            f"https://example-joke-api.com/joke",
+            "https://example-joke-api.com/joke",
             params={"category": category},
-            timeout=5,
+            timeout=tool_config.get('timeout', 5),
         )
         response.raise_for_status()
         joke = response.json().get('joke', 'No joke found.')
@@ -521,8 +604,18 @@ def execute(tool_args: dict, session: dict, core, tool_config: dict) -> str:
 
 **`config/tell_joke.yaml`**
 ```yaml
-enabled: true
-voice_only: false
+enabled:   true
+interfaces: []
+timeout:   5
 ```
 
-That's it — the tool loader watches for file changes and reloads automatically on the next request. No restart needed.
+---
+
+## Hook Summary
+
+| Hook | Signature | When it fires | Injection point |
+|---|---|---|---|
+| `provide_context` | `(core, tool_config, session) -> str` | Every turn, system prompt build | Static system prompt (cache-safe) |
+| `provide_turn_context` | `(core, tool_config, session, user_input) -> str \| None` | Every turn, just before user message | Dynamic system message before user turn |
+| `on_session_end` | `(core, tool_config, session) -> None` | When session closes cleanly | Daemon thread, no return value |
+| `get_schema` | `(tool_config, core) -> callable` | At tool reload time | Returns a schema function |
