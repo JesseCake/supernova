@@ -61,6 +61,7 @@ class ToolLoader:
         self._executors:        dict       = {}   # name → callable(tool_args, session, core)
         self._tool_configs:     dict       = {}   # name → yaml dict
         self._context_providers: list      = []   # (priority, name, fn, tool_config)
+        self._turn_context_providers: list = []   # for those tools that inject some context just before agent turn
         self._last_mtime:       float      = 0.0
         self._core_ref                     = None  # set on first get_context_injections call
 
@@ -121,6 +122,29 @@ class ToolLoader:
                     results.append(text.strip())
             except Exception as e:
                 log.error(f"Context provider error in {name}", extra={'data': str(e)})
+        return results
+    
+    def get_turn_context_injections(self, core, session: dict, user_input: str) -> list[str]:
+        """
+        Call all turn context providers in priority order and return
+        a list of non-empty strings to inject as system messages
+        immediately before the user message each turn.
+
+        Unlike get_context_injections(), these are NOT added to the static
+        system prompt — they go at the end of the message list so the
+        Ollama KV cache prefix remains stable.
+
+        Lower turn_context_priority = earlier in the injection order.
+        """
+        self._reload_if_changed()
+        results = []
+        for priority, name, provider_fn, tool_config in self._turn_context_providers:
+            try:
+                text = provider_fn(core, tool_config, session, user_input)
+                if text and text.strip():
+                    results.append(text.strip())
+            except Exception as e:
+                log.error(f"Turn context provider error in {name}", extra={'data': str(e)})
         return results
 
     # ── Filtering helpers ─────────────────────────────────────────────────────
@@ -203,6 +227,7 @@ class ToolLoader:
         executors        = {}
         tool_configs     = {}
         context_providers = []
+        turn_providers   = []
 
         try:
             tool_files = sorted(
@@ -255,6 +280,13 @@ class ToolLoader:
                 priority = tool_config.get('context_priority', 50)
                 context_providers.append((priority, name, provider_fn, tool_config))
                 log.debug(f"Registered context provider: {name} (priority={priority})")
+
+            # ── Turn context provider (optional) ───────────────────────────────
+            turn_fn = getattr(module, 'provide_turn_context', None)
+            if turn_fn is not None and callable(turn_fn):
+                priority = tool_config.get('turn_context_priority', 50)
+                turn_providers.append((priority, name, turn_fn, tool_config))
+                log.debug(f"Registered turn context provider: {name} (priority={priority})")
 
             # ── Executor closure ──────────────────────────────────────────────
             def make_executor(fn, tc):
@@ -324,11 +356,13 @@ class ToolLoader:
 
         # Sort context providers by priority
         context_providers.sort(key=lambda x: x[0])
+        turn_providers.sort(key=lambda x: x[0])
 
         self._tools             = tools
         self._executors         = executors
         self._tool_configs      = tool_configs
         self._context_providers = context_providers
+        self._turn_context_providers = turn_providers
         self._last_mtime        = self._current_mtime()
 
         general_count = sum(1 for t in tools if not t['_interfaces'])

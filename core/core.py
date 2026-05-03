@@ -371,11 +371,19 @@ class CoreProcessor:
         # Build system message fresh each turn
         system_message = self.create_system_message(session=session)
 
-        prompt = [system_message] + self.create_prompt(
+        turn_prompt, turn_injections = self.create_prompt(
             input_text           = input_text,
             conversation_history = conversation_history,
             session              = session,
         )
+
+        user_message = {'role': 'user', 'content': input_text}
+        prompt = [system_message] + turn_prompt + [user_message]
+
+        # Persist turn injections and user message to history
+        for msg in turn_injections:
+            get_history(session).append(msg)
+        get_history(session).append(user_message)
 
         # Get tools filtered by both interface_mode and agent_mode
         agent_mode   = get_agent_mode(session)
@@ -489,10 +497,14 @@ class CoreProcessor:
     # Prompt builders
     # ──────────────────────────────────────────────────────────────────────────
 
-    def create_prompt(self, input_text: str, conversation_history: list, session: dict) -> list:
+    def create_prompt(self, input_text: str, conversation_history: list, session: dict) -> tuple[list, list]:
         """
         Assemble the message list for the first Ollama call in a turn. 
         We add the time here because it was slowing down startup when included in the system message (wasn't caching).
+        Returns:
+            (full_message_list, turn_injections)
+            turn_injections are the dynamic system messages added this turn,
+            returned separately so process_input() can persist them to history.
         """
 
         now      = datetime.now()
@@ -505,9 +517,15 @@ class CoreProcessor:
         if speaker:
             context += f"\n\n[USER IDENTIFIED]\nYou are speaking with {speaker}."
 
-        time_message = {'role': 'system', 'content': context}
+        messages = conversation_history + [{'role': 'system', 'content': context}]
 
-        return conversation_history + [time_message, {'role': 'user', 'content': input_text}]
+        turn_injections = []
+        for injection in self.tool_loader.get_turn_context_injections(self, session, input_text):
+            msg = {'role': 'system', 'content': injection}
+            messages.append(msg)
+            turn_injections.append(msg)
+
+        return messages, turn_injections
 
     def create_system_message(self, session: dict) -> dict:
         """
@@ -579,7 +597,7 @@ class CoreProcessor:
                 think      = False,
                 tools      = prompt_tools,
                 options    = {
-                    'num_ctx': 4096,
+                    'num_ctx': 16384,
                 }
 
             )
