@@ -543,10 +543,11 @@ class CoreProcessor:
         messages = conversation_history + [{'role': 'system', 'content': context}]
 
         turn_injections = []
-        for injection in self.tool_loader.get_turn_context_injections(self, session, input_text):
-            msg = {'role': 'system', 'content': injection}
+        for text, persist in self.tool_loader.get_turn_context_injections(self, session, input_text):
+            msg = {'role': 'system', 'content': text}
             messages.append(msg)
-            turn_injections.append(msg)
+            if persist:
+                turn_injections.append(msg)
 
         return messages, turn_injections
 
@@ -558,8 +559,6 @@ class CoreProcessor:
           1. Agent personality (.md file selected by agent_mode)
           2. Tool context injections (behaviour rules, home automation entities, etc.)
           3. Interface declaration (LLM knows which interface it's on)
-          4. Current time
-          5. Speaker identification (if known)
         """
         interface_mode = get_interface_mode(session)
         agent_mode     = get_agent_mode(session)
@@ -573,11 +572,6 @@ class CoreProcessor:
 
         # 3. Interface declaration
         full_context += f"\n\n[INTERFACE]\nThe user is interacting via: {interface_mode}"
-
-        # 4. Speaker identification
-        #speaker = get_speaker(session)
-        #if speaker:
-        #    full_context += f"\n\n[SPEAKER IDENTIFIED]\nYou are speaking with {speaker}."
 
         return {'role': 'system', 'content': full_context}
 

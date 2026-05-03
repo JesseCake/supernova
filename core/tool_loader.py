@@ -151,7 +151,8 @@ class ToolLoader:
             try:
                 text = provider_fn(core, tool_config, session, user_input)
                 if text and text.strip():
-                    results.append(text.strip())
+                    persist = tool_config.get('turn_context_persist', True)
+                    results.append((text.strip(), persist))
             except Exception as e:
                 log.error(f"Turn context provider error in {name}", extra={'data': str(e)})
         return results

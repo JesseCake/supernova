@@ -5,7 +5,8 @@ debug:            false   # log memory retrievals and injections
 
 context_priority: 5
 turn_context_priority: 10   # inject early, before other turn context
+turn_context_persist: true  # keep injected context in conversation history 
 
 inject_top_k:  4        # memories auto-injected per turn
 search_top_k:  6        # memories returned on explicit search
-similarity_threshold: 0.5  # cosine distance — lower = more similar, 0=identical, 2=opposite
+similarity_threshold: 0.8  # cosine distance — lower = more similar, 0=identical, 2=opposite
