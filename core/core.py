@@ -498,6 +498,7 @@ class CoreProcessor:
         session[KEY_INTERFACE_MODE] = InterfaceMode.GENERAL
         session['interface']        = 'headless'
         session['endpoint_id']      = endpoint_id
+        session['_headless']        = True
 
         self.process_input(prompt, session_id)
 

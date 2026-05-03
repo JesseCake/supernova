@@ -113,6 +113,10 @@ class ToolLoader:
 
         Lower context_priority = earlier in the prompt.
         """
+        # if headless session, don't do anything:
+        if session and session.get('_headless'):
+            return []
+
         self._reload_if_changed()
         self._core_ref = core
         results = []
@@ -137,6 +141,10 @@ class ToolLoader:
 
         Lower turn_context_priority = earlier in the injection order.
         """
+        # if headless session, don't do anything:
+        if session.get('_headless'):
+            return []
+
         self._reload_if_changed()
         results = []
         for priority, name, provider_fn, tool_config in self._turn_context_providers:
