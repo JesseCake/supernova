@@ -1,0 +1,3 @@
+enabled:     true
+interfaces:  []    # all interfaces
+agent_modes: [all] # all agent modes
