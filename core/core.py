@@ -409,10 +409,15 @@ class CoreProcessor:
 
         # Get tools filtered by both interface_mode and agent_mode
         agent_mode   = get_agent_mode(session)
-        prompt_tools = self.tool_loader.get_tools(
-            interface_mode = interface_mode,
-            agent_mode     = agent_mode,
-        )
+
+        if '_headless_tools' in session:
+            prompt_tools = session['_headless_tools']
+        else:
+            prompt_tools = self.tool_loader.get_tools(
+                interface_mode = interface_mode,
+                agent_mode     = agent_mode,
+            )
+
 
         # max_tool_loops from agent mode config
         max_loops  = agent_mode.max_tool_loops if agent_mode else 5
@@ -487,10 +492,30 @@ class CoreProcessor:
     # Headless (background tasks)
     # ──────────────────────────────────────────────────────────────────────────
 
-    def run_headless(self, prompt: str, endpoint_id: str = '') -> str:
+    def run_headless(
+        self,
+        prompt:           str,
+        endpoint_id:      str  = '',
+        tools:            list = None,
+        session_overrides: dict = None,
+    ) -> str:
         """
         Run a prompt through the LLM with no live user present.
-        Returns the text response. Tools can still fire callbacks/notifications.
+        Returns the text response.
+
+        Args:
+            prompt:             The user-turn prompt text to process.
+            endpoint_id:        Optional endpoint to associate with this session
+                                (used for event callbacks from tools).
+            tools:              Optional explicit list of schema functions to expose
+                                to the LLM. Pass [] for no tools, or a list of
+                                specific schema functions to restrict the tool set.
+                                Defaults to None, which uses the standard tool loader
+                                filtered by interface/agent mode (existing behaviour).
+            session_overrides:  Optional dict merged into the session after creation.
+                                Use to inject speaker, user identity, or any other
+                                session keys needed by tools (e.g. _get_user_id).
+                                Example: {'speaker': 'jesse', 'endpoint_id': '123'}
         """
         session_id = f"headless_{uuid.uuid4().hex[:8]}"
         session    = self.create_session(session_id)
@@ -499,6 +524,15 @@ class CoreProcessor:
         session['interface']        = 'headless'
         session['endpoint_id']      = endpoint_id
         session['_headless']        = True
+
+        # Merge any caller-supplied identity / context overrides
+        if session_overrides:
+            session.update(session_overrides)
+
+        # If an explicit tool list is provided, stash it on the session so
+        # process_input can pick it up instead of querying the tool loader.
+        if tools is not None:
+            session['_headless_tools'] = tools
 
         self.process_input(prompt, session_id)
 

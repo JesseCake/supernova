@@ -1,12 +1,29 @@
 enabled:          true
 interfaces:       []     # all interfaces
 agent_modes:      [all]  # all agent modes
-debug:            false   # log memory retrievals and injections
+debug:            false  # log memory retrievals, injections, and skipped candidates
 
-context_priority: 5
-turn_context_priority: 10   # inject early, before other turn context
-turn_context_persist: true  # keep injected context in conversation history 
+context_priority:       5
+turn_context_priority:  10    # inject early, before other turn context
+turn_context_persist:   true  # keep injected context in conversation history
 
 inject_top_k:  4        # memories auto-injected per turn
 search_top_k:  6        # memories returned on explicit search
-similarity_threshold: 0.8  # cosine distance — lower = more similar, 0=identical, 2=opposite
+
+# Cosine distance threshold for semantic injection (0=identical, 2=opposite).
+# Facts with distance <= this value are injected into the turn context.
+# 0.8 is fairly permissive — lower this (e.g. 0.5) to inject only closely
+# relevant facts and reduce noise.
+similarity_threshold: 0.8
+
+# Cosine distance threshold for conflict detection in store_memory.
+# If a new fact is within this distance of an existing one, the LLM is asked
+# to decide whether to overwrite, coexist, or skip.
+# 0.15 is tight — only near-identical facts trigger arbitration.
+# Raise to 0.25–0.35 to catch broader contradictions (e.g. diet changes).
+conflict_threshold: 0.5
+
+# How long after a session ends to inject a [RECENT SESSION] hint (minutes).
+# If the user had a session within this window, the agent is nudged to use
+# recall tools if the user references it.
+recency_hint_minutes: 120
