@@ -15,7 +15,7 @@ import threading
 from typing import Annotated
 from pydantic import Field
 from core.tool_base import ToolBase
-from core.session_state import get_history
+from core.session_state import get_history, KEY_IMMEDIATE_SEND, KEY_IMMEDIATE_ONLY
 
 log = ToolBase.logger('reply_to_caller')
 
@@ -67,7 +67,6 @@ def execute(tool_args: dict, session, core, tool_config: dict) -> str:
         log.info("Wrong person responded",
                  extra={'data': f"endpoint={ToolBase.endpoint(session)}"})
 
-        # Mark this contact method unavailable temporarily
         if hasattr(core, 'presence_registry'):
             core.presence_registry.mark_unavailable(target_user, target_interface, ttl=600)
 
@@ -79,7 +78,9 @@ def execute(tool_args: dict, session, core, tool_config: dict) -> str:
 
         _inject_into_caller(core, caller_session_id,
             f"{target_friendly} could not be reached — the wrong person answered. "
-            f"The relay has been cancelled."
+            f"The relay has been cancelled.",
+            caller_interface = caller_interface,
+            caller_endpoint  = caller_endpoint,
         )
 
         return ToolBase.result(core, 'reply_to_caller', {
@@ -98,12 +99,12 @@ def execute(tool_args: dict, session, core, tool_config: dict) -> str:
         f"You are speaking to {caller_name}. Do not refer to {caller_name} in third person."
     )
     _inject_into_caller(
-        core, 
-        caller_session_id, 
+        core,
+        caller_session_id,
         relay_message,
         caller_interface = caller_interface,
         caller_endpoint  = caller_endpoint,
-        )
+    )
 
     # ── Restore target's suspended session ────────────────────────────────────
     context_note = (
@@ -133,8 +134,8 @@ def _inject_into_caller(core, caller_session_id: str, message: str,
     caller_session = core.get_session(caller_session_id)
 
     if caller_session is None:
-        # Session is gone (caller hung up). If we have routing info,
-        # fire the event handler directly — same path as the timer callback.
+        # Session is gone (caller disconnected). Fire via event handler —
+        # same path as timer/scheduler callbacks.
         log.warning("Caller session gone — attempting callback via event handler",
                     extra={'data': f"interface={caller_interface!r} endpoint={caller_endpoint!r}"})
         if caller_interface and caller_endpoint:
@@ -150,19 +151,38 @@ def _inject_into_caller(core, caller_session_id: str, message: str,
                             extra={'data': caller_interface})
         return
 
-    # Session still alive — inject normally
-    log.info("Injecting reply into caller session",
-             extra={'data': caller_session_id})
+    # ── Session still alive ───────────────────────────────────────────────────
+    # The caller's _handle_message coroutine has already returned — nobody is
+    # draining the response queue anymore. We must route the LLM response via
+    # immediate_send instead, which is wired directly to send_message() on the
+    # caller's interface and remains valid for the lifetime of the session.
+    immediate_send = caller_session.get(KEY_IMMEDIATE_SEND)
 
-    thread = threading.Thread(
-        target  = core.process_input,
-        kwargs  = {
-            'input_text': message,
-            'session_id': caller_session_id,
-        },
-        daemon  = True,
-    )
-    thread.start()
+    if immediate_send is None:
+        # No immediate_send on this session — this shouldn't happen for
+        # Telegram but handle it gracefully by logging and bailing.
+        log.warning("Caller session has no immediate_send — cannot deliver reply",
+                    extra={'data': f"session={caller_session_id}"})
+        return
+
+    log.info("Injecting reply into caller session via immediate_send",
+             extra={'data': f"session={caller_session_id}"})
+
+    # Temporarily set immediate_send_only so process_input routes the full
+    # LLM response through immediate_send rather than the orphaned queue.
+    caller_session[KEY_IMMEDIATE_ONLY] = True
+
+    def _run():
+        try:
+            core.process_input(
+                input_text = message,
+                session_id = caller_session_id,
+            )
+        finally:
+            # Restore normal queue-based routing after this injection
+            caller_session[KEY_IMMEDIATE_ONLY] = False
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 def _restore_target_session(core, relay_session: dict, context_note: str = None):
