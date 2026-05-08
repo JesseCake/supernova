@@ -512,6 +512,14 @@ def on_session_end(core, tool_config: dict, session: dict):
     """
     if not tool_config.get('enabled', True):
         return
+    
+    # Relay sessions are short-lived intermediary conversations — they contain
+    # system framing, relay instructions, and another user's words rather than
+    # a real conversation with the session owner. Skip both phases entirely.
+    if session.get('relay_caller_session_id'):
+        log.debug("on_session_end — skipping relay session",
+                extra={'data': f"session={get_session_id(session)[:8]}"})
+        return
 
     session_id = get_session_id(session)
     history    = get_history(session)
