@@ -59,7 +59,7 @@ from core.session_state import (
 )
 from core.speaker_id import SpeakerIdentifier, load_profiles
 
-from whisper_live.vad import VoiceActivityDetector
+from interfaces.vad import VoiceActivityDetector
 from faster_whisper import WhisperModel
 
 from core.logger import get_logger

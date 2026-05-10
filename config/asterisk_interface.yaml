@@ -7,6 +7,9 @@ ari_password: "supernovaaccess"
 rtp_local_ip: "127.0.0.1"
 outbound_caller_id: ""
 
+speaker_id:
+  threshold: 0.5
+
 endpoints:
   office:
     friendly_name: "Office Phone"

@@ -17,7 +17,7 @@ from interfaces.telegram_interface import TelegramInterface
 # Shared inference instances — created once here so no interface loads its own.
 # Both Whisper and VAD are passed into whichever interfaces need them.
 from faster_whisper import WhisperModel
-from whisper_live.vad import VoiceActivityDetector
+from interfaces.vad import VoiceActivityDetector
 from piper import PiperVoice
 
 if __name__ == "__main__":

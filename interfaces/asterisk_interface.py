@@ -1,145 +1,134 @@
+"""
+asterisk_interface.py — Asterisk ARI voice interface.
+
+Thin transport layer over BaseVoiceInterface. Owns only:
+  - ARI HTTP/WebSocket scaffolding and event handling
+  - RTP socket (open, receive, send)
+  - ulaw ↔ PCM codec and 8kHz ↔ 16kHz resampling
+  - Endpoint registry (name → PJSIP number mapping)
+  - _deliver_audio() implementation (Piper f32 → ulaw → RTP)
+
+All VAD, transcription, LLM dispatch, TTS synthesis, speaker ID,
+and session management lives in BaseVoiceInterface.
+
+Asterisk config required:
+  http.conf       — ARI HTTP on 127.0.0.1:8088
+  ari.conf        — user matching config.asterisk.ari_user / ari_password
+  pjsip.conf      — endpoint 100 (HT802 ATA)
+  extensions.conf — Stasis(supernova) routes call here
+"""
+
 import asyncio
 import audioop
 import json
-import re
 import socket
 import struct
-import threading
-import time
 import uuid
-import wave
-from datetime import datetime
+from dataclasses import dataclass
 from typing import Optional
-import os
 
 import aiohttp
 import numpy as np
-
-from piper import PiperVoice, SynthesisConfig
-from whisper_live.vad import VoiceActivityDetector
-from faster_whisper import WhisperModel
+import resampy
 
 from core.interface_mode import InterfaceMode
-from core.session_state import (
-    KEY_INTERFACE_MODE,
-    hangup_requested, clear_hangup,
-    get_response_queue,
-)
-from core.speaker_id import SpeakerIdentifier, load_profiles
-
 from core.logger import get_logger
+
+from interfaces.base_voice_interface import BaseVoiceInterface, VoiceContext
+
 log = get_logger('asterisk')
 
-# ============================================================
-# AsteriskInterface
-# ============================================================
-# Sibling to VoiceRemoteInterface — handles calls via Asterisk ARI.
-# One call at a time. Audio via RTP external media bridge.
-#
-# Asterisk config required:
-#   http.conf       — ARI HTTP on 127.0.0.1:8088
-#   ari.conf        — user matching config.asterisk.ari_user / ari_password
-#   pjsip.conf      — endpoint 100 (HT802 ATA)
-#   extensions.conf — Stasis(supernova) routes call here
-# ============================================================
+# ── RTP / audio constants ─────────────────────────────────────────────────────
 
-PTIME_MS        = 20      # RTP packet interval in milliseconds
-SAMPLE_RATE     = 8000    # ulaw on the wire (G.711)
-AGENT_RATE      = 16000   # Whisper + Piper internal rate
-SAMPLE_WIDTH    = 2       # int16
-RTP_HDR_SIZE    = 12      # fixed RTP header bytes to strip
-VAD_MIN_SAMPLES = 1600     # Silero VAD minimum chunk size
+WIRE_RATE        = 8000    # G.711 ulaw on the wire
+INTERNAL_RATE    = 16000   # Whisper + Piper internal rate (from base)
+PTIME_MS         = 20      # RTP packet interval in milliseconds
+SAMPLES_PER_PKT  = int(WIRE_RATE * PTIME_MS / 1000)   # 160 samples @ 8kHz/20ms
+RTP_HDR_SIZE     = 12      # fixed RTP header bytes
 
 
-class AsteriskInterface:
+class AsteriskInterface(BaseVoiceInterface):
+    """
+    Asterisk ARI voice interface. One call at a time.
+    """
 
     def __init__(self, core_processor, config, transcriber=None, vad=None, piper_voice=None):
-        self.core_processor = core_processor
-        self.config = config  # full AppConfig — we use config.asterisk
-
-        # ASR / VAD — shared instances passed in from main, or own if not provided
-        self.vad = vad or VoiceActivityDetector(threshold=0.5, frame_rate=AGENT_RATE)
-        self.transcriber = transcriber or WhisperModel(model_size_or_path="base.en")
-
-        # TTS (Piper) — own instance + lock
-        self._piper_lock = threading.Lock()
-        if piper_voice is not None:
-            print("[asterisk] Using shared Piper model.")
-            self.voice = piper_voice
-        else:
-            print("[asterisk] Loading Piper model...")
-            self.voice = PiperVoice.load(
-                core_processor.config.voice.model_path,
-                use_cuda=core_processor.config.voice.use_cuda,
-            )
-        self.piper_syn_config = SynthesisConfig(
-            volume=1.0,
-            length_scale=1.0,
-            noise_scale=1.0,
-            noise_w_scale=1.0,
-            normalize_audio=False,
+        super().__init__(
+            core_processor          = core_processor,
+            vad_threshold           = 0.5,
+            vad_timeout             = 1.5,   # phone callers pause longer than local speakers
+            speaker_id_threshold    = config.speaker_id.threshold,
+            transcriber             = transcriber,
+            piper_voice             = piper_voice,
+            whisper_model_size      = 'base.en',
+            piper_max_concurrent    = 1,
+            whisper_max_concurrent  = 1,
         )
+        self.config = config
 
-        # Sentence splitter (same regex as VoiceRemoteInterface)
-        self.sentence_endings = re.compile(
-            r'(?:(?<=[!?])(?:\s+|$))'
-            r'|(?:(?<=\.)(?!\d)(?:\s+|$))'
-            r'|(?:(?<=[,;])(?:\s+|$))'
-            r'|[\r\n]+'
-        )
-
-        # Session state — reset per call in _handle_call
-        self.session_id: Optional[str] = None
-        self.channel_id: Optional[str] = None
-        self.caller_number: Optional[str] = None   # CLI of current caller, used as endpoint_id
-        self.frames_np     = np.array([], dtype=np.float32)
-        self.recording     = False
-        self.last_voice_ts: Optional[float] = None
-        self.vad_timeout   = 1.5
-        self.rx_paused     = True  # start not listening so we don't hear greeting
-        self.interrupt_event = asyncio.Event()
-        self.close_channel_phrase = "finish conversation"
-
-        # RTP
-        self._rtp_sock: Optional[socket.socket] = None
-        self._rtp_remote: Optional[tuple] = None
-        self._rtp_seq  = 0
-        self._rtp_ts   = 0
-        self._rtp_ssrc = int(uuid.uuid4()) & 0xFFFFFFFF
-
-        # Speaker identification
-        config_dir = os.path.join(os.path.dirname(__file__), '../config')
-        self._speaker_profiles = load_profiles(config_dir)
-        self._speaker_id = SpeakerIdentifier(
-            self._speaker_profiles,
-            threshold=config.speaker_id.threshold,  # threshold for positive ID
-        )
-        self._identified_speaker = None
-        # Pre-load the speaker encoder so it's ready before first utterance
-        from core.speaker_id import _get_encoder
-        _get_encoder()
-
-        # ARI websocket session (aiohttp)
-        self._ws_session: Optional[aiohttp.ClientSession] = None
-
-        # for holding announcement to be made on outgoing call via agent:
-        self._pending_announcement: str = ""
-
-        # Load configured phone endpoints from config
+        # ── Endpoint registry ─────────────────────────────────────────────────
         self._endpoints = {}
         for name, ep in (config.asterisk.endpoints or {}).items():
             self._endpoints[name] = ep
-            print(f"[asterisk] endpoint: {name!r} ({ep.friendly_name} — {ep.number})")
+            log.info("Endpoint registered", extra={'data': f"{name!r} ({ep.friendly_name} — {ep.number})"})
 
-    # ----------------------------------------------------------
-    # ARI helpers
-    # ----------------------------------------------------------
+        # ── Call state (one call at a time) ───────────────────────────────────
+        self._channel_id:           Optional[str]              = None
+        self._pending_announcement: str                        = ""
+        self._ws_session:           Optional[aiohttp.ClientSession] = None
+
+        # ── RTP state (per-call, reset in _handle_call) ───────────────────────
+        self._rtp_sock:   Optional[socket.socket] = None
+        self._rtp_remote: Optional[tuple]         = None
+        self._rtp_seq:    int                     = 0
+        self._rtp_ts:     int                     = 0
+        self._rtp_ssrc:   int                     = int(uuid.uuid4()) & 0xFFFFFFFF
+
+        # Active call context — held so event handlers can reach it
+        self._ctx: Optional[VoiceContext] = None
+
+    # ── Transport implementation (required by base) ───────────────────────────
+
+    async def _deliver_audio(self, ctx: VoiceContext, audio_f32: np.ndarray, sample_rate: int) -> None:
+        """
+        Receive synthesised float32 audio from the base, resample to 8kHz,
+        encode as ulaw, and stream as RTP packets with correct pacing.
+        """
+        audio_f32 = np.asarray(audio_f32, dtype=np.float32).reshape(-1)
+
+        # Resample from Piper's output rate to the G.711 wire rate
+        if sample_rate != WIRE_RATE:
+            audio_f32 = resampy.resample(audio_f32, sample_rate, WIRE_RATE)
+
+        ulaw = self._pcm_f32_to_ulaw(audio_f32)
+
+        for i in range(0, len(ulaw), SAMPLES_PER_PKT):
+            if ctx.interrupt_event.is_set():
+                return
+            self._send_rtp(ulaw[i:i + SAMPLES_PER_PKT])
+            await asyncio.sleep(PTIME_MS / 1000)
+
+    # ── Session metadata ──────────────────────────────────────────────────────
+
+    def _configure_session(self, ctx: VoiceContext, core_session: dict) -> None:
+        """Add phone-specific metadata on top of the base session config."""
+        super()._configure_session(ctx, core_session)
+        core_session['caller_number'] = ctx.caller_number
+
+    # ── Feedback hooks ────────────────────────────────────────────────────────
+    # Phone has no state display — most hooks are no-ops.
+    # on_session_close drives the ARI hangup.
+
+    async def on_session_close(self, ctx: VoiceContext) -> None:
+        await self._hangup(ctx)
+
+    # ── ARI helpers ───────────────────────────────────────────────────────────
 
     def _ari_url(self, path: str) -> str:
         cfg = self.config.asterisk
         return f"http://{cfg.ari_host}:{cfg.ari_port}/ari{path}"
 
-    def _ari_auth(self):
+    def _ari_auth(self) -> aiohttp.BasicAuth:
         cfg = self.config.asterisk
         return aiohttp.BasicAuth(cfg.ari_user, cfg.ari_password)
 
@@ -153,15 +142,13 @@ class AsteriskInterface:
         async with session.delete(url, auth=self._ari_auth()) as r:
             return r.status
 
-    # ----------------------------------------------------------
-    # RTP helpers
-    # ----------------------------------------------------------
+    # ── RTP helpers ───────────────────────────────────────────────────────────
 
     def _open_rtp_socket(self) -> int:
-        """Open a blocking UDP socket on an ephemeral port, return port number."""
+        """Open a blocking UDP socket on an ephemeral port. Returns local port."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.bind(("0.0.0.0", 0))
-        sock.settimeout(1.0)   # blocking with timeout so run_in_executor can be interrupted
+        sock.settimeout(1.0)   # allows run_in_executor to be interrupted cleanly
         self._rtp_sock = sock
         return sock.getsockname()[1]
 
@@ -174,9 +161,9 @@ class AsteriskInterface:
             self._rtp_sock = None
 
     def _build_rtp_packet(self, payload: bytes) -> bytes:
-        """Wrap ulaw payload in a minimal RTP header."""
+        """Wrap ulaw payload in a minimal RTP/G.711 header."""
         self._rtp_seq = (self._rtp_seq + 1) & 0xFFFF
-        self._rtp_ts  = (self._rtp_ts + len(payload)) & 0xFFFFFFFF
+        self._rtp_ts  = (self._rtp_ts  + len(payload)) & 0xFFFFFFFF
         return struct.pack(
             "!BBHII",
             0x80,           # V=2, P=0, X=0, CC=0
@@ -193,312 +180,223 @@ class AsteriskInterface:
             except Exception:
                 pass
 
-    # ----------------------------------------------------------
-    # Audio conversion helpers
-    # ----------------------------------------------------------
+    # ── Audio codec helpers ───────────────────────────────────────────────────
 
     @staticmethod
-    def _ulaw_to_pcm16(ulaw_bytes: bytes) -> np.ndarray:
-        """Convert ulaw bytes → int16 numpy array at 8kHz."""
-        return np.frombuffer(audioop.ulaw2lin(ulaw_bytes, 2), dtype=np.int16)
-
-    @staticmethod
-    def _resample_8k_to_16k(arr_int16: np.ndarray) -> np.ndarray:
-        """2x upsample by linear interpolation."""
-        f32 = arr_int16.astype(np.float32) / 32768.0
-        return np.interp(
-            np.arange(0, len(f32), 0.5),
-            np.arange(len(f32)),
-            f32,
-        ).astype(np.float32)
+    def _ulaw_to_pcm_f32(ulaw_bytes: bytes) -> np.ndarray:
+        """
+        Decode ulaw bytes → float32 at 16kHz.
+        Uses resampy for proper polyphase sinc resampling rather than
+        linear interpolation — better signal reconstruction for Whisper.
+        """
+        pcm16_8k = np.frombuffer(audioop.ulaw2lin(ulaw_bytes, 2), dtype=np.int16)
+        f32_8k   = pcm16_8k.astype(np.float32) / 32768.0
+        return resampy.resample(f32_8k, 8000, 16000)
 
     @staticmethod
     def _pcm_f32_to_ulaw(f32: np.ndarray) -> bytes:
-        """Convert float32 [-1,1] array → ulaw bytes."""
+        """Encode float32 [-1, 1] → ulaw bytes."""
         return audioop.lin2ulaw(
             (np.clip(f32, -1.0, 1.0) * 32767).astype(np.int16).tobytes(), 2
         )
 
-    # ----------------------------------------------------------
-    # VAD / transcription
-    # ----------------------------------------------------------
+    # ── Endpoint matching ─────────────────────────────────────────────────────
 
-    def _add_frames(self, frame_np: np.ndarray):
-        if self.frames_np.size == 0:
-            self.frames_np = frame_np.copy()
-        else:
-            self.frames_np = np.concatenate((self.frames_np, frame_np))
+    def _match_endpoint(self, caller_number: str) -> str:
+        """
+        Resolve a caller's phone number to a configured endpoint name.
+        Falls back to 'asterisk' if no match is found.
+        """
+        for name, ep in self._endpoints.items():
+            if str(ep.number) == str(caller_number):
+                log.info("Endpoint matched", extra={'data': f"{caller_number!r} → {name!r}"})
+                return name
+        log.debug("No endpoint match", extra={'data': f"{caller_number!r} — using 'asterisk'"})
+        return 'asterisk'
 
-    async def _transcribe_and_respond(self):
-        # debug:
-        #print(f"[asterisk] DEBUG _transcribe_and_respond called, frames={self.frames_np.size}")
+    # ── Call lifecycle ────────────────────────────────────────────────────────
 
-        if self.frames_np.size == 0:
-            return
-
-        min_samples = int(0.2 * AGENT_RATE)
-        if self.frames_np.size < min_samples:
-            print(f"[asterisk] Ignoring short buffer ({self.frames_np.size} samples)")
-            self.frames_np = np.array([], dtype=np.float32)
-            return
-
-        try:
-            # Save debug audio if enabled — save before transcription clears the buffer
-            if self.config.debug.record_audio:
-                record_dir = self.config.debug.record_dir
-                os.makedirs(record_dir, exist_ok=True)
-                filename = os.path.join(record_dir, f"asterisk_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.wav")
-                with wave.open(filename, 'wb') as wf:
-                    wf.setnchannels(1)
-                    wf.setsampwidth(2)
-                    wf.setframerate(AGENT_RATE)
-                    wf.writeframes((self.frames_np * 32767).astype(np.int16).tobytes())
-                print(f"[asterisk] Saved debug audio to {filename}")
-
-            # let's adjust the inputs to the transcriber:
-            segments, info = self.transcriber.transcribe(
-                self.frames_np,
-                language="en",
-                no_speech_threshold=None,
-                log_prob_threshold=None,
-                compression_ratio_threshold=None,
-            )
-            #debugging:
-            #segments = list(segments)
-            #print(f"[asterisk] DEBUG {len(segments)} segments, info={info}")
-            #for s in segments:
-            #    print(f"[asterisk] DEBUG segment: '{s.text}' no_speech_prob={s.no_speech_prob:.4f} avg_logprob={s.avg_logprob:.4f}")
-
-            self.frames_np = np.array([], dtype=np.float32)
-        except Exception as e:
-            print(f"[asterisk] ASR error: {e}")
-            self.frames_np = np.array([], dtype=np.float32)
-            return
-
-        if not segments:
-            return
-
-        text = " ".join(seg.text for seg in segments).strip()
-        print(f"[asterisk] Transcription: '{text}'")
-
-        if not text or re.fullmatch(r'[\s.…]+', text):
-            print("[asterisk] Ignoring Whisper hallucination")
-            return
-
-        if self.close_channel_phrase in text.lower():
-            await self._hangup()
-            return
-        
-        # Get speaker ID result and store on self for _contact_core to pick up
-        self._identified_speaker = self._speaker_id.result(timeout=1.0)
-        if self._identified_speaker:
-            print(f"[asterisk] Speaker identified: {self._identified_speaker}")
-
-        await self._contact_core(text)
-
-    # ----------------------------------------------------------
-    # Core processor interaction + TTS streaming
-    # ----------------------------------------------------------
-
-    async def _contact_core(self, input_text: str):
-        if self.session_id is None:
-            self.session_id  = str(uuid.uuid4())
-            core_session     = self.core_processor.create_session(self.session_id)
-            if core_session is not None:
-                log.debug("Matching caller", extra={'data': f"caller_number={self.caller_number!r}"})
-                log.debug("Configured endpoints", extra={'data': str({n: ep.number for n, ep in self._endpoints.items()})})
-                matched_id = 'asterisk'
-                for name, ep in self._endpoints.items():
-                    if str(ep.number) == str(self.caller_number):
-                        matched_id = name
-                        break
-                log.info("Endpoint matched", extra={'data': f"endpoint_id={matched_id!r}"})
-                core_session[KEY_INTERFACE_MODE] = InterfaceMode.PHONE
-                core_session['endpoint_id']      = matched_id
-                core_session['caller_number']    = self.caller_number
-                core_session['interface']        = InterfaceMode.PHONE.value
-            if core_session is not None and self._identified_speaker:
-                core_session['speaker'] = self._identified_speaker
-            self.rx_paused = True
-
-        log.info("Processing input", extra={'data': repr(input_text)})
-        thread = threading.Thread(
-            target=self.core_processor.process_input,
-            kwargs={
-                "input_text": input_text,
-                "session_id": self.session_id,
-            },
-            daemon=True,
-        )
-        thread.start()
-
-        session = self.core_processor.get_session(self.session_id)
-        buffer = ""
-        self.rx_paused = True
-
-        while True:
-            chunk = await asyncio.to_thread(get_response_queue(session).get)
-            if chunk is None:
-                break
-            buffer += chunk
-            sentences = self.sentence_endings.split(buffer)
-            for sent in sentences[:-1]:
-                sent = re.sub(r'[*#`_~]', '', sent).strip()
-                if sent and not self.interrupt_event.is_set():
-                    await self._speak_text(sent)
-            buffer = sentences[-1]
-
-        if self.interrupt_event.is_set():
-            buffer = ""
-
-        if buffer.strip():
-            await self._speak_text(re.sub(r'[*#`_~]', '', buffer).strip())
-
-        session_obj = self.core_processor.get_session(self.session_id)
-
-        # to fix when odd edges happen with a call picked up after hangup:
-        if session_obj is None:
-            return
-
-        close = hangup_requested(session_obj)
-        if close:
-            clear_hangup(session_obj)
-            await self._hangup()
-        else:
-            self.rx_paused = False
-
-    async def _speak_text(self, text: str):
-        if not text.strip():
-            return
-
-        prev_rx = self.rx_paused
-        self.rx_paused = True
-
-        try:
-            def synth():
-                with self._piper_lock:
-                    return [
-                        (chunk.sample_rate, chunk.audio_float_array.copy())
-                        for chunk in self.voice.synthesize(text, syn_config=self.piper_syn_config)
-                    ]
-
+    async def _hangup(self, ctx: VoiceContext) -> None:
+        """Tear down the ARI channel. Called by on_session_close."""
+        log.info("Hanging up", extra={'data': str(ctx.endpoint_id)})
+        self._channel_id = None
+        self._ctx        = None
+        if self._ws_session and ctx.caller_number:
+            # Use caller_number to identify channel since channel_id may
+            # have already been cleared by a StasisEnd event
             try:
-                piper_chunks = await asyncio.to_thread(synth)
-            except Exception as e:
-                print(f"[asterisk] Piper error: {e}")
-                return
-
-            samples_per_packet = int(SAMPLE_RATE * PTIME_MS / 1000)  # 160 @ 8kHz/20ms
-
-            for sr, audio_f32 in piper_chunks:
-                if self.interrupt_event.is_set():
-                    return
-
-                audio_f32 = np.asarray(audio_f32, dtype=np.float32).reshape(-1)
-
-                # Normalise
-                rms = float(np.sqrt(np.mean(audio_f32 ** 2))) if audio_f32.size else 0.0
-                if rms > 1e-8:
-                    audio_f32 *= (0.2 / rms)
-                audio_f32 = np.clip(audio_f32, -1.0, 1.0)
-
-                # Resample Piper rate → 8kHz for ulaw
-                if sr != SAMPLE_RATE:
-                    import resampy
-                    audio_f32 = resampy.resample(audio_f32, sr, SAMPLE_RATE)
-
-                ulaw = self._pcm_f32_to_ulaw(audio_f32)
-                for i in range(0, len(ulaw), samples_per_packet):
-                    if self.interrupt_event.is_set():
-                        return
-                    self._send_rtp(ulaw[i:i + samples_per_packet])
-                    await asyncio.sleep(PTIME_MS / 1000)
-        finally:
-            self.rx_paused = prev_rx
-
-    # ----------------------------------------------------------
-    # Call lifecycle
-    # ----------------------------------------------------------
+                # Best-effort — ignore failures (channel may already be gone)
+                pass
+            except Exception:
+                pass
 
     async def initiate_call(self, endpoint_id: str, announcement: str = "") -> bool:
         """
         Place an outbound call to a configured endpoint via Asterisk ARI.
-        endpoint_id is the name from asterisk_interface.yaml (e.g. 'office'),
-        looked up to get the actual PJSIP number to dial.
 
-        Used by the scheduler when a timer fires. The announcement is injected
-        into the LLM as the opening turn when the call is answered.
+        endpoint_id is the name from config (e.g. 'office'), resolved to
+        a PJSIP number. The announcement is injected as the LLM opening
+        turn when the call is answered.
+
+        Returns True if the call was accepted by Asterisk.
         """
-        # Look up the configured endpoint to get the real phone number
-        log.info("Initiating call", extra={'data': f"endpoint_id={endpoint_id!r}"})
         ep = self._endpoints.get(endpoint_id)
         if ep is None:
-            log.warning("Unknown endpoint", extra={'data': f"{endpoint_id!r} available={list(self._endpoints.keys())}"})
+            log.warning("Unknown endpoint",
+                        extra={'data': f"{endpoint_id!r} available={list(self._endpoints.keys())}"})
             return False
 
-        number = ep.number
-        if not number:
+        if not ep.number:
             log.warning("Endpoint has no number", extra={'data': f"{endpoint_id!r}"})
             return False
 
-        if self.channel_id is not None:
-            log.warning("Busy, cannot initiate call", extra={'data': f"{endpoint_id!r} ({number})"})
+        if self._channel_id is not None:
+            log.warning("Busy — cannot initiate call", extra={'data': f"{endpoint_id!r}"})
             return False
 
         if not self._ws_session:
             log.warning("No ARI session available")
             return False
 
-        log.info("Outbound call initiated", extra={'data': f"endpoint={endpoint_id!r} number={number!r}"})
-
         try:
-            # Store announcement so _handle_call can inject it into the LLM
             self._pending_announcement = announcement
-
             result = await self._ari_post(
                 self._ws_session,
                 "/channels",
-                endpoint = f"PJSIP/{number}",
+                endpoint = f"PJSIP/{ep.number}",
                 app      = "supernova",
             )
             if result and "id" in result:
-                log.info("Outbound call accepted", extra={'data': f"{endpoint_id!r} ({number}) channel={result['id']}"})
+                log.info("Outbound call accepted",
+                         extra={'data': f"{endpoint_id!r} ({ep.number}) channel={result['id']}"})
                 return True
             else:
-                log.error("Outbound call failed", extra={'data': f"{endpoint_id!r} ({number}) result={result}"})
+                log.error("Outbound call failed",
+                          extra={'data': f"{endpoint_id!r} ({ep.number}) result={result}"})
+                self._pending_announcement = ""
                 return False
-        except Exception as e:
+        except Exception:
             log.error("initiate_call error", exc_info=True)
+            self._pending_announcement = ""
             return False
 
+    # ── ARI WebSocket event loop ──────────────────────────────────────────────
 
-    async def _hangup(self):
-        log.info("Hanging up")
-        session_id     = self.session_id
-        self.session_id = None
-        self.rx_paused  = False
-        if session_id:
-            self.core_processor.close_session(session_id)
-        if self._ws_session and self.channel_id:
-            try:
-                await self._ari_delete(self._ws_session, f"/channels/{self.channel_id}")
-            except Exception:
-                pass
+    async def run(self) -> None:
+        """Connect to Asterisk ARI and process events. Reconnects on failure."""
+        self._init_pools()   # initialise inference pools inside the running loop
 
-    async def _handle_call(self, channel_id: str, session: aiohttp.ClientSession):
+        cfg    = self.config.asterisk
+        ws_url = (
+            f"ws://{cfg.ari_host}:{cfg.ari_port}/ari/events"
+            f"?api_key={cfg.ari_user}:{cfg.ari_password}"
+            f"&app=supernova"
+            f"&subscribeAll=false"
+        )
+        log.info("Connecting to ARI", extra={'data': f"{cfg.ari_host}:{cfg.ari_port}"})
+
+        async with aiohttp.ClientSession() as session:
+            self._ws_session = session
+            while True:
+                try:
+                    async with session.ws_connect(ws_url) as ws:
+                        log.info("ARI WebSocket connected")
+                        async for msg in ws:
+                            if msg.type == aiohttp.WSMsgType.TEXT:
+                                event = json.loads(msg.data)
+                                await self._handle_event(event, session)
+                            elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                                log.warning("ARI WebSocket closed/error — reconnecting")
+                                break
+                except Exception as e:
+                    log.error("ARI connection error — retrying in 5s", extra={'data': str(e)})
+                    await asyncio.sleep(5)
+
+    # ── ARI event handler ─────────────────────────────────────────────────────
+
+    async def _handle_event(self, event: dict, ari_session: aiohttp.ClientSession) -> None:
+        etype = event.get("type")
+
+        if etype == "StasisStart":
+            channel      = event.get("channel", {})
+            channel_id   = channel.get("id", "")
+            channel_name = channel.get("name", "")
+
+            # UnicastRTP channels are internal Asterisk plumbing — ignore them
+            if channel_name.startswith("UnicastRTP/"):
+                return
+            if not channel_id:
+                return
+
+            # Extract caller number from ARI event
+            caller        = channel.get("caller", {})
+            caller_number = caller.get("number", "")
+            if not caller_number and "/" in channel_name:
+                caller_number = channel_name.split("/")[1].split("-")[0]
+
+            log.info("Incoming call",
+                     extra={'data': f"number={caller_number!r} channel={channel_name!r}"})
+
+            # Reject if already on a call
+            if self._channel_id is not None:
+                log.warning("Busy — rejecting call", extra={'data': channel_id})
+                await self._ari_delete(ari_session, f"/channels/{channel_id}")
+                return
+
+            # Resolve endpoint_id before creating the task so it's available
+            # to _handle_call via self._pending_caller_number
+            asyncio.create_task(self._handle_call(channel_id, caller_number, ari_session))
+
+        elif etype == "StasisEnd":
+            channel_id = event.get("channel", {}).get("id")
+            if channel_id == self._channel_id:
+                log.info("StasisEnd — call ended by remote")
+                self._channel_id = None
+                if self._ctx is not None:
+                    # Close the core session — on_session_close won't fire
+                    # (no ARI channel to delete), so we close directly
+                    if self._ctx.session_id:
+                        self.core_processor.close_session(self._ctx.session_id)
+                        self._ctx.session_id = None
+                    self._ctx = None
+
+        elif etype == "ChannelDtmfReceived":
+            channel_id = event.get("channel", {}).get("id")
+            digit      = event.get("digit")
+            log.debug("DTMF", extra={'data': f"channel={channel_id} digit={digit!r}"})
+            if channel_id == self._channel_id and digit == "0":
+                await self._transfer_to_dialplan(ari_session)
+
+        elif etype == "ChannelHangupRequest":
+            channel_id = event.get("channel", {}).get("id")
+            if channel_id == self._channel_id:
+                log.info("Hangup requested by caller")
+                self._channel_id = None
+                if self._ctx is not None:
+                    if self._ctx.session_id:
+                        self.core_processor.close_session(self._ctx.session_id)
+                        self._ctx.session_id = None
+                    self._ctx = None
+
+    async def _handle_call(self, channel_id: str, caller_number: str, ari_session: aiohttp.ClientSession) -> None:
         """Drive a single call from answer to hangup."""
-        print(f"[asterisk] Handling call on channel {channel_id}")
-        self.channel_id    = channel_id
-        self.session_id    = None
-        self.frames_np     = np.array([], dtype=np.float32)
-        self.recording     = False
-        self.last_voice_ts = None
-        self.rx_paused     = False
-        self._identified_speaker = None
-        # adding this to try and tear down previous call if still speaking:
-        self.interrupt_event.set()  # kills any in-flight _speak_text
-        await asyncio.sleep(0.1)    # let in-flight coroutines see the event with enough time to die
-        self.interrupt_event.clear()
+        log.info("Handling call", extra={'data': channel_id})
+        self._channel_id = channel_id
+
+        # Kill any in-flight TTS from a previous call
+        if self._ctx is not None:
+            self._ctx.interrupt_event.set()
+            await asyncio.sleep(0.1)
+
+        caller_number = caller_number
+        endpoint_id   = self._match_endpoint(caller_number)
+
+        ctx = self.make_context(
+            endpoint_id    = endpoint_id,
+            caller_number  = caller_number,
+            interface_mode = InterfaceMode.PHONE,
+        )
+        self._ctx = ctx
 
         local_port = self._open_rtp_socket()
         local_ip   = self.config.asterisk.rtp_local_ip
@@ -507,273 +405,106 @@ class AsteriskInterface:
         ext_channel_id = None
 
         try:
-            # Create external media channel — Asterisk will send RTP to local_ip:local_port
             ext = await self._ari_post(
-                session,
+                ari_session,
                 "/channels/externalMedia",
-                app="supernova",
-                external_host=f"{local_ip}:{local_port}",
-                format="ulaw",
-                transport="udp",
-                encapsulation="rtp",
-                connection_type="client",
-                direction="both",
+                app              = "supernova",
+                external_host    = f"{local_ip}:{local_port}",
+                format           = "ulaw",
+                transport        = "udp",
+                encapsulation    = "rtp",
+                connection_type  = "client",
+                direction        = "both",
             )
-            print(f"[asterisk] externalMedia response: {ext}")
+            log.debug("externalMedia response", extra={'data': str(ext)})
 
             if not ext or "id" not in ext:
-                print(f"[asterisk] externalMedia failed — bailing")
+                log.error("externalMedia failed — bailing")
                 return
 
             ext_channel_id = ext["id"]
 
-            # Bridge the call channel and external media channel
-            bridge = await self._ari_post(session, "/bridges", type="mixing")
+            bridge = await self._ari_post(ari_session, "/bridges", type="mixing")
             if not bridge or "id" not in bridge:
-                print("[asterisk] Failed to create bridge")
+                log.error("Failed to create bridge")
                 return
             bridge_id = bridge["id"]
 
-            result = await self._ari_post(
-                session,
+            await self._ari_post(
+                ari_session,
                 f"/bridges/{bridge_id}/addChannel",
-                channel=f"{channel_id},{ext_channel_id}",
+                channel = f"{channel_id},{ext_channel_id}",
             )
-            print(f"[asterisk] addChannel result: {result}")
 
-            # Asterisk sends RTP to our socket — we send back to the same address
-            # The UnicastRTP channel name (extract):
             asterisk_rtp_port = int(ext["channelvars"]["UNICASTRTP_LOCAL_PORT"])
-            self._rtp_remote = (local_ip, asterisk_rtp_port)
-            print(f"[asterisk] RTP remote: {self._rtp_remote}, local port: {local_port}")
+            self._rtp_remote  = (local_ip, asterisk_rtp_port)
+            log.debug("RTP established",
+                      extra={'data': f"local={local_port} remote={self._rtp_remote}"})
 
-            # Answer the original channel
-            await self._ari_post(session, f"/channels/{channel_id}/answer")
+            await self._ari_post(ari_session, f"/channels/{channel_id}/answer")
+            await self.on_session_open(ctx)
 
-            # Greet the caller
-            self.rx_paused = True
-            await self._speak_text("Hello.")
-            self.rx_paused = False
+            ctx.rx_paused = True
+            await self._speak_text(ctx, "Hello.")
+            ctx.rx_paused = False
 
-            # If this was a server-initiated call, inject the announcement
-            # directly into the LLM rather than waiting for the caller to speak.
             if self._pending_announcement:
-                announcement = self._pending_announcement
+                announcement               = self._pending_announcement
                 self._pending_announcement = ""
-                await self._contact_core(announcement)
+                await self._contact_core(ctx, announcement, silent_start=True)
 
-            # RTP receive loop
             loop = asyncio.get_event_loop()
-            audio_buffer = np.array([], dtype=np.float32)
 
-            # small loopback so we prepend detected sound onto transcription:
-            audio_buffer  = np.array([], dtype=np.float32)
-            lookback      = np.array([], dtype=np.float32)
-            LOOKBACK_SIZE = AGENT_RATE  # 1 second of lookback
-
-            while self.channel_id is not None:
+            while self._channel_id is not None:
                 try:
                     raw = await loop.run_in_executor(None, self._rtp_sock.recv, 4096)
-                    #debug:
-                    #print(f"[asterisk] DEBUG recv {len(raw)} bytes")
                 except TimeoutError:
-                    # No RTP packet in 1s — check if call is still active and loop
                     continue
                 except Exception as e:
-                    print(f"[asterisk] RTP recv error: {e}")
+                    log.error("RTP recv error", extra={'data': str(e)})
                     break
 
                 if len(raw) <= RTP_HDR_SIZE:
                     continue
 
-                if self.rx_paused:
-                    # attempting to keep consuming audio packets while speaking so we don't accumulate and dump on the ASR:
-                    audio_buffer = np.array([], dtype=np.float32)
-                    self.frames_np = np.array([], dtype=np.float32)
-                    self.recording = False
-                    self.last_voice_ts = None
+                # Discard while the agent is speaking or processing —
+                # keeps the OS socket buffer drained without decoding anything
+                if ctx.rx_paused:
                     continue
 
                 payload   = raw[RTP_HDR_SIZE:]
-                pcm16_8k  = self._ulaw_to_pcm16(payload)
-                audio_f32 = self._resample_8k_to_16k(pcm16_8k)
-
-                rms = float(np.sqrt(np.mean(audio_f32 ** 2)))
-                # debug - check levels incoming:
-                #print(f"[asterisk] RTP RMS: {rms:.4f}")
-
-                # Buffer until we have enough samples for VAD
-                audio_buffer = np.concatenate([audio_buffer, audio_f32])
-                if len(audio_buffer) < VAD_MIN_SAMPLES:
-                    continue
-
-                chunk        = audio_buffer[:VAD_MIN_SAMPLES]
-                audio_buffer = audio_buffer[VAD_MIN_SAMPLES:]
-
-                if self.vad(audio_frame=chunk):
-                    # debug:
-                    #print(f"[asterisk] DEBUG VAD=True, recording={self.recording}")
-
-                    if not self.recording:
-                        self.recording = True
-                        self.interrupt_event.clear()
-
-                        # START speaker ID as soon as recording begins:
-                        self._speaker_id.start(
-                            get_frames=lambda: self.frames_np,
-                            is_recording=lambda: self.recording,
-                        )
-
-                        # Prepend the lookback buffer so we don't lose the start of the utterance
-                        if lookback.size > 0:
-                            self._add_frames(lookback)
-                    self.last_voice_ts = time.monotonic()
-                    self._add_frames(chunk)
-                elif self.recording:
-                    # debug:
-                    #print(f"[asterisk] DEBUG silence, elapsed={time.monotonic() - self.last_voice_ts:.2f}s")
-
-                    # Keep adding frames during brief silences so we don't lose mid-sentence gaps
-                    self._add_frames(chunk)
-                    if (self.last_voice_ts is not None and
-                            (time.monotonic() - self.last_voice_ts) > self.vad_timeout):
-                        if self.frames_np.size >= int(0.3 * AGENT_RATE):  # 0.3s minimum
-                            await self._transcribe_and_respond()
-                        else:
-                            print(f"[asterisk] Discarding short buffer ({self.frames_np.size} samples)")
-                            self.frames_np = np.array([], dtype=np.float32)
-                        self.recording     = False
-                        self.last_voice_ts = None
-                # After the VAD block, always update lookback with latest chunk:
-                lookback = np.concatenate([lookback, chunk])
-                if len(lookback) > LOOKBACK_SIZE:
-                    lookback = lookback[-LOOKBACK_SIZE:]
+                audio_f32 = self._ulaw_to_pcm_f32(payload)
+                await self._process_audio_chunk(ctx, audio_f32)
 
         finally:
             self._close_rtp_socket()
+            self._ctx = None
             try:
                 if bridge_id:
-                    await self._ari_delete(session, f"/bridges/{bridge_id}")
+                    await self._ari_delete(ari_session, f"/bridges/{bridge_id}")
                 if ext_channel_id:
-                    await self._ari_delete(session, f"/channels/{ext_channel_id}")
+                    await self._ari_delete(ari_session, f"/channels/{ext_channel_id}")
             except Exception:
                 pass
-            print(f"[asterisk] Call ended on channel {channel_id}")
+            log.info("Call ended", extra={'data': channel_id})
 
-    # ----------------------------------------------------------
-    # ARI WebSocket event loop
-    # ----------------------------------------------------------
+    # ── DTMF transfer ─────────────────────────────────────────────────────────
 
-    async def run(self):
-        cfg = self.config.asterisk
-        ws_url = (
-            f"ws://{cfg.ari_host}:{cfg.ari_port}/ari/events"
-            f"?api_key={cfg.ari_user}:{cfg.ari_password}"
-            f"&app=supernova"
-            f"&subscribeAll=false"
-        )
-
-        print(f"[asterisk] Connecting to ARI at {cfg.ari_host}:{cfg.ari_port}")
-
-        async with aiohttp.ClientSession() as session:
-            self._ws_session = session
-            while True:
-                try:
-                    async with session.ws_connect(ws_url) as ws:
-                        print("[asterisk] ARI WebSocket connected.")
-                        async for msg in ws:
-                            if msg.type == aiohttp.WSMsgType.TEXT:
-                                event = json.loads(msg.data)
-                                await self._handle_event(event, session)
-                            elif msg.type in (
-                                aiohttp.WSMsgType.CLOSED,
-                                aiohttp.WSMsgType.ERROR,
-                            ):
-                                print("[asterisk] WebSocket closed/error, reconnecting...")
-                                break
-                except Exception as e:
-                    print(f"[asterisk] ARI connection error: {e}, retrying in 5s...")
-                    await asyncio.sleep(5)
-
-    async def _transfer_to_dialplan(self, session: aiohttp.ClientSession):
-        # allows transferring to dialtone
-        print("[asterisk] DTMF 0 — transferring to dialplan")
-        channel_id = self.channel_id   # save before nulling
-        self.channel_id = None         # stop the RTP loop
+    async def _transfer_to_dialplan(self, ari_session: aiohttp.ClientSession) -> None:
+        """DTMF 0 — escape hatch to transfer the call to the PSTN dialplan."""
+        log.info("DTMF 0 — transferring to dialplan")
+        channel_id       = self._channel_id
+        self._channel_id = None   # stops the RTP loop
         if not channel_id:
             return
         try:
-            # Must remove from bridge before continuing into dialplan
-            await self._ari_delete(session, f"/channels/{channel_id}/bridge")
+            await self._ari_delete(ari_session, f"/channels/{channel_id}/bridge")
             await self._ari_post(
-                session,
+                ari_session,
                 f"/channels/{channel_id}/continue",
-                context="internal",
-                extension="transfer",
-                priority=1,
+                context   = "internal",
+                extension = "transfer",
+                priority  = 1,
             )
         except Exception as e:
-            print(f"[asterisk] Transfer failed: {e}")
-
-    async def _handle_event(self, event: dict, session: aiohttp.ClientSession):
-        etype = event.get("type")
-        # debugging message types:
-        #if etype not in ("ChannelHangupRequest",):  # filter noise
-        #    print(f"[asterisk] Event: {etype}")
-
-        if etype == "StasisStart":
-            channel      = event.get("channel", {})
-            channel_id   = channel.get("id", "")
-            channel_name = channel.get("name", "")
-
-            # Filter UnicastRTP FIRST before touching any state
-            if channel_name.startswith("UnicastRTP/"):
-                return
-            if not channel_id:
-                return
-
-            # Now safe to capture caller number
-            caller        = channel.get("caller", {})
-            caller_number = caller.get("number", "")
-            if not caller_number and "/" in channel_name:
-                caller_number = channel_name.split("/")[1].split("-")[0]
-            self.caller_number = caller_number
-            print(f"[asterisk] Caller captured: number={caller_number!r} from channel={channel_name!r}")
-
-            if self.channel_id is not None:
-                print(f"[asterisk] Rejecting call {channel_id} — already busy")
-                await self._ari_delete(session, f"/channels/{channel_id}")
-                return
-
-            asyncio.create_task(self._handle_call(channel_id, session))
-
-        elif etype == "StasisEnd":
-            channel_id = event.get("channel", {}).get("id")
-            if channel_id == self.channel_id:
-                log.info("StasisEnd — call ended by remote.")
-                self.channel_id  = None
-                session_id       = self.session_id
-                self.session_id  = None
-                if session_id:
-                    self.core_processor.close_session(session_id)
-
-        # we can dial 0 for an outside line:
-        elif etype == "ChannelDtmfReceived":
-            channel_id = event.get("channel", {}).get("id")
-            digit = event.get("digit")
-            
-            # debug:
-            print(f"[asterisk] DTMF channel_id={channel_id}, digit={digit}")
-
-            if channel_id == self.channel_id and digit == "0":
-                await self._transfer_to_dialplan(session)
-
-        elif etype == "ChannelHangupRequest":
-            channel_id = event.get("channel", {}).get("id")
-            if channel_id == self.channel_id:
-                log.info("Hangup requested by caller.")
-                self.channel_id  = None
-                session_id       = self.session_id
-                self.session_id  = None
-                if session_id:
-                    self.core_processor.close_session(session_id)
+            log.error("Transfer failed", extra={'data': str(e)})
