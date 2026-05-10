@@ -1,146 +1,153 @@
-# original: https://github.com/snakers4/silero-vad/blob/master/utils_vad.py
+"""
+vad.py — Lean Silero VAD wrapper, numpy + ONNX only.
+
+Drops the torch dependency entirely. The ONNX runtime takes numpy arrays
+directly; the original whisper-live wrapper converted numpy → torch → numpy
+purely as an artefact of the upstream utility code it was based on.
+
+Public API is backwards-compatible with the original VoiceActivityDetector:
+
+    vad = VoiceActivityDetector(threshold=0.5, frame_rate=16000)
+    is_speech: bool = vad(audio_frame_float32)   # audio_frame is 1-D np.float32
+
+The lower-level SileroVAD class is also importable if you need direct access
+to the ONNX session (e.g. for batch inference or state management).
+"""
 
 import os
 import subprocess
-import torch
 import numpy as np
 import onnxruntime
 
+_MODEL_URL  = "https://github.com/snakers4/silero-vad/raw/v4.0/files/silero_vad.onnx"
+_CACHE_PATH = os.path.expanduser("~/.cache/whisper-live/silero_vad.onnx")
 
-class VoiceActivityDetection():
+SUPPORTED_RATE = 16000
 
-    def __init__(self, force_onnx_cpu=True):
-        path = self.download()
+
+def _ensure_model(url: str = _MODEL_URL, path: str = _CACHE_PATH) -> str:
+    """Download the ONNX model if not already cached. Returns the local path."""
+    if not os.path.exists(path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        try:
+            subprocess.run(["wget", "-q", "-O", path, url], check=True)
+        except subprocess.CalledProcessError:
+            raise RuntimeError(
+                f"Failed to download Silero VAD model from {url}. "
+                f"Download it manually and place it at {path}."
+            )
+    return path
+
+
+class SileroVAD:
+    """
+    Thin stateful wrapper around the Silero VAD ONNX model.
+
+    Maintains the LSTM hidden/cell state (h, c) between calls so that
+    the model has temporal context across consecutive audio chunks — this
+    is the correct usage pattern for streaming inference.
+
+    Call reset_states() between utterances or speakers if needed.
+
+    Args:
+        force_cpu: Always use the CPU ONNX provider even if CUDA is available.
+                   VAD is lightweight enough that CPU is always preferable to
+                   avoid GPU memory pressure.
+    """
+
+    def __init__(self, force_cpu: bool = True):
+        path = _ensure_model()
 
         opts = onnxruntime.SessionOptions()
-        opts.log_severity_level = 3
-
+        opts.log_severity_level   = 3   # suppress ONNX runtime info/warnings
         opts.inter_op_num_threads = 1
         opts.intra_op_num_threads = 1
 
-        if force_onnx_cpu and 'CPUExecutionProvider' in onnxruntime.get_available_providers():
-            self.session = onnxruntime.InferenceSession(path, providers=['CPUExecutionProvider'], sess_options=opts)
-        else:
-            self.session = onnxruntime.InferenceSession(path, providers=['CUDAExecutionProvider'], sess_options=opts)
-
+        providers = (
+            ['CPUExecutionProvider']
+            if force_cpu or 'CPUExecutionProvider' in onnxruntime.get_available_providers()
+            else ['CUDAExecutionProvider']
+        )
+        self.session = onnxruntime.InferenceSession(path, providers=providers, sess_options=opts)
         self.reset_states()
-        self.sample_rates = [8000, 16000]
 
-    def _validate_input(self, x, sr: int):
-        if x.dim() == 1:
-            x = x.unsqueeze(0)
-        if x.dim() > 2:
-            raise ValueError(f"Too many dimensions for input audio chunk {x.dim()}")
+    def reset_states(self, batch_size: int = 1) -> None:
+        """Reset LSTM state. Call this between independent audio streams."""
+        self._h = np.zeros((2, batch_size, 64), dtype=np.float32)
+        self._c = np.zeros((2, batch_size, 64), dtype=np.float32)
 
-        if sr != 16000 and (sr % 16000 == 0):
-            step = sr // 16000
-            x = x[:, ::step]
-            sr = 16000
+    def __call__(self, chunk: np.ndarray, sample_rate: int) -> float:
+        """
+        Run inference on a single audio chunk.
 
-        if sr not in self.sample_rates:
-            raise ValueError(f"Supported sampling rates: {self.sample_rates} (or multiply of 16000)")
+        Args:
+            chunk:       1-D float32 numpy array of audio samples, normalised
+                         to [-1.0, 1.0]. Must be at least ~32ms of audio
+                         (512 samples @ 16kHz, 256 @ 8kHz).
+            sample_rate: 8000 or 16000 Hz.
 
-        if sr / x.shape[1] > 31.25:
-            raise ValueError("Input audio chunk is too short")
+        Returns:
+            Speech probability in [0.0, 1.0].
+        """
+        if sample_rate != SUPPORTED_RATE:
+            raise ValueError(f"sample_rate must be {SUPPORTED_RATE}, got {sample_rate}")
 
-        return x, sr
+        # ONNX expects shape (1, num_samples) — add batch dim without copying
+        x = chunk.reshape(1, -1).astype(np.float32)
 
-    def reset_states(self, batch_size=1):
-        self._h = np.zeros((2, batch_size, 64)).astype('float32')
-        self._c = np.zeros((2, batch_size, 64)).astype('float32')
-        self._last_sr = 0
-        self._last_batch_size = 0
+        min_samples = 512 if sample_rate == 16000 else 256
+        if x.shape[1] < min_samples:
+            raise ValueError(
+                f"Audio chunk too short: {x.shape[1]} samples "
+                f"(minimum {min_samples} @ {sample_rate} Hz)"
+            )
 
-    def __call__(self, x, sr: int):
+        ort_inputs = {
+            'input': x,
+            'h':     self._h,
+            'c':     self._c,
+            'sr':    np.array(sample_rate, dtype=np.int64),
+        }
+        out, self._h, self._c = self.session.run(None, ort_inputs)
 
-        x, sr = self._validate_input(x, sr)
-        batch_size = x.shape[0]
-
-        if not self._last_batch_size:
-            self.reset_states(batch_size)
-        if (self._last_sr) and (self._last_sr != sr):
-            self.reset_states(batch_size)
-        if (self._last_batch_size) and (self._last_batch_size != batch_size):
-            self.reset_states(batch_size)
-
-        if sr in [8000, 16000]:
-            ort_inputs = {
-                'input': x.numpy().copy(),  # changed to .copy() as the array is not writable
-                'h': self._h,
-                'c': self._c,
-                'sr': np.array(sr, dtype='int64')}
-            ort_outs = self.session.run(None, ort_inputs)
-            out, self._h, self._c = ort_outs
-        else:
-            raise ValueError()
-
-        self._last_sr = sr
-        self._last_batch_size = batch_size
-
-        out = torch.tensor(out)
-        return out
-
-    def audio_forward(self, x, sr: int, num_samples: int = 512):
-        outs = []
-        x, sr = self._validate_input(x, sr)
-
-        if x.shape[1] % num_samples:
-            pad_num = num_samples - (x.shape[1] % num_samples)
-            x = torch.nn.functional.pad(x, (0, pad_num), 'constant', value=0.0)
-
-        self.reset_states(x.shape[0])
-        for i in range(0, x.shape[1], num_samples):
-            wavs_batch = x[:, i:i+num_samples]
-            out_chunk = self.__call__(wavs_batch, sr)
-            outs.append(out_chunk)
-
-        stacked = torch.cat(outs, dim=1)
-        return stacked.cpu()
-
-    @staticmethod
-    def download(model_url="https://github.com/snakers4/silero-vad/raw/v4.0/files/silero_vad.onnx"):
-        target_dir = os.path.expanduser("~/.cache/whisper-live/")
-
-        # Ensure the target directory exists
-        os.makedirs(target_dir, exist_ok=True)
-
-        # Define the target file path
-        model_filename = os.path.join(target_dir, "silero_vad.onnx")
-
-        # Check if the model file already exists
-        if not os.path.exists(model_filename):
-            # If it doesn't exist, download the model using wget
-            try:
-                subprocess.run(["wget", "-O", model_filename, model_url], check=True)
-            except subprocess.CalledProcessError:
-                print("Failed to download the model using wget.")
-        return model_filename
+        # out shape: (1, 1) — scalar speech probability
+        return float(out[0, 0])
 
 
 class VoiceActivityDetector:
-    def __init__(self, threshold=0.5, frame_rate=16000):
-        """
-        Initializes the VoiceActivityDetector with a voice activity detection model and a threshold.
+    """
+    Drop-in replacement for the original whisper-live VoiceActivityDetector.
 
-        Args:
-            threshold (float, optional): The probability threshold for detecting voice activity. Defaults to 0.5.
-        """
-        self.model = VoiceActivityDetection()
-        self.threshold = threshold
+    Converts a float32 audio chunk to a bool (speech / not speech) using
+    the Silero VAD ONNX model. No torch dependency.
+
+    Args:
+        threshold:  Speech probability above which a frame is considered voice.
+        frame_rate: Sample rate of incoming audio (8000 or 16000 Hz).
+        force_cpu:  Pin ONNX to the CPU provider (recommended — VAD is cheap).
+    """
+
+    def __init__(
+        self,
+        threshold:  float = 0.5,
+        frame_rate: int   = 16000,
+        force_cpu:  bool  = True,
+    ):
+        self.threshold  = threshold
         self.frame_rate = frame_rate
+        self._model     = SileroVAD(force_cpu=force_cpu)
 
-    def __call__(self, audio_frame):
+    def reset(self) -> None:
+        """Reset LSTM state — call between independent audio streams."""
+        self._model.reset_states()
+
+    def __call__(self, audio_frame: np.ndarray) -> bool:
         """
-        Determines if the given audio frame contains speech by comparing the detected speech probability against
-        the threshold.
-
         Args:
-            audio_frame (np.ndarray): The audio frame to be analyzed for voice activity. It is expected to be a
-                                      NumPy array of audio samples.
+            audio_frame: 1-D float32 numpy array at self.frame_rate sample rate.
 
         Returns:
-            bool: True if the speech probability exceeds the threshold, indicating the presence of voice activity;
-                  False otherwise.
+            True if speech probability exceeds self.threshold.
         """
-        speech_prob = self.model(torch.from_numpy(audio_frame.copy()), self.frame_rate).item()
-        return speech_prob > self.threshold
+        prob = self._model(audio_frame, self.frame_rate)
+        return prob > self.threshold
