@@ -233,9 +233,9 @@ class BaseVoiceInterface:
         self._piper_pool: Optional[_InferencePool] = None   # initialised in run()
 
         self.piper_syn_config = SynthesisConfig(
-            volume=1.0, length_scale=1.0,
+            volume=0.9, length_scale=1.0,
             noise_scale=1.0, noise_w_scale=1.0,
-            normalize_audio=False,
+            normalize_audio=True,
         )
 
         # ── Whisper ASR ───────────────────────────────────────────────────────
@@ -342,10 +342,10 @@ class BaseVoiceInterface:
                     return
                 audio_f32 = np.asarray(audio_f32, dtype=np.float32).reshape(-1)
 
-                # Normalise to consistent RMS
-                rms = float(np.sqrt(np.mean(audio_f32 ** 2))) if audio_f32.size else 0.0
-                if rms > 1e-8:
-                    audio_f32 *= (0.2 / rms)
+                # Normalise to consistent RMS - no longer using, we'll trust Piper's internal normalisation and just hard limit the peaks. If we find some voices are too quiet we can revisit this.
+                #rms = float(np.sqrt(np.mean(audio_f32 ** 2))) if audio_f32.size else 0.0
+                #if rms > 1e-8:
+                #    audio_f32 *= (0.2 / rms)
                 audio_f32 = np.clip(audio_f32, -1.0, 1.0)
 
                 await self._deliver_audio(ctx, audio_f32, sr)
@@ -519,7 +519,7 @@ class BaseVoiceInterface:
         await self.on_thinking(ctx)
 
         # Collect speaker ID result (started at voice onset)
-        ctx.identified_speaker = ctx.speaker_id.result(timeout=1.0)
+        ctx.identified_speaker = ctx.speaker_id.result(timeout=0)
         if ctx.identified_speaker:
             log.info("Speaker identified",
                      extra={'data': f"{ctx.endpoint_id} {ctx.identified_speaker!r}"})
