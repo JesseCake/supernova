@@ -1,7 +1,7 @@
 import uuid
 import numpy as np
 import pyaudio
-from whisper_live.vad import VoiceActivityDetector
+from interfaces.vad import VoiceActivityDetector
 from whisper_live.transcriber import WhisperModel
 import simpleaudio as sa
 from TTS.api import TTS

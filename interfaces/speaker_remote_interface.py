@@ -6,63 +6,62 @@ Persistent-connection + endpoint registry model
 Satellites connect once at startup and stay connected. On connect they send a
 HELO frame with their endpoint_id. The server maintains a live registry:
 
-    self.endpoints: dict[endpoint_id → ClientSession]
+    self._endpoints: dict[endpoint_id → VoiceContext]
 
 This gives the server a complete picture of which satellites are online at any
 time, and enables server-initiated interactions via initiate_call(endpoint_id).
 
-New frames (added to protocol):
+Frame protocol (client → server):
+    HELO   JSON payload: {"id": endpoint_id, "name": friendly_name}
+    WAKE   Optional UTF-8 payload = announcement (server-initiated replay path)
+    OPEN   Alias for WAKE
+    AUD0   Raw int16 PCM audio at 16kHz
+    INT0   Barge-in — interrupt current TTS and cancel LLM response
+    STOP   Explicit end-of-utterance — force immediate transcription
 
-  Client → Server:
-    HELO     UTF-8 payload = endpoint_id (first frame after TCP connect)
-
-  Server → Client:
-    CALL     UTF-8 payload = optional announcement text, or empty for plain wake
-             Sent by initiate_call() to start a session on the satellite.
-
-All other frames are unchanged from the previous version.
+Frame protocol (server → client):
+    CALL   Optional UTF-8 payload = announcement text
+           Sent by initiate_call() to wake a satellite without a wake word.
+    TTS0   Raw int16 PCM audio at 16kHz (synthesised speech)
+    THNK   Satellite should display "thinking" state
+    RDY0   Satellite should open microphone / display "listening" state
+    CLOS   Session ended — satellite resets, TCP connection stays open
 
 Session lifecycle (server side):
-  HELO received         → register endpoint, open channel (greet + RDY0)
-  WAKE received         → re-open channel if a previous session had closed
-  Session (multi-turn)  → exactly as before
-  CLOS sent             → session ends, ClientSession stays in registry
-  TCP disconnect        → ClientSession removed from registry
+    HELO received         → register endpoint, rx_paused = False (ready for WAKE)
+    WAKE received         → greet ("I'm here") + RDY0         [user-initiated]
+    WAKE with payload     → silent_start, straight to LLM     [server-initiated relay]
+    CALL sent             → satellite initiates WAKE itself
+    AUD0 → VAD → silence  → THNK + transcribe + _contact_core → RDY0
+    hangup tool           → CLOS (TCP persists)
+    TCP disconnect        → unregister endpoint
 
-The ClientSession dataclass is unchanged. The registry maps endpoint_id to the
-live ClientSession so that initiate_call() can reach the right writer.
+Relay session model:
+    push_session()        → suspend current session onto ctx.session_stack
+    set_relay_session()   → activate relay session on ctx
+    pop_session()         → restore suspended session, optionally inject context note
 """
 
 import asyncio
-import struct
-import uuid
+import json
 import re
-import time
+import struct
 import threading
-import wave
-from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Optional, Tuple, Dict
+import time
+from typing import Dict, Optional, Tuple
 
 import numpy as np
-import resampy
-import os
-import json
-
-from piper import PiperVoice, SynthesisConfig
 
 from core.interface_mode import InterfaceMode
-from core.session_state import (
-    KEY_INTERFACE_MODE, KEY_AGENT_MODE,
-    hangup_requested, clear_hangup,
-    get_response_queue,
-)
-from core.speaker_id import SpeakerIdentifier, load_profiles
-
-from interfaces.vad import VoiceActivityDetector
-from faster_whisper import WhisperModel
-
 from core.logger import get_logger
+from core.session_state import get_history
+
+from interfaces.base_voice_interface import (
+    BaseVoiceInterface,
+    VoiceContext,
+    INTERNAL_RATE,
+)
+
 log = get_logger('speaker_remote')
 
 
@@ -70,11 +69,14 @@ log = get_logger('speaker_remote')
 
 FRAME_HDR = struct.Struct('<4sI')
 
+
 def pack_frame(ftype: bytes, payload: bytes = b'') -> bytes:
     return FRAME_HDR.pack(ftype, len(payload)) + payload
 
+
 async def read_exactly(reader: asyncio.StreamReader, n: int) -> bytes:
     return await reader.readexactly(n)
+
 
 async def read_frame(reader: asyncio.StreamReader) -> Tuple[bytes, bytes]:
     header        = await read_exactly(reader, FRAME_HDR.size)
@@ -85,533 +87,342 @@ async def read_frame(reader: asyncio.StreamReader) -> Tuple[bytes, bytes]:
     return ftype, payload
 
 
-# ── Resource pool ─────────────────────────────────────────────────────────────
-
-class _InferencePool:
-    """
-    Semaphore-gated wrapper around a single shared inference model.
-    async with pool as model: — blocks until a slot is available.
-    max_concurrent=1 serialises all inference (correct for low-traffic use).
-    """
-
-    def __init__(self, model, max_concurrent: int = 1):
-        self.model = model
-        self._sem  = asyncio.Semaphore(max_concurrent)
-
-    async def __aenter__(self):
-        await self._sem.acquire()
-        return self.model
-
-    async def __aexit__(self, *_):
-        self._sem.release()
+# ── Context extension ─────────────────────────────────────────────────────────
+# VoiceContext already carries session_stack, friendly_name, speak_task,
+# last_int0_ts from the base. We store the TCP writer on a plain attribute
+# set after make_context() — avoiding a dataclass dependency on asyncio streams.
 
 
-# ── Per-connection state ──────────────────────────────────────────────────────
-
-@dataclass
-class ClientSession:
-    """
-    All mutable state for one active satellite connection.
-
-    Includes endpoint_id once the HELO frame has been received.
-    The session persists for the lifetime of the TCP connection — it is NOT
-    torn down between voice sessions (wake→CLOS cycles).
-    """
-
-    # ── TCP streams ───────────────────────────────────────────────────────────
-    reader: asyncio.StreamReader
-    writer: asyncio.StreamWriter
-    addr:   tuple
-
-    # ── Endpoint identity (set on HELO) ───────────────────────────────────────
-    endpoint_id:   Optional[str] = None
-    friendly_name: Optional[str] = None
-
-    # ── Core session (resets on CLOS, persists across turns within a session) ─
-    session_id: Optional[str] = None
-
-    # ── Session stack (for relay sessions) ───────────────────────────────────
-    # When a relay is initiated, the current session is pushed here and
-    # restored when the relay completes.
-    session_stack: list = field(default_factory=list)
-
-    # ── Audio accumulation ────────────────────────────────────────────────────
-    frames_np:     np.ndarray      = field(default_factory=lambda: np.array([], dtype=np.float32))
-    recording:     bool            = False
-    last_voice_ts: Optional[float] = None
-
-    # ── Flow control ──────────────────────────────────────────────────────────
-    rx_paused: bool = True   # starts True; opened after HELO greeting
-
-    # ── Barge-in ──────────────────────────────────────────────────────────────
-    interrupt_event: asyncio.Event          = field(default_factory=asyncio.Event)
-    _last_int0_ts:   float                  = 0.0
-    _speak_task:     Optional[asyncio.Task] = None
-
-    # ── Speaker identification ────────────────────────────────────────────────
-    _speaker_id:         Optional[SpeakerIdentifier] = None
-    _identified_speaker: Optional[str]               = None
-
-    # ── VAD (stateful — one per connection) ───────────────────────────────────
-    vad_detector: Optional[object] = None
-
-    # ── Helpers ───────────────────────────────────────────────────────────────
-
-    def reset_audio(self):
-        self.frames_np     = np.array([], dtype=np.float32)
-        self.recording     = False
-        self.last_voice_ts = None
-
-    def add_frames(self, frame_np: np.ndarray):
-        if self.frames_np.size == 0:
-            self.frames_np = frame_np.copy()
-        else:
-            self.frames_np = np.concatenate((self.frames_np, frame_np))
-
-    def clear_interrupt(self):
-        if self.interrupt_event.is_set():
-            self.interrupt_event.clear()
-
-
-# ── Main server class ─────────────────────────────────────────────────────────
-
-class SpeakerRemoteInterface:
+class SpeakerRemoteInterface(BaseVoiceInterface):
     """
     Multi-connection TCP voice server with persistent connections and an
     endpoint registry.
 
-    Public API for server-initiated interactions:
+    Public API:
         await sri.initiate_call(endpoint_id, announcement="")
-        sri.list_endpoints() -> list[str]
-        sri.endpoint_count() -> int
+        sri.list_endpoints()  -> list[str]
+        sri.endpoint_count()  -> int
+        sri.get_endpoint(endpoint_id) -> VoiceContext | None
+        sri.push_session(endpoint_id) -> str | None
+        sri.pop_session(endpoint_id, context_note=None) -> str | None
+        sri.set_relay_session(endpoint_id, session_id)
+        sri.send_relay_message(endpoint_id, message)
     """
 
     def __init__(
         self,
         core_processor,
-        listening_rate:         int = 16000,
-        transcriber             = None,
-        vad                     = None,
-        piper_voice             = None,
-        whisper_model_size:     str = 'base.en',
-        piper_max_concurrent:   int = 1,
-        whisper_max_concurrent: int = 1,
+        transcriber            = None,
+        vad                    = None,
+        piper_voice            = None,
+        whisper_model_size:str = 'base.en',
+        piper_max_concurrent:int   = 1,
+        whisper_max_concurrent:int = 1,
     ):
-        self.core_processor = core_processor
-        self.listening_rate = listening_rate
+        super().__init__(
+            core_processor          = core_processor,
+            vad_threshold           = vad.threshold  if vad else 0.5,
+            vad_timeout             = 0.7,
+            speaker_id_threshold    = 0.7,
+            transcriber             = transcriber,
+            piper_voice             = piper_voice,
+            whisper_model_size      = whisper_model_size,
+            piper_max_concurrent    = piper_max_concurrent,
+            whisper_max_concurrent  = whisper_max_concurrent,
+        )
 
         # ── Endpoint registry ─────────────────────────────────────────────────
-        self._endpoints:     Dict[str, ClientSession] = {}
-        self._registry_lock: threading.Lock           = threading.Lock()
+        # Maps endpoint_id → VoiceContext for the lifetime of the TCP connection.
+        # Accessed from both the async frame loop and sync callers (scheduler),
+        # so protected by a threading lock.
+        self._endpoints:     Dict[str, VoiceContext] = {}
+        self._registry_lock: threading.Lock          = threading.Lock()
 
-        # ── Shared config ─────────────────────────────────────────────────────
-        self._vad_threshold  = vad.threshold  if vad else 0.5
-        self._vad_frame_rate = vad.frame_rate if vad else listening_rate
-        self.vad_timeout     = 0.7
+        # Store the running event loop so send_relay_message can schedule
+        # coroutines from sync threads.
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
-        self.close_channel_phrase = "finish conversation"
-        self.speaking_rate        = 16000
+    # ── Feedback hooks ────────────────────────────────────────────────────────
 
-        self.sentence_endings = re.compile(
-            r'(?:(?<=[!?])(?:\s+|$))'
-            r'|(?:(?<=\.)(?!\d)(?:\s+|$))'
-            r'|(?:(?<=[,;])(?:\s+|$))'
-            r'|[\r\n]+'
-        )
-        self.piper_syn_config = SynthesisConfig(
-            volume=1.0, length_scale=1.0,
-            noise_scale=1.0, noise_w_scale=1.0,
-            normalize_audio=False,
-        )
+    async def on_thinking(self, ctx: VoiceContext) -> None:
+        """Send THNK — satellite transitions to thinking/processing state."""
+        await self._send_frame(ctx, b'THNK')
 
-        # ── Piper ─────────────────────────────────────────────────────────────
-        if piper_voice is not None:
-            log.info("Using shared Piper model")
-            self._piper_voice_instance = piper_voice
-        else:
-            log.info("Loading Piper model")
-            self._piper_voice_instance = PiperVoice.load(
-                core_processor.config.voice.model_path,
-                use_cuda=core_processor.config.voice.use_cuda,
-            )
-        self._piper_max_concurrent = piper_max_concurrent
-        self._piper_pool: Optional[_InferencePool] = None   # created in run()
+    async def on_session_close(self, ctx: VoiceContext) -> None:
+        """Send CLOS — session ends but TCP connection stays open."""
+        await self._send_frame(ctx, b'CLOS')
 
-        # ── Whisper ───────────────────────────────────────────────────────────
-        if transcriber is not None:
-            log.info("Using shared Whisper model")
-            self._whisper_instance = transcriber
-        else:
-            log.info("Loading Whisper model")
-            self._whisper_instance = WhisperModel(model_size_or_path=whisper_model_size)
-        self._whisper_max_concurrent = whisper_max_concurrent
-        self._whisper_pool: Optional[_InferencePool] = None   # created in run()
+    async def on_barge_in(self, ctx: VoiceContext) -> None:
+        """Cancel the active LLM response on barge-in."""
+        if ctx.session_id is not None:
+            try:
+                self.core_processor.cancel_active_response(ctx.session_id)
+            except Exception:
+                log.error("cancel_active_response error",
+                          extra={'data': str(ctx.endpoint_id)}, exc_info=True)
 
-        # ── Speaker profiles ──────────────────────────────────────────────────
-        config_dir = os.path.join(os.path.dirname(__file__), '../config')
-        self._speaker_profiles = load_profiles(config_dir)
-        from core.speaker_id import _get_encoder
-        _get_encoder()
+    # ── Transport implementation ──────────────────────────────────────────────
 
-        log.info("Ready")
+    async def _deliver_audio(self, ctx: VoiceContext, audio_f32: np.ndarray, sample_rate: int) -> None:
+        """
+        Convert Piper float32 output to int16 and stream as TTS0 frames.
+        Resamples to INTERNAL_RATE (16kHz) if Piper produced a different rate.
+        Chunks at 8192 samples to balance frame overhead vs latency.
+        """
+        import resampy
+        if sample_rate != INTERNAL_RATE:
+            audio_f32 = resampy.resample(audio_f32, sample_rate, INTERNAL_RATE)
+
+        audio_int16 = (audio_f32 * 32767.0).astype(np.int16)
+        mv          = memoryview(audio_int16.tobytes())
+        chunk_bytes = 8192 * 2   # 8192 int16 samples
+
+        writer = self._get_writer(ctx)
+        if writer is None:
+            return
+
+        for i in range(0, len(mv), chunk_bytes):
+            if ctx.interrupt_event.is_set():
+                return
+            try:
+                writer.write(pack_frame(b'TTS0', mv[i:i + chunk_bytes].tobytes()))
+            except Exception:
+                log.error("TTS0 write error",
+                          extra={'data': str(ctx.endpoint_id)}, exc_info=True)
+                return
+            await writer.drain()
+            await asyncio.sleep(0)
+
+    # ── Session metadata ──────────────────────────────────────────────────────
+
+    def _configure_session(self, ctx: VoiceContext, core_session: dict) -> None:
+        """Speaker-specific session metadata."""
+        super()._configure_session(ctx, core_session)
+        # Override interface mode — base defaults to PHONE
+        from core.session_state import KEY_INTERFACE_MODE
+        core_session[KEY_INTERFACE_MODE] = InterfaceMode.SPEAKER
+        core_session['interface']        = InterfaceMode.SPEAKER.value
+
+    # ── Frame send helpers ────────────────────────────────────────────────────
+
+    async def _send_frame(self, ctx: VoiceContext, ftype: bytes, payload: bytes = b'') -> None:
+        """Send a control frame to the satellite. Silently swallows write errors."""
+        writer = self._get_writer(ctx)
+        if writer is None:
+            return
+        try:
+            writer.write(pack_frame(ftype, payload))
+            await writer.drain()
+        except Exception:
+            log.error("Frame write error",
+                      extra={'data': f"{ctx.endpoint_id} {ftype}"}, exc_info=True)
+
+    def _get_writer(self, ctx: VoiceContext) -> Optional[asyncio.StreamWriter]:
+        """Retrieve the TCP writer stored on the context."""
+        return getattr(ctx, '_writer', None)
+
+    # ── Channel lifecycle ─────────────────────────────────────────────────────
+
+    async def _open_channel(self, ctx: VoiceContext) -> None:
+        """
+        User-initiated wake path.
+        Greet the satellite, then send RDY0 to open the microphone.
+        rx_paused is held True during the greeting so we don't hear ourselves.
+        """
+        ctx.rx_paused = True
+        await self._speak_text(ctx, "I'm here")
+        await self._send_frame(ctx, b'RDY0')
+        ctx.rx_paused = False
+
+    async def _open_channel_silent(self, ctx: VoiceContext, announcement: str) -> None:
+        """
+        Server-initiated relay path — no greeting, no RDY0.
+        The announcement is injected directly into the LLM as the opening turn.
+        silent_start=True suppresses the "Working" TTS and first THNK.
+        """
+        ctx.rx_paused = True
+        await self._contact_core(ctx, announcement, silent_start=True)
+
+    async def _close_session(self, ctx: VoiceContext) -> None:
+        """
+        Override base _close_session to send CLOS before clearing session_id.
+        TCP connection is NOT closed — satellite stays registered and ready
+        for the next WAKE.
+        """
+        if ctx.session_id:
+            self.core_processor.close_session(ctx.session_id)
+            ctx.session_id = None
+        ctx.rx_paused = False
+        await self._send_frame(ctx, b'CLOS')
+
+    # ── Post-LLM response hook ────────────────────────────────────────────────
+
+    async def _after_response(self, ctx: VoiceContext) -> None:
+        """
+        Called by _contact_core after streaming the full response and
+        confirming no hangup was requested. Sends RDY0 to re-open the mic.
+        """
+        await self._send_frame(ctx, b'RDY0')
 
     # ── Registry API ─────────────────────────────────────────────────────────
 
-    def _register(self, endpoint_id: str, cs: ClientSession):
-        """Add or replace a connected endpoint in the registry."""
+    def _register(self, endpoint_id: str, ctx: VoiceContext) -> None:
         with self._registry_lock:
-            self._endpoints[endpoint_id] = cs
-        log.info("Endpoint registered", extra={'data': f"{endpoint_id!r} '{cs.friendly_name}' {cs.addr} total={len(self._endpoints)}"})
+            self._endpoints[endpoint_id] = ctx
+        log.info("Endpoint registered",
+                 extra={'data': f"{endpoint_id!r} '{ctx.friendly_name}' total={len(self._endpoints)}"})
 
-    def _unregister(self, endpoint_id: str):
-        """Remove an endpoint from the registry on disconnect."""
+    def _unregister(self, endpoint_id: str) -> None:
         with self._registry_lock:
-            cs = self._endpoints.pop(endpoint_id, None)
-        friendly = cs.friendly_name if cs else endpoint_id
-        log.info("Endpoint unregistered", extra={'data': f"{endpoint_id!r} '{friendly}' total={len(self._endpoints)}"})
+            ctx = self._endpoints.pop(endpoint_id, None)
+        name = ctx.friendly_name if ctx else endpoint_id
+        log.info("Endpoint unregistered",
+                 extra={'data': f"{endpoint_id!r} '{name}' total={len(self._endpoints)}"})
 
     def list_endpoints(self) -> list:
-        """Return a list of currently connected endpoint IDs."""
         with self._registry_lock:
             return list(self._endpoints.keys())
 
     def endpoint_count(self) -> int:
-        """Return the number of currently connected endpoints."""
         with self._registry_lock:
             return len(self._endpoints)
 
-    def get_endpoint(self, endpoint_id: str) -> Optional[ClientSession]:
-        """Return the ClientSession for endpoint_id, or None if not connected."""
+    def get_endpoint(self, endpoint_id: str) -> Optional[VoiceContext]:
         with self._registry_lock:
             return self._endpoints.get(endpoint_id)
+
+    # ── Relay session API ─────────────────────────────────────────────────────
+
+    def push_session(self, endpoint_id: str) -> Optional[str]:
+        """
+        Suspend the current session by pushing its session_id onto the stack.
+        Called by contact_user when initiating a relay to this endpoint.
+        Returns the suspended session_id, or None if no session was active.
+        """
+        ctx = self.get_endpoint(endpoint_id)
+        if ctx is None or ctx.session_id is None:
+            return None
+        ctx.session_stack.append(ctx.session_id)
+        suspended      = ctx.session_id
+        ctx.session_id = None
+        log.info("Session pushed",
+                 extra={'data': f"endpoint={endpoint_id} session={suspended}"})
+        return suspended
+
+    def pop_session(self, endpoint_id: str, context_note: str = None) -> Optional[str]:
+        """
+        Resume the most recently suspended session.
+        Optionally injects a system-role context note into the session history.
+        Called by reply_to_caller when a relay completes.
+        Returns the resumed session_id, or None if stack was empty.
+        """
+        ctx = self.get_endpoint(endpoint_id)
+        if ctx is None or not ctx.session_stack:
+            return None
+        session_id     = ctx.session_stack.pop()
+        ctx.session_id = session_id
+
+        if context_note:
+            session = self.core_processor.get_session(session_id)
+            if session:
+                get_history(session).append({
+                    'role':    'system',
+                    'content': context_note,
+                })
+
+        log.info("Session popped",
+                 extra={'data': f"endpoint={endpoint_id} session={session_id}"})
+        return session_id
+
+    def set_relay_session(self, endpoint_id: str, session_id: str) -> None:
+        """
+        Activate a relay session as the current session for an endpoint.
+        Called by contact_user after creating the relay session.
+        """
+        ctx = self.get_endpoint(endpoint_id)
+        if ctx:
+            ctx.session_id = session_id
+            log.info("Relay session activated",
+                     extra={'data': f"endpoint={endpoint_id} session={session_id}"})
 
     # ── Server-initiated call ─────────────────────────────────────────────────
 
     async def initiate_call(self, endpoint_id: str, announcement: str = "") -> bool:
         """
         Push a CALL frame to a connected satellite to start a server-initiated
-        session — without the user needing to say the wake word.
+        session without the user saying the wake word.
 
-        Returns True if the CALL was sent, False if endpoint is not connected
-        or is currently busy.
+        The satellite receives CALL, initiates a WAKE (possibly with the
+        announcement as payload), and the server handles it via _open_channel
+        or _open_channel_silent.
+
+        Returns True if the CALL was sent, False if not connected or busy.
         """
-        cs = self.get_endpoint(endpoint_id)
-        if cs is None:
-            log.warning("initiate_call: endpoint not connected", extra={'data': f"{endpoint_id!r}"})
+        ctx = self.get_endpoint(endpoint_id)
+        if ctx is None:
+            log.warning("initiate_call: not connected",
+                        extra={'data': f"{endpoint_id!r}"})
             return False
-
-        if cs.rx_paused:
-            log.warning("initiate_call: endpoint busy", extra={'data': f"{endpoint_id!r}"})
+        if ctx.rx_paused:
+            log.warning("initiate_call: endpoint busy",
+                        extra={'data': f"{endpoint_id!r}"})
             return False
-
         try:
-            payload = announcement.encode("utf-8") if announcement else b""
-            cs.writer.write(pack_frame(b'CALL', payload))
-            await cs.writer.drain()
+            payload = announcement.encode('utf-8') if announcement else b''
+            await self._send_frame(ctx, b'CALL', payload)
             log.info("CALL sent", extra={'data': f"{endpoint_id!r}"})
             return True
-        except Exception as e:
-            log.error("initiate_call error", extra={'data': f"{endpoint_id!r}"}, exc_info=True)
+        except Exception:
+            log.error("initiate_call error",
+                      extra={'data': f"{endpoint_id!r}"}, exc_info=True)
             return False
 
-    # ── Low-level send helpers ────────────────────────────────────────────────
-
-    async def _send_pcm_int16(self, cs: ClientSession, tag: bytes,
-                               audio_int16: np.ndarray, chunk_samples: int = 1024):
-        mv   = memoryview(audio_int16.tobytes())
-        step = chunk_samples * 2
-        for i in range(0, len(mv), step):
-            if cs.interrupt_event.is_set():
-                break
-            try:
-                cs.writer.write(pack_frame(tag, mv[i:i + step].tobytes()))
-            except Exception as e:
-                log.error("PCM write error", extra={'data': str(cs.addr)}, exc_info=True)
-                break
-            await cs.writer.drain()
-            await asyncio.sleep(0)
-
-    # ── TTS ───────────────────────────────────────────────────────────────────
-
-    async def _speak_text(self, cs: ClientSession, text: str):
+    def send_relay_message(self, endpoint_id: str, message: str) -> None:
         """
-        Synthesise text with Piper (pool-gated) and stream as TTS0 frames.
-        Half-duplex: holds cs.rx_paused for the duration.
+        Thread-safe entry point for non-async callers (e.g. scheduler).
+        Schedules initiate_call on the running event loop.
         """
-        prev_rx_paused = cs.rx_paused
-        cs.rx_paused   = True
-        try:
-            text = re.sub(r'[*#`_~]', '', text).strip()
-            if not text:
-                return
-
-            async with self._piper_pool as voice:
-                syn_config = self.piper_syn_config
-
-                def synth_all_chunks():
-                    chunks = []
-                    for chunk in voice.synthesize(text, syn_config=syn_config):
-                        chunks.append((chunk.sample_rate, chunk.audio_float_array.copy()))
-                    return chunks
-
-                try:
-                    piper_chunks = await asyncio.to_thread(synth_all_chunks)
-                except Exception as e:
-                    log.error("Piper TTS error", extra={'data': str(cs.addr)}, exc_info=True)
-                    return
-
-            for sr, audio_f32 in piper_chunks:
-                if cs.interrupt_event.is_set():
-                    return
-                audio_f32 = np.asarray(audio_f32, dtype=np.float32).reshape(-1)
-                if sr != self.speaking_rate:
-                    audio_f32 = resampy.resample(audio_f32, sr, self.speaking_rate)
-                rms = float(np.sqrt(np.mean(audio_f32 ** 2))) if audio_f32.size else 0.0
-                if rms > 1e-8:
-                    audio_f32 *= (0.2 / rms)
-                audio_f32   = np.clip(audio_f32 * 1.2, -1.0, 1.0)
-                audio_int16 = (audio_f32 * 32767.0).astype(np.int16)
-                await self._send_pcm_int16(cs, b"TTS0", audio_int16, chunk_samples=8192)
-                if cs.interrupt_event.is_set():
-                    return
-        finally:
-            cs.rx_paused = prev_rx_paused
-
-    # ── Channel lifecycle ─────────────────────────────────────────────────────
-
-    async def _open_channel(self, cs: ClientSession):
-        """Greet the satellite and send RDY0."""
-        cs.rx_paused = True
-        await self._speak_text(cs, "I'm here")
-        cs.writer.write(pack_frame(b'RDY0'))
-        await cs.writer.drain()
-        cs.rx_paused = False
-
-    async def _open_channel_silent(self, cs: ClientSession, announcement: str):
-        """
-        Server-initiated call path — no greeting, no mic open.
-        Goes straight to the LLM with the announcement as the opening turn.
-        """
-        cs.rx_paused = True
-        await self._contact_core(cs, announcement, silent_start=True)
-
-    async def _close_channel(self, cs: ClientSession):
-        """
-        End a voice session. Sends CLOS but does NOT close the TCP connection.
-        Resets session_id so the next WAKE starts a fresh conversation.
-        """
-        if cs.session_id:
-            self.core_processor.close_session(cs.session_id)
-        cs.session_id = None
-        cs.rx_paused  = False
-        cs.writer.write(pack_frame(b'CLOS'))
-        await cs.writer.drain()
-
-    def push_session(self, endpoint_id: str) -> str | None:
-        """
-        Suspend the current session for an endpoint by pushing it onto the stack.
-        Returns the suspended session_id, or None if no session was active.
-        Called by contact_user when initiating a relay to this endpoint.
-        """
-        cs = self.get_endpoint(endpoint_id)
-        if cs is None or cs.session_id is None:
-            return None
-        cs.session_stack.append(cs.session_id)
-        suspended = cs.session_id
-        cs.session_id = None
-        log.info("Session pushed to stack",
-                 extra={'data': f"endpoint={endpoint_id} session={suspended}"})
-        return suspended
-
-    def pop_session(self, endpoint_id: str, context_note: str = None) -> str | None:
-        """
-        Resume the most recently suspended session for an endpoint.
-        Optionally injects a context note into the resumed session history.
-        Returns the resumed session_id, or None if stack was empty.
-        Called by reply_to_caller when the relay completes.
-        """
-        cs = self.get_endpoint(endpoint_id)
-        if cs is None or not cs.session_stack:
-            return None
-        session_id    = cs.session_stack.pop()
-        cs.session_id = session_id
-
-        if context_note:
-            session = self.core_processor.get_session(session_id)
-            if session:
-                from core.session_state import get_history
-                get_history(session).append({
-                    'role':    'system',
-                    'content': context_note,
-                })
-
-        log.info("Session popped from stack",
-                 extra={'data': f"endpoint={endpoint_id} session={session_id}"})
-        return session_id
-
-    def set_relay_session(self, endpoint_id: str, session_id: str):
-        """
-        Set a relay session as the active session for an endpoint.
-        Called by contact_user after creating the relay session.
-        """
-        cs = self.get_endpoint(endpoint_id)
-        if cs:
-            cs.session_id = session_id
-            log.info("Relay session set active",
-                     extra={'data': f"endpoint={endpoint_id} session={session_id}"})
-
-    # ── LLM dispatch ─────────────────────────────────────────────────────────
-
-    async def _contact_core(self, cs: ClientSession, input_text: str, silent_start: bool = False) -> bool:
-        """Send transcript to LLM, stream TTS back. Returns True if session should close."""
-        if cs.session_id is None:
-            cs.session_id = str(uuid.uuid4())
-            core_session  = self.core_processor.create_session(cs.session_id)
-            # Set interface mode and identity
-            core_session[KEY_INTERFACE_MODE] = InterfaceMode.SPEAKER
-            core_session['endpoint_id']      = cs.endpoint_id
-            core_session['interface']        = InterfaceMode.SPEAKER.value
-            if cs._identified_speaker:
-                core_session['speaker'] = cs._identified_speaker
-
-            if not silent_start:
-                await self._speak_text(cs, "Working")
-                # Satellite moved to SPEAKING during "Working" — send THNK
-                # so it transitions back to THINKING while the LLM generates.
-                cs.writer.write(pack_frame(b'THNK'))
-                await cs.writer.drain()
-
-        log.info("Sending to core", extra={'data': f"{cs.endpoint_id} {input_text!r}"})
-        thread = threading.Thread(
-            target=self.core_processor.process_input,
-            kwargs={"input_text": input_text, "session_id": cs.session_id},
-            daemon=True,
+        if self._loop is None:
+            log.error("send_relay_message: no event loop",
+                      extra={'data': endpoint_id})
+            return
+        asyncio.run_coroutine_threadsafe(
+            self.initiate_call(endpoint_id, message),
+            self._loop,
         )
-        thread.start()
 
-        core_session = self.core_processor.get_session(cs.session_id)
-        buffer       = ""
-        cs.rx_paused = True
+    # ── Presence registry update ──────────────────────────────────────────────
 
-        while True:
-            chunk = await asyncio.to_thread(get_response_queue(core_session).get)
-            if chunk is None:
-                break
-            buffer += chunk
-            sentences = self.sentence_endings.split(buffer)
-            for sent in sentences[:-1]:
-                sent = sent.strip().replace("*", "")
-                if sent:
-                    if cs.interrupt_event.is_set():
-                        buffer = ""
-                        break
-                    await self._speak_text(cs, sent)
-            buffer = sentences[-1]
-
-        if cs.interrupt_event.is_set():
-            buffer = ""
-        if buffer.strip():
-            await self._speak_text(cs, buffer.strip())
-
-        # Check if hangup was requested via tool
-        close = hangup_requested(core_session)
-        if close:
-            clear_hangup(core_session)
-            await self._close_channel(cs)
-        else:
-            cs.rx_paused = False
-            cs.writer.write(pack_frame(b'RDY0'))
-            await cs.writer.drain()
-
-        return close
-
-    # ── Transcription ─────────────────────────────────────────────────────────
-
-    async def _transcribe_buffer(self, cs: ClientSession):
-        """Transcribe audio, send THNK, collect speaker ID, dispatch to core."""
-        cs.rx_paused = True
-
-        if cs.frames_np.size == 0:
-            cs.rx_paused = False
+    def _update_presence(self, ctx: VoiceContext) -> None:
+        """
+        Update the presence registry after a confirmed voice identification.
+        No-op if the core_processor has no presence_registry.
+        """
+        if not hasattr(self.core_processor, 'presence_registry'):
             return
-
-        min_samples = int(0.2 * self.listening_rate)
-        if cs.frames_np.size < min_samples:
-            cs.reset_audio()
-            cs.rx_paused = False
-            return
-
-        audio_snapshot = cs.frames_np.copy()
-        cs.reset_audio()
-
-        if self.core_processor.config.debug.record_audio:
-            record_dir = self.core_processor.config.debug.record_dir
-            os.makedirs(record_dir, exist_ok=True)
-            filename = os.path.join(
-                record_dir,
-                f"speaker_{cs.endpoint_id or cs.addr[0]}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.wav"
+        registry = self.core_processor.presence_registry
+        user_id  = registry.find_user_by_contact(
+            'speaker', 'endpoint_id', ctx.endpoint_id
+        )
+        if not user_id:
+            # Try matching by friendly name from speaker profiles
+            for uid in registry.all_users():
+                name = registry.get_friendly_name(uid)
+                if name.lower() == ctx.identified_speaker.lower():
+                    user_id = uid
+                    break
+        if user_id:
+            registry.set_last_seen(
+                user_id, ctx.endpoint_id, confidence='voice_confirmed'
             )
-            with wave.open(filename, 'wb') as wf:
-                wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(self.listening_rate)
-                wf.writeframes((audio_snapshot * 32767).astype(np.int16).tobytes())
 
-        try:
-            async with self._whisper_pool as whisper:
-                audio_for_thread = audio_snapshot
-                def do_transcribe():
-                    return whisper.transcribe(audio_for_thread)
-                segments, _ = await asyncio.to_thread(do_transcribe)
-        except Exception as e:
-            log.error("ASR error", extra={'data': str(cs.addr)}, exc_info=True)
-            cs.rx_paused = False
-            return
+    # ── Per-connection frame handler ──────────────────────────────────────────
 
-        if not segments:
-            cs.rx_paused = False
-            return
-
-        text = " ".join(seg.text for seg in segments)
-        log.info("Transcription", extra={'data': f"{cs.endpoint_id} {text!r}"})
-
-        if self.close_channel_phrase in text.lower():
-            await self._close_channel(cs)
-            return
-        if re.fullmatch(r'[\s.…]+', text):
-            cs.rx_paused = False
-            return
-
-        cs.writer.write(pack_frame(b'THNK'))
-        await cs.writer.drain()
-
-        if cs._speak_task and not cs._speak_task.done():
-            await cs._speak_task
-
-        cs._identified_speaker = cs._speaker_id.result(timeout=1.0)
-        if cs._identified_speaker:
-            log.info("Speaker identified", extra={'data': f"{cs.endpoint_id} {cs._identified_speaker}"})
-            # Update presence registry with confirmed voice ID
-            if hasattr(self.core_processor, 'presence_registry'):
-                user_id = self.core_processor.presence_registry.find_user_by_contact(
-                    'speaker', 'endpoint_id', cs.endpoint_id
-                )
-                if not user_id:
-                    # Try matching by friendly name from speaker profiles
-                    from core.presence_registry import PresenceRegistry
-                    for uid in self.core_processor.presence_registry.all_users():
-                        name = self.core_processor.presence_registry.get_friendly_name(uid)
-                        if name.lower() == cs._identified_speaker.lower():
-                            user_id = uid
-                            break
-                if user_id:
-                    self.core_processor.presence_registry.set_last_seen(
-                        user_id, cs.endpoint_id, confidence='voice_confirmed'
-                    )
-
-        await self._contact_core(cs, text)
-
-    # ── Per-connection handler ────────────────────────────────────────────────
-
-    async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    async def _handle_client(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
         """
         Coroutine for one persistent satellite connection.
         Handles the full connection lifetime including multiple WAKE/CLOS cycles.
@@ -619,9 +430,10 @@ class SpeakerRemoteInterface:
         addr = writer.get_extra_info('peername')
         log.info("Satellite connected", extra={'data': str(addr)})
 
-        cs              = ClientSession(reader=reader, writer=writer, addr=addr)
-        cs.vad_detector = VoiceActivityDetector(threshold=self._vad_threshold, frame_rate=self._vad_frame_rate)
-        cs._speaker_id  = SpeakerIdentifier(self._speaker_profiles)
+        # Create context — writer stored as plain attribute (not in dataclass)
+        ctx          = self.make_context(interface_mode=InterfaceMode.SPEAKER)
+        ctx._writer  = writer   # type: ignore[attr-defined]
+        ctx.rx_paused = True    # wait for HELO before accepting audio
 
         try:
             while True:
@@ -630,117 +442,134 @@ class SpeakerRemoteInterface:
                 # ── HELO: endpoint registration ───────────────────────────────
                 if ftype == b'HELO':
                     try:
-                        helo          = json.loads(payload.decode("utf-8", errors="replace"))
-                        endpoint_id   = helo.get("id", "unknown")
-                        friendly_name = helo.get("name", endpoint_id)
+                        helo          = json.loads(payload.decode('utf-8', errors='replace'))
+                        endpoint_id   = helo.get('id',   'unknown')
+                        friendly_name = helo.get('name', endpoint_id)
                     except Exception:
-                        endpoint_id   = payload.decode("utf-8", errors="replace").strip()
+                        endpoint_id   = payload.decode('utf-8', errors='replace').strip()
                         friendly_name = endpoint_id
-                    cs.endpoint_id   = endpoint_id
-                    cs.friendly_name = friendly_name
-                    self._register(endpoint_id, cs)
-                    cs.rx_paused     = False
 
-                # ── WAKE: start (or restart) a voice session ──────────────────
+                    ctx.endpoint_id   = endpoint_id
+                    ctx.friendly_name = friendly_name
+                    self._register(endpoint_id, ctx)
+                    ctx.rx_paused = False
+                    # No greeting here — satellite is idle until WAKE
+
+                # ── WAKE / OPEN: start or restart a voice session ─────────────
                 elif ftype in (b'WAKE', b'OPEN'):
-                    announcement = payload.decode("utf-8", errors="replace").strip() if payload else ""
+                    announcement = payload.decode('utf-8', errors='replace').strip() if payload else ''
                     if announcement:
-                        await self._open_channel_silent(cs, announcement)
+                        # Server-initiated relay — inject directly into LLM
+                        await self._open_channel_silent(ctx, announcement)
                     else:
-                        await self._open_channel(cs)
+                        # User-initiated wake word
+                        await self._open_channel(ctx)
 
                 # ── AUD0: microphone audio ────────────────────────────────────
                 elif ftype == b'AUD0':
-                    if cs.rx_paused:
-                        log.debug("AUD0 dropping frame — rx_paused", extra={'data': str(cs.endpoint_id)})
+                    if ctx.rx_paused:
+                        log.debug("AUD0 dropped — rx_paused",
+                                  extra={'data': str(ctx.endpoint_id)})
                         continue
 
-                    audio_frame = (np.frombuffer(payload, dtype=np.int16)
-                                   .astype(np.float32) / 32768.0)
-
-                    vad_result = cs.vad_detector(audio_frame=audio_frame)
-
-                    if vad_result:
-                        if not cs.recording:
-                            cs.recording = True
-                            cs.clear_interrupt()
-                            cs._speaker_id.start(
-                                get_frames    = lambda: cs.frames_np,
-                                is_recording  = lambda: cs.recording,
-                            )
-                        cs.last_voice_ts = time.monotonic()
-                        cs.add_frames(audio_frame)
-
-                    elif cs.recording:
-                        silence_s = (time.monotonic() - cs.last_voice_ts) if cs.last_voice_ts else 0
-                        if (cs.last_voice_ts is not None and silence_s > self.vad_timeout):
-                            await self._transcribe_buffer(cs)
-                            cs.recording     = False
-                            cs.last_voice_ts = None
+                    # Satellite sends int16 PCM at 16kHz — decode to float32
+                    audio_frame = (
+                        np.frombuffer(payload, dtype=np.int16)
+                        .astype(np.float32) / 32768.0
+                    )
+                    # Feed into base VAD/accumulation pipeline
+                    await self._process_audio_chunk(ctx, audio_frame)
 
                 # ── INT0: barge-in ────────────────────────────────────────────
                 elif ftype == b'INT0':
-                    log.info("Barge-in", extra={'data': str(cs.endpoint_id)})
-                    cs._last_int0_ts = time.monotonic()
-                    cs.interrupt_event.set()
-                    if cs._speak_task and not cs._speak_task.done():
-                        cs.rx_paused = False
-                    if cs.session_id is not None:
-                        try:
-                            self.core_processor.cancel_active_response(cs.session_id)
-                        except Exception as e:
-                            log.error("Cancel error", extra={'data': str(cs.endpoint_id)}, exc_info=True)
-                    cs.reset_audio()
+                    log.info("Barge-in", extra={'data': str(ctx.endpoint_id)})
+                    ctx.last_int0_ts = time.monotonic()
+                    ctx.interrupt_event.set()
+                    # If a speak task is in flight, release rx so we can
+                    # receive the next utterance after the interrupt
+                    if ctx.speak_task and not ctx.speak_task.done():
+                        ctx.rx_paused = False
+                    await self.on_barge_in(ctx)
+                    ctx.reset_audio()
 
                 # ── STOP: explicit end-of-utterance ───────────────────────────
                 elif ftype == b'STOP':
-                    if cs.recording:
-                        await self._transcribe_buffer(cs)
-                        cs.recording     = False
-                        cs.last_voice_ts = None
+                    # Force transcription immediately — don't wait for silence
+                    await self.force_transcribe(ctx)
 
         except asyncio.IncompleteReadError:
-            pass   # normal disconnect
+            pass   # clean disconnect
 
         finally:
-            log.info("Satellite disconnected", extra={'data': f"{addr} id={cs.endpoint_id!r}"})
-            if cs.endpoint_id:
-                self._unregister(cs.endpoint_id)
+            log.info("Satellite disconnected",
+                     extra={'data': f"{addr} id={ctx.endpoint_id!r}"})
+            if ctx.endpoint_id:
+                self._unregister(ctx.endpoint_id)
             try:
                 writer.close()
                 await writer.wait_closed()
             except Exception:
                 pass
 
-    def send_relay_message(self, endpoint_id: str, message: str):
+    # ── Post-transcription speaker ID hook ────────────────────────────────────
+
+    async def _transcribe_buffer(self, ctx: VoiceContext) -> None:
         """
-        Deliver a relay opening message to an endpoint by initiating a call.
-        Called by contact_user generically across interfaces.
+        Override to inject the THNK frame at the right moment and update
+        the presence registry after speaker identification.
+
+        Frame ordering:
+          1. Base transcribes audio (Whisper)
+          2. We send THNK (satellite transitions LISTENING → THINKING)
+          3. Base collects speaker ID result
+          4. We update presence registry
+          5. Base dispatches to _contact_core
+          6. _contact_core speaks "Working" (SPEAKING)
+          7. _contact_core sends THNK (SPEAKING → THINKING)
+          8. LLM streams, TTS plays (SPEAKING per sentence)
+          9. _contact_core sends RDY0 (THINKING → LISTENING)
         """
-        loop = getattr(self, '_loop', None)
-        if loop is None:
-            import asyncio
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                log.error("No event loop available for send_relay_message")
-                return
-        import asyncio
-        asyncio.run_coroutine_threadsafe(
-            self.initiate_call(endpoint_id, message),
-            loop,
-        )
+        # Delegate to base — it handles snapshot, Whisper, hallucination filter,
+        # close-channel phrase, speaker ID collection, and _contact_core dispatch.
+        # We hook in via on_thinking (called before _contact_core) and
+        # _after_response (called after RDY0 decision in _contact_core).
+        await super()._transcribe_buffer(ctx)
+
+        # Presence registry update — runs after speaker ID is collected
+        if ctx.identified_speaker:
+            self._update_presence(ctx)
+
+    # ── RDY0 after response ───────────────────────────────────────────────────
+    # The base _contact_core sets rx_paused=False at the end but doesn't send
+    # RDY0 (it doesn't know about frames). We override _contact_core to hook
+    # in the RDY0 send. The cleanest way is to override just the tail.
+
+    async def _contact_core(
+        self,
+        ctx:          VoiceContext,
+        input_text:   str,
+        silent_start: bool = False,
+    ) -> bool:
+        """
+        Override to send RDY0 after the LLM response completes (if no hangup).
+        All other logic is in the base.
+        """
+        closed = await super()._contact_core(ctx, input_text, silent_start)
+        if not closed:
+            # Base set rx_paused=False — now tell the satellite to open its mic
+            await self._send_frame(ctx, b'RDY0')
+        return closed
 
     # ── Server entry point ────────────────────────────────────────────────────
 
-    async def run(self, host: str = '0.0.0.0', port: int = 10400):
-        """Start the server. Initialises inference pools inside the running loop."""
-        self._piper_pool   = _InferencePool(self._piper_voice_instance,  self._piper_max_concurrent)
-        self._whisper_pool = _InferencePool(self._whisper_instance, self._whisper_max_concurrent)
+    async def run(self, host: str = '0.0.0.0', port: int = 10400) -> None:
+        """Start the TCP server. Initialises inference pools inside the running loop."""
+        self._loop = asyncio.get_running_loop()
+        self._init_pools()
 
         server = await asyncio.start_server(self._handle_client, host, port)
-        addr   = ', '.join(str(sock.getsockname()) for sock in server.sockets)
-        log.info("Listening", extra={'data': addr})
+        addrs  = ', '.join(str(s.getsockname()) for s in server.sockets)
+        log.info("Listening", extra={'data': addrs})
         async with server:
             await server.serve_forever()
 

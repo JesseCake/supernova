@@ -141,6 +141,14 @@ class VoiceContext:
     # ── Barge-in ──────────────────────────────────────────────────────────────
     interrupt_event:    asyncio.Event   = field(default_factory=asyncio.Event)
 
+    # ── Session stack (for relay sessions — used by speaker_remote) ─────────
+    session_stack:      list                        = field(default_factory=list)
+
+    # ── Transport extras (subclass may populate) ──────────────────────────────
+    friendly_name:      Optional[str]               = None   # human-readable name
+    speak_task:         Optional[asyncio.Task]       = None   # in-flight TTS task
+    last_int0_ts:       float                        = 0.0    # barge-in timestamp
+
     # ── Speaker identification ────────────────────────────────────────────────
     speaker_id:         Optional[SpeakerIdentifier] = None
     identified_speaker: Optional[str]               = None
@@ -196,7 +204,7 @@ class BaseVoiceInterface:
     ):
         self.core_processor = core_processor
         self.vad_threshold  = vad_threshold
-        self.vad_timeout    = vad_timeout   # seconds of silence before transcription
+        self.vad_timeout          = vad_timeout   # seconds of silence before transcription
         self.speaker_id_threshold = speaker_id_threshold
 
         self.close_channel_phrase = "finish conversation"
@@ -537,6 +545,17 @@ class BaseVoiceInterface:
             log.error("Failed to save debug WAV", exc_info=True)
 
     # ── Audio input pipeline ──────────────────────────────────────────────────
+
+    async def force_transcribe(self, ctx: VoiceContext) -> None:
+        """
+        Force immediate transcription without waiting for the silence timeout.
+        Called by subclasses on an explicit end-of-utterance signal
+        (e.g. STOP frame in speaker_remote).
+        """
+        if ctx.recording and ctx.frames_np.size > 0:
+            ctx.recording     = False
+            ctx.last_voice_ts = None
+            await self._transcribe_buffer(ctx)
 
     async def _process_audio_chunk(self, ctx: VoiceContext, chunk_f32: np.ndarray) -> None:
         """
