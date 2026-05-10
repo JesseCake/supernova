@@ -693,7 +693,7 @@ class CoreProcessor:
 
             # if we have any model overrides (for headless mode) use them, otherwise default to self.model:
             model = session.get('_model_override', self.model)
-            num_ctx = session.get('_num_ctx_override', 8192)
+            num_ctx = session.get('_num_ctx_override', self.config.ollama.num_ctx)  # allow override for headless calls etc, otherwise default to config value
 
             response_stream = self.ollama_client.chat(
                 model      = model,

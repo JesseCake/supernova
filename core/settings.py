@@ -11,6 +11,7 @@ class OllamaConfig:
     host:       str
     model:      str
     model_type: str   # drives message formatting: "gemma", "qwen3" etc.
+    num_ctx:   int = 16384    # context window size - affects memory footprint
 
 
 @dataclass

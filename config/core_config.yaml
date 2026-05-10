@@ -9,6 +9,7 @@ ollama:
   host: "http://localhost:11434"
   model: "qwen3.5:9b"
   model_type: "qwen3"   # drives message formatting: "gemma", "qwen3" etc.
+  num_ctx: 16384      # context window size - affects memory footprint, decrease if memory constrained, has effect on how much conversation history can be sent to the model
 
 server:
   remote_voice_host: "0.0.0.0"
