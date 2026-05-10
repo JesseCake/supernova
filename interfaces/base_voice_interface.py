@@ -346,7 +346,7 @@ class BaseVoiceInterface:
                 rms = float(np.sqrt(np.mean(audio_f32 ** 2))) if audio_f32.size else 0.0
                 if rms > 1e-8:
                     audio_f32 *= (0.2 / rms)
-                audio_f32 = np.clip(audio_f32 * 1.2, -1.0, 1.0)
+                audio_f32 = np.clip(audio_f32, -1.0, 1.0)
 
                 await self._deliver_audio(ctx, audio_f32, sr)
                 if ctx.interrupt_event.is_set():

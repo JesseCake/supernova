@@ -1,87 +1,173 @@
 """
-tools/shopping_list.py — Household shopping list for Supernova.
+tools/shopping_list.py — Household lists for Supernova.
 
-Provides:
-  - add_to_shopping_list    — add one or more items
-  - remove_from_shopping_list — remove items by name (fuzzy match)
-  - get_shopping_list       — read the current list
-  - clear_shopping_list     — wipe the list entirely
+Supports multiple named lists (shopping, picture frames, etc).
+The 'shopping' list always exists and cannot be deleted.
 
-Shared household list — not per-user.
-Data lives in data/shopping_list/list.json via ToolBase.data_path().
+Available list names are injected into the system prompt via provide_context
+so the LLM can resolve fuzzy references without an extra tool call.
+
+Tools:
+  - add_to_list             — add items to a named list
+  - remove_from_list        — remove items from a named list
+  - get_list                — read a named list
+  - clear_list              — empty a named list (keeps the list itself)
+  - create_list             — create a new named list
+  - delete_list             — delete a named list (shopping is protected)
+
+Data: data/shopping_list/lists.json
 """
 
 from typing import Annotated
 from pydantic import Field
 from core.tool_base import ToolBase
 
-log = ToolBase.logger('shopping_list')
-
+log       = ToolBase.logger('shopping_list')
 TOOL_NAME = 'shopping_list'
+FILENAME  = 'lists.json'
+PROTECTED = 'shopping'
 
 
-# ── Storage helpers ───────────────────────────────────────────────────────────
+# ── Storage ───────────────────────────────────────────────────────────────────
 
-def _load() -> list[str]:
-    return ToolBase.read_json(TOOL_NAME, 'list.json', default=[])
+def _load() -> dict:
+    data = ToolBase.read_json(TOOL_NAME, FILENAME, default={})
+    # Always ensure the default shopping list exists
+    if PROTECTED not in data:
+        data[PROTECTED] = []
+        _save(data)
+    return data
 
 
-def _save(items: list[str]) -> bool:
-    return ToolBase.write_json(TOOL_NAME, 'list.json', items)
+def _save(data: dict) -> bool:
+    return ToolBase.write_json(TOOL_NAME, FILENAME, data)
 
 
-# ── Schema functions ──────────────────────────────────────────────────────────
+def _canonical(name: str) -> str:
+    """Normalise list name — lowercase and stripped."""
+    return name.strip().lower()
 
-def add_to_shopping_list(
+
+# ── Context injection ─────────────────────────────────────────────────────────
+
+def provide_context(core, tool_config: dict, session: dict) -> str:
+    """
+    Inject available list names into the system prompt at session start.
+    Allows the LLM to resolve fuzzy list references without a tool call.
+    """
+    if not tool_config.get('enabled', True):
+        return ""
+
+    data  = _load()
+    names = ', '.join(sorted(data.keys()))
+
+    return (
+        f"[LISTS]\n"
+        f"Available lists: {names}.\n"
+        f"When the user references a list by an approximate name, match it to "
+        f"the closest available list before calling a tool."
+    )
+
+
+# ── Schemas ───────────────────────────────────────────────────────────────────
+
+def add_to_list(
     items: Annotated[list[str], Field(
         description=(
-            "One or more items to add to the shopping list. "
-            "Each item should be a short, clear name e.g. ['milk', 'sourdough bread', 'olive oil']. "
-            "Normalise capitalisation — use lowercase unless it's a proper noun."
+            "One or more items to add. Each should be a short clear name, "
+            "e.g. ['milk', '24x36cm oak frame']. Use lowercase unless a proper noun."
+        )
+    )],
+    list_name: Annotated[str, Field(
+        description=(
+            "The name of the list to add to. Must match one of the available "
+            "lists from context. Resolve fuzzy references before calling — "
+            "e.g. 'picture frame list' → 'picture frames'."
+        )
+    )] = "shopping",
+) -> str:
+    """
+    Add one or more items to a named list.
+    Use when someone says 'add X to the shopping list', 'put X on my Y list',
+    'we need X', 'pick up X', or similar.
+    Default to 'shopping' if no list is specified.
+    """
+    ...
+
+
+def remove_from_list(
+    items: Annotated[list[str], Field(
+        description=(
+            "One or more items to remove. Partial matches are fine — "
+            "'bread' will match 'sourdough bread'."
+        )
+    )],
+    list_name: Annotated[str, Field(
+        description="The name of the list to remove from."
+    )] = "shopping",
+) -> str:
+    """
+    Remove one or more items from a named list.
+    Use when someone says 'remove X', 'take X off the list',
+    'we don't need X anymore', or 'cross off X'.
+    """
+    ...
+
+
+def get_list(
+    list_name: Annotated[str, Field(
+        description="The name of the list to read."
+    )] = "shopping",
+) -> str:
+    """
+    Read the contents of a named list.
+    Use when someone asks 'what's on the shopping list', 'what's on my Y list',
+    'what do we need', 'read me the list', or 'what are we shopping for'.
+    Default to 'shopping' if no list is specified.
+    """
+    ...
+
+
+def clear_list(
+    list_name: Annotated[str, Field(
+        description="The name of the list to clear. The list itself is kept, just emptied."
+    )] = "shopping",
+) -> str:
+    """
+    Empty a named list without deleting it.
+    Use when someone says 'clear the list', 'empty the shopping list',
+    or 'start the list fresh'. Always confirm before calling.
+    """
+    ...
+
+
+def create_list(
+    list_name: Annotated[str, Field(
+        description=(
+            "Name for the new list. Keep it short and descriptive, "
+            "e.g. 'picture frames', 'tools', 'camping gear'."
         )
     )],
 ) -> str:
     """
-    Add one or more items to the household shopping list.
-    Use when someone says 'add X to the shopping list', 'we need X',
-    'pick up X', 'put X on the list', or similar.
-    Can add multiple items in a single call.
+    Create a new named list.
+    Use when someone says 'create a new list called X', 'make a Y list',
+    or 'start a list for X'.
     """
     ...
 
 
-def remove_from_shopping_list(
-    items: Annotated[list[str], Field(
-        description=(
-            "One or more items to remove from the shopping list. "
-            "Use the name as closely as possible to what's on the list. "
-            "Partial matches are acceptable — 'bread' will match 'sourdough bread'."
-        )
+def delete_list(
+    list_name: Annotated[str, Field(
+        description="The name of the list to delete. The 'shopping' list cannot be deleted."
     )],
 ) -> str:
     """
-    Remove one or more items from the household shopping list.
-    Use when someone says 'remove X', 'take X off the list', 'we don't need X anymore',
-    or 'cross off X'.
-    """
-    ...
-
-
-def get_shopping_list() -> str:
-    """
-    Read the current household shopping list.
-    Use when someone asks 'what's on the shopping list', 'what do we need',
-    'read me the list', or 'what are we shopping for'.
-    """
-    ...
-
-
-def clear_shopping_list() -> str:
-    """
-    Clear the entire shopping list.
-    Only use when the user explicitly asks to clear or empty the whole list —
-    e.g. 'clear the shopping list', 'empty the list', 'start the list fresh'.
-    Always confirm with the user before calling this.
+    Delete a named list and all its contents.
+    Use when someone says 'delete the X list', 'remove the Y list',
+    or 'get rid of the X list'.
+    Always confirm with the user before calling.
+    The default shopping list cannot be deleted.
     """
     ...
 
@@ -89,17 +175,22 @@ def clear_shopping_list() -> str:
 # ── Executors ─────────────────────────────────────────────────────────────────
 
 def _add_execute(tool_args: dict, session, core, tool_config: dict) -> str:
-    params   = ToolBase.params(tool_args)
+    params    = ToolBase.params(tool_args)
     new_items = [i.strip().lower() for i in params.get('items', []) if i.strip()]
+    name      = _canonical(params.get('list_name', PROTECTED))
 
     if not new_items:
-        return ToolBase.error(core, 'add_to_shopping_list', "No items provided.")
+        return ToolBase.error(core, 'add_to_list', "No items provided.")
 
-    current = _load()
+    data = _load()
+    if name not in data:
+        return ToolBase.error(core, 'add_to_list',
+            f"No list called '{name}'. Available: {', '.join(sorted(data.keys()))}.")
 
-    # Avoid exact duplicates
-    added    = []
-    skipped  = []
+    current = data[name]
+    added   = []
+    skipped = []
+
     for item in new_items:
         if item in current:
             skipped.append(item)
@@ -108,41 +199,46 @@ def _add_execute(tool_args: dict, session, core, tool_config: dict) -> str:
             added.append(item)
 
     if added:
-        _save(current)
-        log.info("Items added", extra={'data': f"added={added} skipped={skipped} total={len(current)}"})
+        data[name] = current
+        _save(data)
+        log.info("Items added",
+                 extra={'data': f"list={name} added={added} skipped={skipped}"})
 
     if added and skipped:
-        instructions = (
-            f"Added {', '.join(added)} to the shopping list. "
-            f"{', '.join(skipped)} {'was' if len(skipped) == 1 else 'were'} already on the list."
-        )
+        msg = (f"Added {', '.join(added)} to {name}. "
+               f"{', '.join(skipped)} {'was' if len(skipped) == 1 else 'were'} already there.")
     elif added:
-        instructions = f"Confirm you've added {', '.join(added)} to the shopping list."
+        msg = f"Confirm you've added {', '.join(added)} to the {name} list."
     else:
-        instructions = f"{', '.join(skipped)} {'is' if len(skipped) == 1 else 'are'} already on the list — nothing new was added."
+        msg = f"{', '.join(skipped)} {'is' if len(skipped) == 1 else 'are'} already on the {name} list."
 
-    return ToolBase.result(core, 'add_to_shopping_list', {
+    return ToolBase.result(core, 'add_to_list', {
         "status":       "ok",
         "added":        added,
         "skipped":      skipped,
-        "total":        len(current),
-        "instructions": instructions,
+        "list":         name,
+        "instructions": msg,
     })
 
 
 def _remove_execute(tool_args: dict, session, core, tool_config: dict) -> str:
-    params      = ToolBase.params(tool_args)
-    to_remove   = [i.strip().lower() for i in params.get('items', []) if i.strip()]
+    params    = ToolBase.params(tool_args)
+    to_remove = [i.strip().lower() for i in params.get('items', []) if i.strip()]
+    name      = _canonical(params.get('list_name', PROTECTED))
 
     if not to_remove:
-        return ToolBase.error(core, 'remove_from_shopping_list', "No items provided.")
+        return ToolBase.error(core, 'remove_from_list', "No items provided.")
 
-    current = _load()
-    removed = []
+    data = _load()
+    if name not in data:
+        return ToolBase.error(core, 'remove_from_list',
+            f"No list called '{name}'. Available: {', '.join(sorted(data.keys()))}.")
+
+    current   = data[name]
+    removed   = []
     not_found = []
 
     for query in to_remove:
-        # Find best match — exact first, then substring
         match = None
         if query in current:
             match = query
@@ -159,77 +255,154 @@ def _remove_execute(tool_args: dict, session, core, tool_config: dict) -> str:
             not_found.append(query)
 
     if removed:
-        _save(current)
-        log.info("Items removed", extra={'data': f"removed={removed} not_found={not_found} total={len(current)}"})
+        data[name] = current
+        _save(data)
+        log.info("Items removed",
+                 extra={'data': f"list={name} removed={removed} not_found={not_found}"})
 
     if removed and not_found:
-        instructions = (
-            f"Removed {', '.join(removed)} from the shopping list. "
-            f"Couldn't find {', '.join(not_found)} on the list."
-        )
+        msg = (f"Removed {', '.join(removed)} from {name}. "
+               f"Couldn't find {', '.join(not_found)} on the list.")
     elif removed:
-        instructions = f"Confirm you've removed {', '.join(removed)} from the shopping list."
+        msg = f"Confirm you've removed {', '.join(removed)} from the {name} list."
     else:
-        instructions = f"Couldn't find {', '.join(not_found)} on the shopping list."
+        msg = f"Couldn't find {', '.join(not_found)} on the {name} list."
 
-    return ToolBase.result(core, 'remove_from_shopping_list', {
+    return ToolBase.result(core, 'remove_from_list', {
         "status":       "ok",
         "removed":      removed,
         "not_found":    not_found,
-        "total":        len(current),
-        "instructions": instructions,
+        "list":         name,
+        "instructions": msg,
     })
 
 
 def _get_execute(tool_args: dict, session, core, tool_config: dict) -> str:
-    current = _load()
+    params = ToolBase.params(tool_args)
+    name   = _canonical(params.get('list_name', PROTECTED))
+    data   = _load()
+
+    if name not in data:
+        return ToolBase.error(core, 'get_list',
+            f"No list called '{name}'. Available: {', '.join(sorted(data.keys()))}.")
+
+    current = data[name]
 
     if not current:
-        return ToolBase.result(core, 'get_shopping_list', {
+        return ToolBase.result(core, 'get_list', {
+            "list":         name,
             "items":        [],
             "total":        0,
-            "instructions": "Tell the user the shopping list is empty.",
+            "instructions": f"Tell the user the {name} list is empty.",
         })
 
-    log.info("Shopping list retrieved", extra={'data': f"total={len(current)}"})
+    log.info("List retrieved", extra={'data': f"list={name} total={len(current)}"})
 
-    return ToolBase.result(core, 'get_shopping_list', {
+    return ToolBase.result(core, 'get_list', {
+        "list":         name,
         "items":        current,
         "total":        len(current),
         "instructions": (
-            "Read the shopping list naturally. "
-            "For voice, read it as a simple spoken list. "
-            "For text, format it as a clean list. "
-            "Do not add commentary beyond the items unless the list is empty."
+            f"Read the {name} list naturally. "
+            f"For voice, read as a simple spoken list. "
+            f"For text, format as a clean bulleted list. "
+            f"Do not add commentary beyond the items."
         ),
     })
 
 
 def _clear_execute(tool_args: dict, session, core, tool_config: dict) -> str:
-    current = _load()
-    count   = len(current)
+    params = ToolBase.params(tool_args)
+    name   = _canonical(params.get('list_name', PROTECTED))
+    data   = _load()
+
+    if name not in data:
+        return ToolBase.error(core, 'clear_list',
+            f"No list called '{name}'. Available: {', '.join(sorted(data.keys()))}.")
+
+    count = len(data[name])
 
     if count == 0:
-        return ToolBase.result(core, 'clear_shopping_list', {
+        return ToolBase.result(core, 'clear_list', {
             "status":       "already_empty",
-            "instructions": "Tell the user the shopping list was already empty.",
+            "list":         name,
+            "instructions": f"Tell the user the {name} list was already empty.",
         })
 
-    _save([])
-    log.info("Shopping list cleared", extra={'data': f"removed={count}"})
+    data[name] = []
+    _save(data)
+    log.info("List cleared", extra={'data': f"list={name} removed={count}"})
 
-    return ToolBase.result(core, 'clear_shopping_list', {
+    return ToolBase.result(core, 'clear_list', {
         "status":       "cleared",
+        "list":         name,
         "removed":      count,
-        "instructions": f"Confirm you've cleared the shopping list ({count} items removed).",
+        "instructions": f"Confirm you've cleared the {name} list ({count} items removed).",
+    })
+
+
+def _create_execute(tool_args: dict, session, core, tool_config: dict) -> str:
+    params = ToolBase.params(tool_args)
+    name   = _canonical(params.get('list_name', ''))
+
+    if not name:
+        return ToolBase.error(core, 'create_list', "No list name provided.")
+
+    data = _load()
+
+    if name in data:
+        return ToolBase.result(core, 'create_list', {
+            "status":       "already_exists",
+            "list":         name,
+            "instructions": f"Tell the user a '{name}' list already exists.",
+        })
+
+    data[name] = []
+    _save(data)
+    log.info("List created", extra={'data': f"list={name}"})
+
+    return ToolBase.result(core, 'create_list', {
+        "status":       "created",
+        "list":         name,
+        "instructions": f"Confirm you've created a new '{name}' list.",
+    })
+
+
+def _delete_execute(tool_args: dict, session, core, tool_config: dict) -> str:
+    params = ToolBase.params(tool_args)
+    name   = _canonical(params.get('list_name', ''))
+
+    if not name:
+        return ToolBase.error(core, 'delete_list', "No list name provided.")
+
+    if name == PROTECTED:
+        return ToolBase.error(core, 'delete_list',
+            "The shopping list cannot be deleted, it is a base list. You can clear it instead.")
+
+    data = _load()
+
+    if name not in data:
+        return ToolBase.error(core, 'delete_list',
+            f"No list called '{name}'. Available: {', '.join(sorted(data.keys()))}.")
+
+    count = len(data.pop(name))
+    _save(data)
+    log.info("List deleted", extra={'data': f"list={name} had={count} items"})
+
+    return ToolBase.result(core, 'delete_list', {
+        "status":       "deleted",
+        "list":         name,
+        "instructions": f"Confirm you've deleted the '{name}' list.",
     })
 
 
 # ── Tool registration ─────────────────────────────────────────────────────────
 
 TOOLS = [
-    {'name': 'add_to_shopping_list',     'schema': add_to_shopping_list,     'execute': _add_execute},
-    {'name': 'remove_from_shopping_list','schema': remove_from_shopping_list,'execute': _remove_execute},
-    {'name': 'get_shopping_list',        'schema': get_shopping_list,        'execute': _get_execute},
-    {'name': 'clear_shopping_list',      'schema': clear_shopping_list,      'execute': _clear_execute},
+    {'name': 'add_to_list',      'schema': add_to_list,      'execute': _add_execute},
+    {'name': 'remove_from_list', 'schema': remove_from_list, 'execute': _remove_execute},
+    {'name': 'get_list',         'schema': get_list,         'execute': _get_execute},
+    {'name': 'clear_list',       'schema': clear_list,       'execute': _clear_execute},
+    {'name': 'create_list',      'schema': create_list,      'execute': _create_execute},
+    {'name': 'delete_list',      'schema': delete_list,      'execute': _delete_execute},
 ]

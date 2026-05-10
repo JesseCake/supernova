@@ -520,6 +520,12 @@ def on_session_end(core, tool_config: dict, session: dict):
         log.debug("on_session_end — skipping relay session",
                 extra={'data': f"session={get_session_id(session)[:8]}"})
         return
+    
+    # ability to disable post session processing if desired (limited memory on device etc ruining KV cache for main conversations)
+    if tool_config.get('disable_session_processing', False):
+        log.debug("on_session_end — session processing disabled",
+                  extra={'data': f"session={get_session_id(session)[:8]}"})
+        return
 
     session_id = get_session_id(session)
     history    = get_history(session)
@@ -553,7 +559,11 @@ def on_session_end(core, tool_config: dict, session: dict):
     try:
         log.info("Phase 1: generating session summary",
                  extra={'data': f"session={session_id[:8]} turns={len(lines)}"})
-        summary = core.run_headless(summary_prompt)
+        summary = core.run_headless(
+            summary_prompt,
+            model=tool_config.get('summary_model'),
+            num_ctx=tool_config.get('summary_num_ctx'),
+            )
         if summary:
             _store_session_summary(session_id, session, summary, core)
     except Exception as e:
@@ -586,16 +596,15 @@ def on_session_end(core, tool_config: dict, session: dict):
         "- Health or lifestyle information\n"
         "- Important decisions or commitments made\n"
         "- Anything the user explicitly asked to be remembered\n\n"
-        "Do NOT extract:\n"
-        "- Transient information (today's weather, what time it is)\n"
-        "- Things that were only relevant to this specific conversation\n"
-        "- Greetings, small talk, or test messages\n\n"
-        "Store each fact as a short, clear, self-contained statement. "
-        "Store them one at a time. If nothing worth remembering was said, "
+        "CRITICAL: Store only atomic facts about the user as a person. "
+        "NEVER store the conversation transcript itself, questions asked, "
+        "or time-specific information. Each stored fact must be a single "
+        "sentence about a permanent attribute of the user.\n\n"
+        "If nothing worth remembering was said, "
         "do not call store_memory at all.\n\n"
         "IMPORTANT: you do not need to explain yourself beyond the actions you take using tools as this is a headless session."
         f"The user in this conversation is: {user_id}\n\n"
-        f"Transcript:\n{transcript}"
+        f"Transcript:\n{transcript}\n\n"
     )
 
     try:
@@ -605,6 +614,8 @@ def on_session_end(core, tool_config: dict, session: dict):
             prompt            = extraction_prompt,
             tools             = [store_memory],      # schema function only — scoped tool set
             session_overrides = overrides,
+            model=tool_config.get('summary_model'),
+            num_ctx=tool_config.get('summary_num_ctx'),
         )
         log.info("Phase 2: fact extraction complete",
                  extra={'data': f"session={session_id[:8]} user={user_id}"})

@@ -73,7 +73,8 @@ class DebugConfig:
     record_audio: bool = False
     record_dir:   str  = "./debug_audio"
     verbose:      bool = False
-
+    log_prompts:     bool = False
+    log_prompts_dir: str  = "./debug_prompts"
 
 @dataclass
 class AppConfig:

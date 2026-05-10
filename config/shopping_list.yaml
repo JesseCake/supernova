@@ -1,3 +1,4 @@
 enabled:     true
 interfaces:  []    # all interfaces
 agent_modes: [all] # all agent modes
+context_priority: 20    # inject early so list names are available from the start

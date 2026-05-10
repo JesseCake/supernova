@@ -243,6 +243,38 @@ class CoreProcessor:
         if extra:
             parts.append(extra)
         return {'extra': {'data': " | ".join(parts)}} if parts else {}
+    
+    def _log_prompt(self, prompt_text: list, prompt_tools: list, session: dict) -> None:
+        """Write the exact prompt sent to Ollama to a per-session text file."""
+        if not self.config.debug.log_prompts:
+            return
+        import os
+        from core.session_state import get_session_id
+        os.makedirs(self.config.debug.log_prompts_dir, exist_ok=True)
+        session_id = get_session_id(session) or 'unknown'
+        filepath   = os.path.join(self.config.debug.log_prompts_dir, f"{session_id}.txt")
+        turn       = sum(1 for m in prompt_text if m.get('role') == 'user')
+        with open(filepath, 'a', encoding='utf-8') as f:
+            f.write(f"\n{'='*80}\n")
+            f.write(f"TURN {turn} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"{'='*80}\n\n")
+            for msg in prompt_text:
+                role      = msg.get('role', 'unknown')
+                content   = msg.get('content', '')
+                tool_name = msg.get('tool_name', '')
+                tool_calls = msg.get('tool_calls', [])
+                if tool_name:
+                    f.write(f"[{role}: {tool_name}]\n")
+                else:
+                    f.write(f"[{role}]\n")
+                if content:
+                    f.write(f"{content}\n")
+                if tool_calls:
+                    f.write(f"{json.dumps(tool_calls, indent=2, default=str)}\n")
+                f.write("\n")
+            f.write(f"[tools]\n")
+            f.write(f"{json.dumps(prompt_tools, indent=2, default=str)}\n")
+            f.write("\n")
 
     # ──────────────────────────────────────────────────────────────────────────
     # Session management
@@ -498,6 +530,8 @@ class CoreProcessor:
         endpoint_id:      str  = '',
         tools:            list = None,
         session_overrides: dict = None,
+        model:            str  = None,
+        num_ctx:          int  = None,
     ) -> str:
         """
         Run a prompt through the LLM with no live user present.
@@ -528,6 +562,12 @@ class CoreProcessor:
         # Merge any caller-supplied identity / context overrides
         if session_overrides:
             session.update(session_overrides)
+
+        # model override:
+        if model:
+            session['_model_override'] = model
+        if num_ctx:
+            session['_num_ctx_override'] = num_ctx
 
         # If an explicit tool list is provided, stash it on the session so
         # process_input can pick it up instead of querying the tool loader.
@@ -574,14 +614,19 @@ class CoreProcessor:
         if speaker:
             context += f"\n\n[USER IDENTIFIED]\nYou are speaking with {speaker}."
 
-        messages = conversation_history + [{'role': 'system', 'content': context}]
+        if session.get('_headless'):
+            messages = conversation_history[:]
+        else:
+            messages = conversation_history + [{'role': 'system', 'content': context}]
 
         turn_injections = []
-        for text, persist in self.tool_loader.get_turn_context_injections(self, session, input_text):
-            msg = {'role': 'system', 'content': text}
-            messages.append(msg)
-            if persist:
-                turn_injections.append(msg)
+        # skip tool injections for headless sessions
+        if not session.get('_headless'):
+            for text, persist in self.tool_loader.get_turn_context_injections(self, session, input_text):
+                msg = {'role': 'system', 'content': text}
+                messages.append(msg)
+                if persist:
+                    turn_injections.append(msg)
 
         return messages, turn_injections
 
@@ -594,6 +639,9 @@ class CoreProcessor:
           2. Tool context injections (behaviour rules, home automation entities, etc.)
           3. Interface declaration (LLM knows which interface it's on)
         """
+        if session.get('_model_override'):
+            return {'role': 'system', 'content': 'You are a helpful assistant. Follow instructions precisely and concisely.'}
+    
         interface_mode = get_interface_mode(session)
         agent_mode     = get_agent_mode(session)
 
@@ -640,15 +688,22 @@ class CoreProcessor:
                         msg['images'] = images
                         break
 
+            # debug logging for full prompt and tool list send to Ollama so we can diagnose KV cache breaking changes between sessions/turns:
+            self._log_prompt(prompt_text, prompt_tools, session)
+
+            # if we have any model overrides (for headless mode) use them, otherwise default to self.model:
+            model = session.get('_model_override', self.model)
+            num_ctx = session.get('_num_ctx_override', 8192)
+
             response_stream = self.ollama_client.chat(
-                model      = self.model,
+                model      = model,
                 messages   = prompt_text,
                 stream     = True,
                 keep_alive = -1,
                 think      = False,
                 tools      = prompt_tools,
                 options    = {
-                    'num_ctx': 16384,
+                    'num_ctx': num_ctx,
                 }
 
             )

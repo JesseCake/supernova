@@ -27,3 +27,10 @@ conflict_threshold: 0.5
 # If the user had a session within this window, the agent is nudged to use
 # recall tools if the user references it.
 recency_hint_minutes: 120
+
+# The summary model to use (smaller, and keeps out of the way of the main KV cache):
+summary_model: "qwen3.5:9b"
+summary_num_ctx: 8192
+
+# ability to disable post-session processing if desired (limited memory on device etc ruining KV cache for main conversations)
+disable_session_processing: true
