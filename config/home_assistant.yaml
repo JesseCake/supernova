@@ -1,0 +1,16 @@
+enabled: true
+interfaces: []             # available on all interfaces
+context_priority: 40       # inject before most tools — HA context is core capability
+
+# Home Assistant connection
+url:   http://192.168.0.3:8123
+token: ""                  # paste your long-lived access token here
+
+# Tool whitelist — leave empty to expose everything HA advertises
+# Add tool names to restrict what the agent can use:
+# tools:
+#   - HassTurnOn
+#   - HassTurnOff
+#   - HassGetState
+#   - HassListEntities
+tools: []

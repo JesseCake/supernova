@@ -1,0 +1,285 @@
+"""
+tools/home_assistant.py — Home Assistant control via the official MCP Server integration.
+
+Installation
+------------
+Install the "Model Context Protocol Server" integration in Home Assistant:
+  Settings → Devices & Services → Add Integration → Model Context Protocol Server
+
+Then create a Long-Lived Access Token:
+  HA Profile → Security tab → Long-Lived Access Tokens → Create Token
+
+Add both to config/home_assistant.yaml:
+  url:   http://192.168.8.3:8123
+  token: your_long_lived_token_here
+
+How it works
+------------
+At load time this module connects to HA's MCP server, discovers every tool
+it exposes, and dynamically builds a TOOLS list so each HA tool is registered
+as a native Supernova tool. The LLM sees them directly — no wrapper layer.
+
+On each tool call, a fresh async session is opened, the call is made, and
+the session is closed. asyncio.run() handles the event loop — no persistent
+thread or connection needed since HA is on the local network and calls are
+fast.
+
+Tool names are exposed as-is from HA (e.g. 'HassTurnOn', 'HassGetState').
+Restrict to specific tools via the tools: list in the yaml config.
+
+Caching
+-------
+Discovered tools are cached at module level for the lifetime of the process.
+On hot-reload, the module re-executes and re-discovers. Call results are not
+cached — every call hits HA live.
+"""
+
+import asyncio
+import json
+from typing import Annotated, Any
+from pydantic import Field
+from core.tool_base import ToolBase
+
+log = ToolBase.logger('home_assistant')
+
+TOOL_NAME = 'home_assistant'
+
+# ── Module-level tool cache ───────────────────────────────────────────────────
+# Populated at import time by _discover_tools().
+# Each entry mirrors the mcp.types.Tool structure we got from HA.
+_ha_tools: list = []   # list of mcp.types.Tool
+
+
+# ── MCP helpers ───────────────────────────────────────────────────────────────
+
+def _mcp_url(tool_config: dict) -> str:
+    base = tool_config.get('url', '').rstrip('/')
+    return f"{base}/api/mcp"
+
+
+def _headers(tool_config: dict) -> dict:
+    return {"Authorization": f"Bearer {tool_config.get('token', '')}"}
+
+
+async def _async_discover(tool_config: dict) -> list:
+    """Connect to HA MCP server and return list of Tool objects."""
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+
+    url     = _mcp_url(tool_config)
+    headers = _headers(tool_config)
+
+    async with streamablehttp_client(url, headers=headers) as (read, write, _):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            result = await session.list_tools()
+            return result.tools
+
+
+async def _async_call(tool_config: dict, tool_name: str, arguments: dict) -> str:
+    """Open a fresh session, call a tool, return the text result."""
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+
+    url     = _mcp_url(tool_config)
+    headers = _headers(tool_config)
+
+    async with streamablehttp_client(url, headers=headers) as (read, write, _):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            result = await session.call_tool(tool_name, arguments)
+
+    # Extract text content from result
+    texts = []
+    for block in result.content:
+        if hasattr(block, 'text'):
+            texts.append(block.text)
+        elif hasattr(block, 'json'):
+            texts.append(json.dumps(block.json))
+    return '\n'.join(texts) if texts else 'OK'
+
+
+# ── Discovery ─────────────────────────────────────────────────────────────────
+
+def _load_tool_config() -> dict:
+    """Load our own yaml config directly — needed at module import time."""
+    import os
+    import yaml
+    config_path = os.path.join(
+        os.path.dirname(__file__), '..', 'config', 'home_assistant.yaml'
+    )
+    try:
+        with open(config_path) as f:
+            return yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        log.error(f"Could not load home_assistant.yaml: {e}")
+        return {}
+
+
+def _discover_tools(tool_config: dict) -> list:
+    """
+    Synchronously discover tools from HA MCP server.
+    Returns [] and logs a warning if HA is unreachable.
+    """
+    if not tool_config.get('url') or not tool_config.get('token'):
+        log.warning("home_assistant: url or token not configured — no tools registered")
+        return []
+
+    try:
+        tools = asyncio.run(_async_discover(tool_config))
+        log.info(f"Discovered {len(tools)} tools from Home Assistant")
+        return tools
+    except Exception as e:
+        log.warning(f"Could not connect to Home Assistant MCP server: {e}")
+        return []
+
+
+def _filter_tools(tools: list, tool_config: dict) -> list:
+    """Apply the tools: whitelist from yaml if present."""
+    whitelist = tool_config.get('tools', [])
+    if not whitelist:
+        return tools
+    allowed = set(whitelist)
+    filtered = [t for t in tools if t.name in allowed]
+    log.info(f"Filtered to {len(filtered)} tools (whitelist: {sorted(allowed)})")
+    return filtered
+
+
+# ── Dynamic schema builder ────────────────────────────────────────────────────
+
+def _build_schema_fn(ha_tool) -> callable:
+    """
+    Build a Pydantic-annotated schema function from an MCP Tool object.
+
+    HA tools use JSON Schema for their inputSchema. We extract the properties
+    and required fields to build proper Annotated parameters so Ollama sees
+    rich descriptions for each argument.
+    """
+    tool_name   = ha_tool.name
+    description = ha_tool.description or f"Home Assistant tool: {tool_name}"
+    schema      = ha_tool.inputSchema or {}
+    properties  = schema.get('properties', {})
+    required    = set(schema.get('required', []))
+
+    # Build parameter annotations dynamically
+    annotations = {}
+    defaults    = {}
+
+    for param_name, param_schema in properties.items():
+        param_desc     = param_schema.get('description', param_name)
+        param_type_str = param_schema.get('type', 'string')
+
+        # Map JSON Schema types to Python types
+        type_map = {
+            'string':  str,
+            'integer': int,
+            'number':  float,
+            'boolean': bool,
+            'array':   list,
+            'object':  dict,
+        }
+        py_type = type_map.get(param_type_str, str)
+
+        if param_name in required:
+            annotations[param_name] = Annotated[py_type, Field(description=param_desc)]
+        else:
+            annotations[param_name] = Annotated[py_type, Field(
+                default=None,
+                description=f"{param_desc} (optional)",
+            )]
+            defaults[param_name] = None
+
+    # Dynamically create the schema function
+    # The function body is always ... — execute() does the real work
+    def schema_fn(**kwargs): ...
+
+    schema_fn.__name__        = tool_name
+    schema_fn.__qualname__    = tool_name
+    schema_fn.__doc__         = description
+    schema_fn.__annotations__ = {**annotations, 'return': str}
+
+    # Attach defaults as function defaults via a wrapper
+    # Pydantic reads __annotations__ and Field defaults, so this is enough
+    return schema_fn
+
+
+# ── Executor factory ──────────────────────────────────────────────────────────
+
+def _make_executor(ha_tool_name: str):
+    """Return an execute function closed over the HA tool name."""
+
+    def execute(tool_args: dict, session: dict, core, tool_config: dict) -> str:
+        params = ToolBase.params(tool_args)
+
+        # Strip None values — don't send optional params HA didn't ask for
+        arguments = {k: v for k, v in params.items() if v is not None}
+
+        log.info(f"Calling HA tool: {ha_tool_name}",
+                 extra={'data': str(arguments)})
+
+        try:
+            result_text = asyncio.run(
+                _async_call(tool_config, ha_tool_name, arguments)
+            )
+            return ToolBase.result(core, ha_tool_name, {
+                "result":       result_text,
+                "instructions": (
+                    f"The Home Assistant action '{ha_tool_name}' completed. "
+                    f"Result: {result_text}. "
+                    f"Tell the user what happened naturally and concisely."
+                ),
+            })
+        except Exception as e:
+            log.error(f"HA tool call failed: {ha_tool_name}", exc_info=True)
+            return ToolBase.error(core, ha_tool_name,
+                f"Home Assistant error: {e}")
+
+    return execute
+
+
+# ── Context provider ──────────────────────────────────────────────────────────
+
+def provide_context(core, tool_config: dict, session: dict) -> str:
+    """Inject available HA tool names into the system prompt."""
+    if not _ha_tools:
+        return ""
+    names = ', '.join(t.name for t in _ha_tools)
+    return (
+        f"[HOME ASSISTANT]\n"
+        f"You have direct control of the user's Home Assistant smart home. "
+        f"Available tools: {names}"
+    )
+
+
+# ── TOOLS list — built at import time ─────────────────────────────────────────
+
+def _build_tools_list() -> list:
+    tool_config = _load_tool_config()
+
+    if not tool_config.get('enabled', True):
+        return []
+
+    discovered = _discover_tools(tool_config)
+    filtered   = _filter_tools(discovered, tool_config)
+
+    # Cache for provide_context
+    global _ha_tools
+    _ha_tools = filtered
+
+    entries = []
+    for ha_tool in filtered:
+        schema_fn = _build_schema_fn(ha_tool)
+        executor  = _make_executor(ha_tool.name)
+        entries.append({
+            'name':    ha_tool.name,
+            'schema':  schema_fn,
+            'execute': executor,
+        })
+        log.debug(f"Registered HA tool: {ha_tool.name}")
+
+    return entries
+
+
+TOOLS = _build_tools_list()

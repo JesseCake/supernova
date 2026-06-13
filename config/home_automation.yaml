@@ -1,6 +1,0 @@
-enabled: false
-
-api_key: "APIKEY"
-url: "http://192.168.20.3:8123/api"
-
-agent_modes: [general]
