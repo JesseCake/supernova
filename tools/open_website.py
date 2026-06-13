@@ -1,6 +1,16 @@
 """
 tools/open_website.py — Fetch and scrape web pages for the agent.
 
+Installation
+------------
+Beyond the standard requirements, this tool needs:
+
+    pip install httpx[http2] beautifulsoup4 lxml playwright playwright-stealth
+    playwright install chromium
+
+The second line downloads the Chromium browser binary — it's a one-time step
+and is not a pip package, so it must be run separately after pip install.
+
 Two-layer fetching strategy:
   1. httpx + BeautifulSoup  — fast, lightweight, works for most static sites
   2. Playwright + stealth   — full headless browser for JS-heavy or bot-protected

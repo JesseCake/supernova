@@ -1,5 +1,5 @@
 """
-send_email tool — sends an email via SMTP.
+tools/send_email.py — Send an email via SMTP.
 Config: config/send_email.yaml
 
 Recipient resolution priority:
@@ -11,26 +11,28 @@ Recipient resolution priority:
 """
 from typing import Annotated
 from pydantic import Field
+from core.tool_base import ToolBase
+
+log = ToolBase.logger('send_email')
 
 
 # ── Schema ────────────────────────────────────────────────────────────────────
 
 def send_email(
     subject: Annotated[str, Field(description="The email subject line. Required.")],
-    body: Annotated[str, Field(description="The email body content. Required.")],
+    body:    Annotated[str, Field(description="The email body content. Required.")],
     to_address: Annotated[str, Field(
         default="",
         description=(
-            "Recipient name or email address. Use a friendly name from the known contacts "
-            "if the user specifies one (e.g. 'Jesse', 'Dean', 'Mum'). "
-            "Leave empty to send to the identified speaker."
-        )
+            "Recipient name (friendly name from known contacts if the user specifies one) or email address. "
+            "Leave empty to send to the identified speaker (if it seems they're asking you to send something to them for later etc)."
+        ),
     )] = "",
 ) -> str:
     """
     Send an email via SMTP.
-    Use when the user asks to send, email, or message someone.
-    If no recipient is specified and a speaker is identified, send to them.
+    Use when the user asks to send email to someone.
+    If no recipient is specified and a speaker is identified, this tool will send to them.
     """
     ...
 
@@ -67,64 +69,66 @@ def _resolve_address(name_or_email: str, tool_config: dict) -> str:
 
 # ── Executor ──────────────────────────────────────────────────────────────────
 
-def execute(tool_args: dict, session, core, tool_config: dict) -> str:
+def execute(tool_args: dict, session: dict, core, tool_config: dict) -> str:
     import smtplib
-    import os
     from email.mime.text import MIMEText
     from email.mime.multipart import MIMEMultipart
-    from core.speaker_id import load_profiles
 
-    params  = tool_args.get('parameters', {})
+    # Validate required config up front
+    err = ToolBase.require_config(tool_config, 'smtp_host', 'username', 'password')
+    if err:
+        return ToolBase.error(core, 'send_email', err)
+
+    params  = ToolBase.params(tool_args)
     subject = params.get('subject', '').strip()
     body    = params.get('body', '').strip()
 
-    # 1. Resolve friendly name or raw email from tool call
+    if not subject:
+        return ToolBase.error(core, 'send_email', "No subject provided.")
+    if not body:
+        return ToolBase.error(core, 'send_email', "No body provided.")
+
+    # ── Recipient resolution ──────────────────────────────────────────────────
+
+    # 1. Friendly name or raw address from tool call
     to_address = _resolve_address(params.get('to_address', '').strip(), tool_config)
 
     # 2. Fall back to identified speaker's enrolled email
     if not to_address:
-        speaker = session.get('speaker')
+        speaker = ToolBase.speaker(session)
         if speaker:
-            config_dir = os.path.join(os.path.dirname(__file__), '../config')
-            profiles   = load_profiles(config_dir)
-            profile    = profiles.get(speaker, {})
-            to_address = profile.get('email', '')
+            profiles  = ToolBase.read_json('speaker_id', 'speaker_profiles.json', default={})
+            to_address = profiles.get(speaker, {}).get('email', '')
 
     # 3. Fall back to default_to in config
     if not to_address:
         to_address = _resolve_address(tool_config.get('default_to', ''), tool_config)
 
     if not to_address:
-        return core._wrap_tool_result("send_email", {
-            "text": (
-                "No recipient address found. "
-                "Please specify a contact name or email address, "
-                "or enroll the speaker with an email address."
-            )
-        })
+        return ToolBase.error(core, 'send_email',
+            "No recipient found. Specify a contact name or email address, "
+            "or enroll the speaker with an email address."
+        )
 
-    if not subject:
-        return core._wrap_tool_result("send_email", {"text": "No subject provided."})
+    # ── Send ──────────────────────────────────────────────────────────────────
 
-    if not body:
-        return core._wrap_tool_result("send_email", {"text": "No body provided."})
+    ToolBase.speak(core, session, f"Sending email to {to_address}. ")
+    log.info("Sending email", extra={'data': f"to={to_address} subject={subject!r}"})
 
-    core.send_whole_response(f"Sending email to {to_address}...", session)
-    core._log("send_email", session=session, extra=f"to={to_address} subject={subject}")
+    smtp_host = tool_config.get('smtp_host', 'smtp.gmail.com')
+    smtp_port = int(tool_config.get('smtp_port', 587))
+    username  = tool_config.get('username', '')
+    password  = tool_config.get('password', '')
+    from_addr = tool_config.get('from_address', username)
+
+    msg            = MIMEMultipart()
+    msg['From']    = from_addr
+    msg['To']      = to_address
+    msg['Subject'] = subject
+    body += "\n\nSupernova\n(I am machine intelligence, I try to do good, but sometimes make mistakes)"
+    msg.attach(MIMEText(body, 'plain'))
 
     try:
-        smtp_host = tool_config.get('smtp_host', 'smtp.gmail.com')
-        smtp_port = tool_config.get('smtp_port', 587)
-        username  = tool_config.get('username', '')
-        password  = tool_config.get('password', '')
-        from_addr = tool_config.get('from_address', username)
-
-        msg = MIMEMultipart()
-        msg['From']    = from_addr
-        msg['To']      = to_address
-        msg['Subject'] = subject
-        msg.attach(MIMEText(body, 'plain'))
-
         if smtp_port == 465:
             with smtplib.SMTP_SSL(smtp_host, smtp_port) as server:
                 if username and password:
@@ -137,23 +141,25 @@ def execute(tool_args: dict, session, core, tool_config: dict) -> str:
                     server.login(username, password)
                 server.sendmail(from_addr, to_address, msg.as_string())
 
-        return core._wrap_tool_result("send_email", {
-            "text": f"Email sent to {to_address}.",
+        log.info("Email sent", extra={'data': f"to={to_address}"})
+        return ToolBase.result(core, 'send_email', {
+            "status":       "sent",
+            "to":           to_address,
+            "subject":      subject,
             "instructions": (
                 f"Tell the user the email was sent to {to_address} "
                 f"with subject '{subject}'."
-            )
+            ),
         })
 
     except smtplib.SMTPAuthenticationError:
-        return core._wrap_tool_result("send_email", {
-            "text": "Authentication failed. Check the SMTP username and password in config."
-        })
+        log.error("SMTP authentication failed")
+        return ToolBase.error(core, 'send_email',
+            "Authentication failed — check the SMTP username and password in config."
+        )
     except smtplib.SMTPException as e:
-        return core._wrap_tool_result("send_email", {
-            "text": f"SMTP error: {str(e)}"
-        })
+        log.error(f"SMTP error: {e}", exc_info=True)
+        return ToolBase.error(core, 'send_email', f"SMTP error: {e}")
     except Exception as e:
-        return core._wrap_tool_result("send_email", {
-            "text": f"Failed to send email: {str(e)}"
-        })
+        log.error("Unexpected error sending email", exc_info=True)
+        return ToolBase.error(core, 'send_email', f"Failed to send email: {e}")
