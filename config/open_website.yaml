@@ -1,0 +1,26 @@
+enabled: true
+interfaces: []             # available on all interfaces
+context_priority: 50
+
+# Cache
+cache_ttl_minutes: 60      # how long to keep fetched pages on disk
+                           # session cookies are NOT subject to this TTL
+
+# Content defaults (all overridable per-call by the agent)
+chunk_size_chars: 4000
+include_links: true
+include_external_links: false
+
+# Fetch behaviour
+request_timeout_seconds: 20
+auto_js_fallback: true     # automatically retry with Playwright if httpx
+                           # returns an app/blocked page; set false to
+                           # only use Playwright when javascript=true is passed
+
+# User-agent is set in code to a realistic Chrome string.
+# Override here only if you need a specific UA for a particular deployment.
+# user_agent: ""
+
+# Debugging
+debug_log_content: false   # set true to log scraped content on every fetch
+debug_log_max_chars: 2000  # how many characters of content to log (avoids floods)
