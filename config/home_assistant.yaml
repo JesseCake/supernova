@@ -14,3 +14,7 @@ token: ""                  # paste your long-lived access token here
 #   - HassGetState
 #   - HassListEntities
 tools: []
+
+# Debugging — set true to log full tool schemas at load time
+# and raw tool_args + results on every call
+debug: true

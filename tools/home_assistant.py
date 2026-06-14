@@ -207,34 +207,117 @@ def _build_schema_fn(ha_tool) -> callable:
 
 # ── Executor factory ──────────────────────────────────────────────────────────
 
-def _make_executor(ha_tool_name: str):
+def _make_executor(ha_tool_name: str, allowed_params: set,
+                   array_params: set = None, debug: bool = False):
     """Return an execute function closed over the HA tool name."""
+    array_params = array_params or set()
 
     def execute(tool_args: dict, session: dict, core, tool_config: dict) -> str:
         params = ToolBase.params(tool_args)
 
-        # Strip None values — don't send optional params HA didn't ask for
-        arguments = {k: v for k, v in params.items() if v is not None}
+        # Ollama sometimes wraps all arguments as a JSON string inside a
+        # 'kwargs' key: {'kwargs': '{"entity_id": "switch.xyz"}'}.
+        # Detect and unpack this before filtering. When we unpack kwargs,
+        # bypass the allowed_params filter — the unpacked keys are the real
+        # arguments and the schema advertised 'kwargs' as a catch-all.
+        kwargs_unpacked = False
+        if list(params.keys()) == ['kwargs']:
+            try:
+                params = json.loads(params['kwargs'])
+                kwargs_unpacked = True
+                log.debug(f"Unpacked kwargs for {ha_tool_name}: {params}")
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        # Strip None values. If we unpacked from kwargs, skip the
+        # allowed_params filter since the schema listed 'kwargs' not the
+        # real param names. Otherwise filter strictly against HA's schema.
+        if kwargs_unpacked:
+            arguments = {k: v for k, v in params.items() if v is not None}
+        else:
+            arguments = {
+                k: v for k, v in params.items()
+                if v is not None and (not allowed_params or k in allowed_params)
+            }
+
+        # Coerce string → list for params HA expects as arrays.
+        # Ollama sometimes sends a plain string where a list is required.
+        for k in array_params:
+            if k in arguments and isinstance(arguments[k], str):
+                arguments[k] = [arguments[k]]
+                log.debug(f"Coerced {k} to list for {ha_tool_name}")
 
         log.info(f"Calling HA tool: {ha_tool_name}",
                  extra={'data': str(arguments)})
+
+        if debug:
+            log.debug(
+                f"HA tool call detail: {ha_tool_name}\n"
+                f"  raw tool_args: {tool_args}\n"
+                f"  resolved arguments: {arguments}"
+            )
 
         try:
             result_text = asyncio.run(
                 _async_call(tool_config, ha_tool_name, arguments)
             )
-            return ToolBase.result(core, ha_tool_name, {
-                "result":       result_text,
-                "instructions": (
+
+            if debug:
+                log.debug(f"HA tool result: {ha_tool_name}\n  result: {result_text}")
+
+            # Tailor instructions based on whether this was a discovery
+            # call or a control call, so the agent knows what to do next.
+            is_discovery = ha_tool_name in ('GetLiveContext', 'HassGetState',
+                                            'HassListEntities', 'HassSearchEntities')
+            if is_discovery:
+                instructions = (
+                    f"The above lists all devices. Match the user's request against "
+                    f"the device names, check the domain, then call the right tool:\n"
+                    f"  switch → HassTurnOn/HassTurnOff(name='...')\n"
+                    f"  light  → HassTurnOn/HassTurnOff/HassLightSet(name='...')\n"
+                    f"  scene  → HassTurnOn(name='...') only\n"
+                    f"  vacuum → HassVacuumStart/HassVacuumReturnToBase(name='...')\n"
+                    f"Always use name=, never entity_id. "
+                    f"Do not tell the user you are looking things up — just act."
+                )
+            else:
+                instructions = (
                     f"The Home Assistant action '{ha_tool_name}' completed. "
                     f"Result: {result_text}. "
                     f"Tell the user what happened naturally and concisely."
-                ),
+                )
+
+            # If HA returned an error string in the result, treat it as
+            # a recoverable failure and tell the agent to re-discover.
+            ha_error = (
+                isinstance(result_text, str) and
+                result_text.lower().startswith('error')
+            )
+            if ha_error and not is_discovery:
+                instructions = (
+                    f"The action '{ha_tool_name}' failed with: {result_text}. "
+                    f"You may have used entity_id instead of name — HA tools use "
+                    f"the 'name' parameter, not entity_id. "
+                    f"Call GetLiveContext with no arguments, find the correct device "
+                    f"name, then retry using name='Device Name'. "
+                    f"Do not tell the user about this — just retry silently."
+                )
+
+            return ToolBase.result(core, ha_tool_name, {
+                "result":       result_text,
+                "instructions": instructions,
             })
         except Exception as e:
             log.error(f"HA tool call failed: {ha_tool_name}", exc_info=True)
-            return ToolBase.error(core, ha_tool_name,
-                f"Home Assistant error: {e}")
+            return ToolBase.result(core, ha_tool_name, {
+                "result": f"Error: {e}",
+                "instructions": (
+                    f"The action '{ha_tool_name}' failed with an unexpected error: {e}. "
+                    f"Call GetLiveContext to verify the correct device names, "
+                    f"then retry using the name parameter not entity_id. "
+                    f"Do not tell the user about this error — just retry."
+                ),
+            })
 
     return execute
 
@@ -242,14 +325,24 @@ def _make_executor(ha_tool_name: str):
 # ── Context provider ──────────────────────────────────────────────────────────
 
 def provide_context(core, tool_config: dict, session: dict) -> str:
-    """Inject available HA tool names into the system prompt."""
+    """Inject available HA tool names and usage rules into the system prompt."""
     if not _ha_tools:
         return ""
     names = ', '.join(t.name for t in _ha_tools)
     return (
         f"[HOME ASSISTANT]\n"
-        f"You have direct control of the user's Home Assistant smart home. "
-        f"Available tools: {names}"
+        f"You have direct control of the user's Home Assistant smart home.\n"
+        f"Available tools: {names}\n\n"
+        f"IMPORTANT RULES FOR HOME ASSISTANT:\n"
+        f"1. Always call GetLiveContext with NO arguments first to see all devices.\n"
+        f"2. GetLiveContext returns each device with a 'domain' field. "
+        f"Use the domain to pick the right tool, passing name= exactly as returned:\n"
+        f"   domain=switch  → HassTurnOn(name='...') or HassTurnOff(name='...')\n"
+        f"   domain=light   → HassTurnOn / HassTurnOff / HassLightSet(name='...')\n"
+        f"   domain=scene   → HassTurnOn(name='...') to activate (never turn off)\n"
+        f"   domain=vacuum  → HassVacuumStart / HassVacuumReturnToBase(name='...')\n"
+        f"3. Always use the name parameter — never use entity_id.\n"
+        f"4. Never skip GetLiveContext even if you think you know the device name."
     )
 
 
@@ -268,10 +361,23 @@ def _build_tools_list() -> list:
     global _ha_tools
     _ha_tools = filtered
 
+    debug = tool_config.get('debug', False)
+
+    if debug:
+        for ha_tool in filtered:
+            log.debug(
+                f"HA tool discovered: {ha_tool.name}\n"
+                f"  description: {ha_tool.description}\n"
+                f"  inputSchema: {ha_tool.inputSchema}"
+            )
+
     entries = []
     for ha_tool in filtered:
-        schema_fn = _build_schema_fn(ha_tool)
-        executor  = _make_executor(ha_tool.name)
+        schema_fn     = _build_schema_fn(ha_tool)
+        props         = (ha_tool.inputSchema or {}).get('properties', {})
+        allowed       = set(props.keys())
+        array_params  = {k for k, v in props.items() if v.get('type') == 'array'}
+        executor      = _make_executor(ha_tool.name, allowed, array_params, debug)
         entries.append({
             'name':    ha_tool.name,
             'schema':  schema_fn,
