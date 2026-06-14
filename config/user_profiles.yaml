@@ -5,7 +5,8 @@
 # their respective interface/tool config files:
 #   - Telegram chat_id  → config/telegram_interface.yaml (endpoints block)
 #   - Speaker endpoint  → discovered from HELO frame + speaker_profiles.json
-#   - Email address     → config/send_email.yaml (contacts block)
+#
+# Email address is defined here in user_profiles.yaml since it's a user-specific contact detail, not an interface-specific one.
 #
 # contact_priority: order to try interfaces when no preference is specified.
 #   First active interface wins, then first configured interface.
@@ -19,6 +20,7 @@
 
 jesse:
   friendly_name: "Jesse"
+  email: jesse@example.com
   contact_priority: [telegram, speaker, email]
   retry_policy:
     max_attempts: 2
@@ -29,6 +31,7 @@ jesse:
 
 dean:
   friendly_name: "Dean"
+  email: dean@example.com
   contact_priority: [telegram, speaker, email]
   retry_policy:
     max_attempts: 2

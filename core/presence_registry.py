@@ -197,6 +197,18 @@ class PresenceRegistry:
                     'age_seconds': presence['age_seconds'],
                 }
             return None
+        
+        if interface == 'email':
+            # Check address book (send_email.yaml contacts) first
+            with self._lock:
+                details = self._contact_cache.get(('email', friendly))
+            if details:
+                return details
+            # Fall back to email field on the profile itself
+            email = profile.get('email', '').strip()
+            if email:
+                return {'address': email}
+            return None
 
         # Telegram and email: look up from config cache
         with self._lock:

@@ -5,7 +5,7 @@ Config: config/send_email.yaml
 Recipient resolution priority:
   1. Friendly name matched against contacts dict in yaml (e.g. "Jesse" -> "jesse@example.com")
   2. Raw email address passed directly (if it contains @)
-  3. Identified speaker's enrolled email (from speaker_profiles.json)
+  3. Identified speaker's email from user_profiles.yaml (via presence_registry)
   4. default_to in yaml
   5. Error if none found
 """
@@ -24,15 +24,19 @@ def send_email(
     to_address: Annotated[str, Field(
         default="",
         description=(
-            "Recipient name (friendly name from known contacts if the user specifies one) or email address. "
-            "Leave empty to send to the identified speaker (if it seems they're asking you to send something to them for later etc)."
+            "Recipient name or email address. "
+            "If the user says 'me', 'myself', or wants it sent to themselves, "
+            "leave this empty — the identified speaker will be used automatically. "
+            "If the user names someone (e.g. 'Jesse', 'Dean', 'Mum'), "
+            "pass their name and it will be resolved from the address book. "
+            "Only populate this if a specific recipient is named."
         ),
     )] = "",
 ) -> str:
     """
     Send an email via SMTP.
-    Use when the user asks to send email to someone.
-    If no recipient is specified and a speaker is identified, this tool will send to them.
+    Use when the user asks to send, email, or message someone.
+    If no recipient is specified and a speaker is identified, send to them.
     """
     ...
 
@@ -93,12 +97,23 @@ def execute(tool_args: dict, session: dict, core, tool_config: dict) -> str:
     # 1. Friendly name or raw address from tool call
     to_address = _resolve_address(params.get('to_address', '').strip(), tool_config)
 
-    # 2. Fall back to identified speaker's enrolled email
+    # 2. Fall back to identified speaker via presence_registry
+    #    This is the proper path for "email this to me" — the registry resolves
+    #    the speaker name to their configured email address via send_email.yaml contacts.
     if not to_address:
         speaker = ToolBase.speaker(session)
         if speaker:
-            profiles  = ToolBase.read_json('speaker_id', 'speaker_profiles.json', default={})
-            to_address = profiles.get(speaker, {}).get('email', '')
+            registry = getattr(core, 'presence_registry', None)
+            if registry:
+                result = registry.get_best_contact(speaker.lower(), preferred='email')
+                if result:
+                    _, details = result
+                    to_address = details.get('address', '')
+                    log.info("Resolved speaker email via presence_registry",
+                             extra={'data': f"speaker={speaker} → {to_address}"})
+                else:
+                    log.warning("No email contact found for speaker",
+                                extra={'data': speaker})
 
     # 3. Fall back to default_to in config
     if not to_address:
@@ -107,12 +122,12 @@ def execute(tool_args: dict, session: dict, core, tool_config: dict) -> str:
     if not to_address:
         return ToolBase.error(core, 'send_email',
             "No recipient found. Specify a contact name or email address, "
-            "or enroll the speaker with an email address."
+            "or ensure the speaker is listed in the email contacts config."
         )
 
     # ── Send ──────────────────────────────────────────────────────────────────
 
-    ToolBase.speak(core, session, f"Sending email to {to_address}. ")
+    ToolBase.speak(core, session, f"Sending email to {to_address}.")
     log.info("Sending email", extra={'data': f"to={to_address} subject={subject!r}"})
 
     smtp_host = tool_config.get('smtp_host', 'smtp.gmail.com')
