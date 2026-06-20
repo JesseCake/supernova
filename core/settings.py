@@ -18,8 +18,9 @@ class LlamaServerConfig:
     host:  str
     model: str = "default"   # most llama-server builds ignore this, but the OpenAI-compatible API requires a value
     use_slots:     bool = False   # only enable once llama-server is launched with --parallel 2 (or more)
-    slot_main:     int  = 0       # id_slot for normal sessions
-    slot_headless: int  = 1       # id_slot for run_headless() calls — keeps headless from evicting the main session's cache
+    default_slot:  int  = 0
+    headless_slot: int  = 2
+    slot_map:      dict = field(default_factory=lambda: {"general": 0})
 
 @dataclass
 class ServerConfig:

@@ -945,10 +945,13 @@ class CoreProcessor:
 
             extra_body = {}
             if self.config.llama_server.use_slots:
-                extra_body['id_slot'] = (
-                    self.config.llama_server.slot_headless if session.get('_headless')
-                    else self.config.llama_server.slot_main
-                )
+                if session.get('_headless'):
+                    extra_body['id_slot'] = self.config.llama_server.headless_slot
+                else:
+                    interface = session.get('interface', 'general')
+                    extra_body['id_slot'] = self.config.llama_server.slot_map.get(
+                        interface, self.config.llama_server.default_slot
+                    )
 
             stream = self.llamaserver_client.chat.completions.create(
                 model    = model,
