@@ -27,6 +27,7 @@ import json
 import threading
 import time
 import types
+import typing
 import inspect
 try:
     import ollama
@@ -1137,19 +1138,63 @@ class CoreProcessor:
 
         return oai
 
-    _PY_TO_JSON_TYPE = {
-        str: 'string', int: 'integer', float: 'number', bool: 'boolean',
-        list: 'array', dict: 'object',
-    }
+    def _annotation_to_json_schema(self, annotation) -> dict:
+        """
+        Convert a single Python type annotation to a JSON-schema property dict.
+
+        Handles:
+        - Annotated[X, Field(description=...)]  -- unwraps to X, keeps the
+            Pydantic Field's description (this is the pattern every schema
+            function in this codebase actually uses)
+        - Optional[X] / X | None                -- unwraps to X
+        - list[X] / set[X] / tuple[X, ...]      -- {"type": "array", "items": ...}
+        - dict[...]                              -- {"type": "object"}
+        - flat types (str/int/float/bool/list/dict)
+
+        A plain origin->name dict lookup misses all of the above except the
+        flat case -- that was the root cause of the shopping-list bug (a
+        list[str] parameter silently advertised to the model as "string",
+        so it passed a bare string, which then iterated character-by-character
+        against code expecting a list).
+        """
+        import typing
+
+        origin = typing.get_origin(annotation)
+
+        if origin is typing.Annotated:
+            args = typing.get_args(annotation)
+            underlying, *metadata = args
+            schema = self._annotation_to_json_schema(underlying)
+            for m in metadata:
+                desc = getattr(m, 'description', None)
+                if desc:
+                    schema['description'] = desc
+            return schema
+
+        args = typing.get_args(annotation)
+
+        if origin is typing.Union:
+            non_none = [a for a in args if a is not type(None)]
+            if non_none:
+                return self._annotation_to_json_schema(non_none[0])
+            return {'type': 'string'}
+
+        if origin in (list, set, tuple):
+            item_type = self._annotation_to_json_schema(args[0]) if args else {'type': 'string'}
+            return {'type': 'array', 'items': item_type}
+
+        if origin is dict:
+            return {'type': 'object'}
+
+        flat = {str: 'string', int: 'integer', float: 'number', bool: 'boolean',
+                list: 'array', dict: 'object'}
+        return {'type': flat.get(annotation, 'string')}
 
     def _tool_to_openai_schema(self, fn) -> dict:
         """
-        Convert one of our tool schema functions (plain Python callable with
-        type hints + docstring, written for ollama's auto-conversion) into an
-        OpenAI-style tool schema dict for llama-server.
-
-        v1 — covers the common case: flat parameters, basic types, no nested
-        objects/enums. Revisit once we see real tool signatures that need more.
+        Convert one of our tool schema functions into an OpenAI-style tool
+        schema dict for llama-server, properly handling Annotated/Pydantic-Field
+        parameter typing (see _annotation_to_json_schema for why this matters).
         """
         sig = inspect.signature(fn)
         doc = inspect.getdoc(fn) or ""
@@ -1160,9 +1205,8 @@ class CoreProcessor:
         for name, param in sig.parameters.items():
             if name == 'self':
                 continue
-            py_type   = param.annotation if param.annotation is not inspect.Parameter.empty else str
-            json_type = self._PY_TO_JSON_TYPE.get(py_type, 'string')
-            properties[name] = {'type': json_type}
+            annotation = param.annotation if param.annotation is not inspect.Parameter.empty else str
+            properties[name] = self._annotation_to_json_schema(annotation)
             if param.default is inspect.Parameter.empty:
                 required.append(name)
 
