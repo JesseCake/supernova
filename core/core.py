@@ -1046,22 +1046,34 @@ class CoreProcessor:
 
     def _messages_to_openai(self, messages: list, images: list = None) -> list:
         """
-        Translate our internal, backend-agnostic message list (as built by
-        create_prompt/process_input) into OpenAI wire format.
+        Translate our internal, backend-agnostic message list into OpenAI
+        wire format, respecting Qwen3.5's template constraint that only one
+        leading system message is honored.
 
-        Internal shapes handled:
-            {'role': 'system'|'user'|'assistant', 'content': str}
-            {'role': 'assistant', 'content': str, 'tool_calls': [normalized tool call objs]}
-            {'role': 'tool', 'tool_name': str, 'tool_call_id': str|None, 'content': str}
-
-        Does not mutate the input messages — builds a fresh list, so the
-        original session history is left untouched.
+        Only the very first system message in the list is kept as a true
+        system-role entry. Any later system-role messages (the per-turn
+        "current time" message, turn-context injections) are folded into
+        the content of the next user message that follows them -- this
+        preserves the live, per-turn injection timing your history is
+        actually built with, instead of statically front-loading everything
+        into one block at the top.
         """
         oai = []
+        pending_system = []
+        leading_system_seen = False
         last_user_idx = None
 
         for i, msg in enumerate(messages):
             role = msg.get('role')
+
+            if role == 'system':
+                content = msg.get('content', '')
+                if not leading_system_seen:
+                    leading_system_seen = True
+                    oai.append({'role': 'system', 'content': content})
+                elif content:
+                    pending_system.append(content)
+                continue
 
             if role == 'tool':
                 oai.append({
@@ -1089,9 +1101,26 @@ class CoreProcessor:
                 })
                 continue
 
-            oai.append({'role': role, 'content': msg.get('content', '')})
+            content = msg.get('content', '')
+            if role == 'user' and pending_system:
+                injected = '\n\n'.join(f"[context]\n{c}\n[/context]" for c in pending_system)
+                content = f"{injected}\n\n{content}" if content else injected
+                pending_system = []
+
+            oai.append({'role': role, 'content': content})
             if role == 'user':
                 last_user_idx = len(oai) - 1
+
+        # Shouldn't normally happen given how process_input builds history
+        # (injections are always immediately followed by a new user message),
+        # but don't silently drop anything if it does.
+        if pending_system:
+            if oai and oai[0]['role'] == 'system':
+                oai[0]['content'] += '\n\n' + '\n\n'.join(pending_system)
+            else:
+                oai.insert(0, {'role': 'system', 'content': '\n\n'.join(pending_system)})
+                if last_user_idx is not None:
+                    last_user_idx += 1
 
         if images and last_user_idx is not None:
             text = oai[last_user_idx]['content']
