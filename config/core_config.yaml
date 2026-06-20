@@ -11,6 +11,16 @@ ollama:
   model_type: "qwen3"   # drives message formatting: "gemma", "qwen3" etc.
   num_ctx: 16384      # context window size - affects memory footprint, decrease if memory constrained, has effect on how much conversation history can be sent to the model
 
+# Which backend to use for LLM calls: "ollama" or "llama_server"
+backend: "ollama"
+
+llama_server:
+  host: "http://localhost:8080"   # llama-server's base URL — don't include /v1, that's added automatically
+  model: "default"                # most llama-server builds ignore this, but the OpenAI-compatible API requires a value
+  use_slots:     true             # ensure llama-server is launched with --parallel 2 so we can be aggressive with kv cache management for better performance
+  slot_main:     0
+  slot_headless: 1
+
 server:
   remote_voice_host: "0.0.0.0"
   remote_voice_port: 10400

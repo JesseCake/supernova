@@ -13,6 +13,13 @@ class OllamaConfig:
     model_type: str   # drives message formatting: "gemma", "qwen3" etc.
     num_ctx:   int = 16384    # context window size - affects memory footprint
 
+@dataclass
+class LlamaServerConfig:
+    host:  str
+    model: str = "default"   # most llama-server builds ignore this, but the OpenAI-compatible API requires a value
+    use_slots:     bool = False   # only enable once llama-server is launched with --parallel 2 (or more)
+    slot_main:     int  = 0       # id_slot for normal sessions
+    slot_headless: int  = 1       # id_slot for run_headless() calls — keeps headless from evicting the main session's cache
 
 @dataclass
 class ServerConfig:
@@ -87,6 +94,8 @@ class AppConfig:
     telegram:   TelegramConfig = field(default_factory=TelegramConfig)
     debug:      DebugConfig    = field(default_factory=DebugConfig)
     speaker_id: SpeakerConfig  = field(default_factory=SpeakerConfig)
+    backend:      str                        = "ollama"
+    llama_server: Optional[LlamaServerConfig] = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -190,13 +199,27 @@ def load_config(path: str = None) -> AppConfig:
         if k in InterfacesConfig.__dataclass_fields__
     })
 
+    # ── Backend selection ────────────────────────────────────────────────────
+    backend = raw.get("backend", "ollama")
+
+    llama_server_raw = raw.get("llama_server") or {}
+    llama_server = _dataclass_from_dict(LlamaServerConfig, llama_server_raw) if llama_server_raw else None
+
+    if backend == "llama_server" and llama_server is None:
+        raise ValueError(
+            "core_config.yaml sets backend: llama_server but has no llama_server: "
+            "block (needs at least a 'host')."
+        )
+
     return AppConfig(
-        ollama     = OllamaConfig(**raw["ollama"]),
-        server     = ServerConfig(**raw["server"]),
-        interfaces = interfaces,
-        voice      = voice,
-        asterisk   = asterisk,
-        telegram   = telegram,
-        debug      = debug,
-        speaker_id = speaker_id,
+        ollama       = OllamaConfig(**raw["ollama"]),
+        server       = ServerConfig(**raw["server"]),
+        interfaces   = interfaces,
+        voice        = voice,
+        asterisk     = asterisk,
+        telegram     = telegram,
+        debug        = debug,
+        speaker_id   = speaker_id,
+        backend      = backend,
+        llama_server = llama_server,
     )

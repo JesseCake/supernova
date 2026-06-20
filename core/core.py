@@ -26,10 +26,16 @@ Mode model:
 import json
 import threading
 import time
+import types
+import inspect
 try:
     import ollama
 except Exception:
     ollama = None
+try:
+    import openai
+except Exception:
+    openai = None
 import queue
 from datetime import datetime, timezone, timedelta
 import os
@@ -84,6 +90,18 @@ class CoreProcessor:
         self.model  = config.ollama.model
 
         self.ollama_client = ollama.Client(host=config.ollama.host)
+
+        self.llamaserver_client = None
+        if getattr(config, 'llama_server', None) and openai is not None:
+            self.llamaserver_client = openai.OpenAI(
+                base_url = f"{config.llama_server.host.rstrip('/')}/v1",
+                api_key = "not-needed",
+            )
+
+        backend = getattr(config, 'backend', 'ollama')
+        self._send_to_llm = (
+            self.send_to_llamaserver if backend == 'llama_server' else self.send_to_ollama
+        )
 
         # Agent mode registry — loads config/modes.yaml, hot-reloads on change
         self.mode_registry = ModeRegistry(config_dir)
@@ -458,7 +476,7 @@ class CoreProcessor:
 
         # ── Tool loop ─────────────────────────────────────────────────────────
         while loop_count < max_loops:
-            full_response, tool_msg, chat_tool_calls = self.send_to_ollama(
+            full_response, tool_msg, chat_tool_calls = self._send_to_llm(
                 prompt_text  = prompt,
                 prompt_tools = prompt_tools,
                 session      = session,
@@ -737,60 +755,9 @@ class CoreProcessor:
 
             # ── Tool execution ────────────────────────────────────────────────
             if tool_calls:
-                # Fire pre-tool LLM text immediately before tools run
-                if response_content.strip():
-                    send_fn = get_immediate_send(session)
-                    if send_fn:
-                        send_fn(response_content.strip())
-                        self._flush_queue(response_queue)
-
-                tool_messages = []
-                for tc in tool_calls:
-                    tool_name_detected = tc.function.name
-                    tool_args          = {
-                        'name':       tool_name_detected,
-                        'parameters': dict(tc.function.arguments) if tc.function.arguments else {},
-                    }
-                    log.info("Tool call detected", **self._elapsed(session, tool_name_detected))
-
-                    try:
-                        fn = self.tool_loader.get_executor(tool_name_detected)
-                        if fn is None:
-                            log.warning("Tool not found", extra={'data': tool_name_detected})
-                            wrapped = self._wrap_tool_result(tool_name_detected, {"text": "Unknown tool"})
-                        else:
-                            log.info("Executing tool", **self._elapsed(session, tool_name_detected))
-                            t_tool  = time.perf_counter()
-                            wrapped = fn(tool_args=tool_args, session=session, core=self)
-                            dt_tool = time.perf_counter() - t_tool
-                            log.info("Tool finished", **self._elapsed(session, f"{tool_name_detected} dur={dt_tool:.3f}s"))
-
-                        if wrapped is None:
-                            tool_message = {
-                                'role':      'tool',
-                                'tool_name': tool_name_detected,
-                                'content':   json.dumps({"text": "ok"}),
-                            }
-                        else:
-                            tool_message = {
-                                'role':      'tool',
-                                'tool_name': tool_name_detected,
-                                'content':   json.dumps(
-                                    json.loads(wrapped).get('tool_result', {}).get('content', {})
-                                ),
-                            }
-                    except Exception as e:
-                        log.error("Tool execution error", extra={'data': f"{tool_name_detected}: {e}"})
-                        tool_message = {
-                            'role':      'tool',
-                            'tool_name': tool_name_detected,
-                            'content':   json.dumps({"text": f"Tool error: {e}"}),
-                        }
-
-                    tool_messages.append(tool_message)
-
+                tool_messages = self._execute_tool_calls(tool_calls, session, response_content, response_queue)
                 return response_content, tool_messages, tool_calls
-
+            
             return response_content, None, None
 
         except Exception as e:
@@ -878,6 +845,341 @@ class CoreProcessor:
             send_fn(msg)
         else:
             get_response_queue(session).put(msg)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Shared tool execution (used by both send_to_ollama and send_to_llamaserver)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _execute_tool_calls(self, tool_calls: list, session: dict, response_content: str, response_queue: queue.Queue) -> list:
+        """
+        Run each tool call and return the list of resulting tool-role messages
+        to append to history.
+
+        tool_calls entries just need to expose:
+            .function.name        — str
+            .function.arguments   — dict
+            .id                   — str, optional (only used by the llama-server
+                                     wire format; Ollama's path doesn't need it)
+        """
+        if response_content.strip():
+            send_fn = get_immediate_send(session)
+            if send_fn:
+                send_fn(response_content.strip())
+                self._flush_queue(response_queue)
+
+        tool_messages = []
+        for tc in tool_calls:
+            tool_name_detected = tc.function.name
+            tool_args          = {
+                'name':       tool_name_detected,
+                'parameters': dict(tc.function.arguments) if tc.function.arguments else {},
+            }
+            tc_id = getattr(tc, 'id', None)
+            log.info("Tool call detected", **self._elapsed(session, tool_name_detected))
+
+            try:
+                fn = self.tool_loader.get_executor(tool_name_detected)
+                if fn is None:
+                    log.warning("Tool not found", extra={'data': tool_name_detected})
+                    wrapped = self._wrap_tool_result(tool_name_detected, {"text": "Unknown tool"})
+                else:
+                    log.info("Executing tool", **self._elapsed(session, tool_name_detected))
+                    t_tool  = time.perf_counter()
+                    wrapped = fn(tool_args=tool_args, session=session, core=self)
+                    dt_tool = time.perf_counter() - t_tool
+                    log.info("Tool finished", **self._elapsed(session, f"{tool_name_detected} dur={dt_tool:.3f}s"))
+
+                if wrapped is None:
+                    content = json.dumps({"text": "ok"})
+                else:
+                    content = json.dumps(
+                        json.loads(wrapped).get('tool_result', {}).get('content', {})
+                    )
+            except Exception as e:
+                log.error("Tool execution error", extra={'data': f"{tool_name_detected}: {e}"})
+                content = json.dumps({"text": f"Tool error: {e}"})
+
+            tool_message = {
+                'role':      'tool',
+                'tool_name': tool_name_detected,
+                'content':   content,
+            }
+            if tc_id:
+                tool_message['tool_call_id'] = tc_id
+
+            tool_messages.append(tool_message)
+
+        return tool_messages
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # llama-server (OpenAI-compatible) streaming
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def send_to_llamaserver(
+        self,
+        prompt_text:  list,
+        prompt_tools: list,
+        session:      dict,
+        images:       list = None,
+    ) -> tuple:
+        """
+        Stream a chat completion from llama-server's OpenAI-compatible
+        /v1/chat/completions endpoint and forward tokens to response_queue.
+
+        Mirrors send_to_ollama's contract exactly:
+            Returns (full_response: str, tool_messages: list | None, chat_tool_calls: list | None)
+        """
+        response_queue = get_response_queue(session)
+        cancel_event   = get_cancel_event(session)
+
+        response_content = ""
+        tool_calls        = []
+
+        try:
+            oai_messages = self._messages_to_openai(prompt_text, images)
+            oai_tools    = [self._tool_to_openai_schema(fn) for fn in (prompt_tools or [])]
+
+            self._log_prompt(prompt_text, prompt_tools, session)
+
+            model = session.get('_model_override', self.config.llama_server.model)
+
+            extra_body = {}
+            if self.config.llama_server.use_slots:
+                extra_body['id_slot'] = (
+                    self.config.llama_server.slot_headless if session.get('_headless')
+                    else self.config.llama_server.slot_main
+                )
+
+            stream = self.llamaserver_client.chat.completions.create(
+                model    = model,
+                messages = oai_messages,
+                tools    = oai_tools or openai.NOT_GIVEN,
+                stream   = True,
+                extra_body = extra_body,
+            )
+
+            session[KEY_OLLAMA_STREAM] = stream
+            log.debug("Stream started", **self._elapsed(session))
+            first_chunk_yet = False
+
+            pending_tool_calls = {}
+
+            for chunk in stream:
+                if not first_chunk_yet:
+                    log.debug("First chunk received", **self._elapsed(session))
+                    first_chunk_yet = True
+                    print(f"[STREAM] ", end="", flush=True)
+
+                if cancel_event and cancel_event.is_set():
+                    log.debug("Response cancelled by user", **self._elapsed(session))
+                    response_content += "\n[User interrupted]\n"
+                    break
+
+                if not chunk.choices:
+                    continue
+
+                delta = chunk.choices[0].delta
+
+                if delta.content:
+                    print(delta.content, end="", flush=True)
+                    response_content += delta.content
+                    response_queue.put(delta.content)
+
+                if delta.tool_calls:
+                    for tc_delta in delta.tool_calls:
+                        entry = pending_tool_calls.setdefault(
+                            tc_delta.index, {'id': None, 'name': None, 'arguments': ''}
+                        )
+                        if tc_delta.id:
+                            entry['id'] = tc_delta.id
+                        if tc_delta.function:
+                            if tc_delta.function.name:
+                                entry['name'] = tc_delta.function.name
+                            if tc_delta.function.arguments:
+                                entry['arguments'] += tc_delta.function.arguments
+
+            log.debug("Stream ended", extra={'data': f"chars={len(response_content)} tools={len(pending_tool_calls)}"})
+            session[KEY_OLLAMA_STREAM] = None
+
+            tool_calls = self._finalize_tool_calls(pending_tool_calls)
+
+            if tool_calls:
+                tool_messages = self._execute_tool_calls(tool_calls, session, response_content, response_queue)
+                return response_content, tool_messages, tool_calls
+
+            return response_content, None, None
+
+        except Exception as e:
+            session[KEY_OLLAMA_STREAM] = None
+            return self._handle_llamaserver_error(
+                error            = e,
+                session          = session,
+                response_content = response_content,
+                tool_calls       = tool_calls,
+                response_queue   = response_queue,
+            )
+
+    def _finalize_tool_calls(self, pending_tool_calls: dict) -> list:
+        """
+        Turn the index-keyed, fragment-accumulated tool call dicts built up
+        during streaming into the normalized objects _execute_tool_calls expects
+        (.id, .function.name, .function.arguments-as-dict).
+        """
+        tool_calls = []
+        for idx in sorted(pending_tool_calls):
+            entry = pending_tool_calls[idx]
+            if not entry['name']:
+                continue
+            try:
+                args = json.loads(entry['arguments']) if entry['arguments'] else {}
+            except json.JSONDecodeError:
+                log.warning(
+                    "Malformed tool-call arguments from llama-server",
+                    extra={'data': f"name={entry['name']} raw={entry['arguments']!r}"}
+                )
+                args = {}
+            tool_calls.append(types.SimpleNamespace(
+                id       = entry['id'] or f"call_{idx}",
+                function = types.SimpleNamespace(name=entry['name'], arguments=args),
+            ))
+        return tool_calls
+
+    def _messages_to_openai(self, messages: list, images: list = None) -> list:
+        """
+        Translate our internal, backend-agnostic message list (as built by
+        create_prompt/process_input) into OpenAI wire format.
+
+        Internal shapes handled:
+            {'role': 'system'|'user'|'assistant', 'content': str}
+            {'role': 'assistant', 'content': str, 'tool_calls': [normalized tool call objs]}
+            {'role': 'tool', 'tool_name': str, 'tool_call_id': str|None, 'content': str}
+
+        Does not mutate the input messages — builds a fresh list, so the
+        original session history is left untouched.
+        """
+        oai = []
+        last_user_idx = None
+
+        for i, msg in enumerate(messages):
+            role = msg.get('role')
+
+            if role == 'tool':
+                oai.append({
+                    'role':         'tool',
+                    'tool_call_id': msg.get('tool_call_id') or msg.get('tool_name', 'unknown'),
+                    'content':      msg.get('content', ''),
+                })
+                continue
+
+            if role == 'assistant' and msg.get('tool_calls'):
+                oai.append({
+                    'role':       'assistant',
+                    'content':    msg.get('content') or None,
+                    'tool_calls': [
+                        {
+                            'id':   getattr(tc, 'id', None) or f"call_{i}_{j}",
+                            'type': 'function',
+                            'function': {
+                                'name':      tc.function.name,
+                                'arguments': json.dumps(tc.function.arguments),
+                            },
+                        }
+                        for j, tc in enumerate(msg['tool_calls'])
+                    ],
+                })
+                continue
+
+            oai.append({'role': role, 'content': msg.get('content', '')})
+            if role == 'user':
+                last_user_idx = len(oai) - 1
+
+        if images and last_user_idx is not None:
+            text = oai[last_user_idx]['content']
+            content_blocks = [{'type': 'text', 'text': text}]
+            for img_b64 in images:
+                content_blocks.append({
+                    'type':      'image_url',
+                    'image_url': {'url': f"data:image/jpeg;base64,{img_b64}"},
+                })
+            oai[last_user_idx]['content'] = content_blocks
+
+        return oai
+
+    _PY_TO_JSON_TYPE = {
+        str: 'string', int: 'integer', float: 'number', bool: 'boolean',
+        list: 'array', dict: 'object',
+    }
+
+    def _tool_to_openai_schema(self, fn) -> dict:
+        """
+        Convert one of our tool schema functions (plain Python callable with
+        type hints + docstring, written for ollama's auto-conversion) into an
+        OpenAI-style tool schema dict for llama-server.
+
+        v1 — covers the common case: flat parameters, basic types, no nested
+        objects/enums. Revisit once we see real tool signatures that need more.
+        """
+        sig = inspect.signature(fn)
+        doc = inspect.getdoc(fn) or ""
+        description = doc.split("\n\n")[0].strip()
+
+        properties = {}
+        required   = []
+        for name, param in sig.parameters.items():
+            if name == 'self':
+                continue
+            py_type   = param.annotation if param.annotation is not inspect.Parameter.empty else str
+            json_type = self._PY_TO_JSON_TYPE.get(py_type, 'string')
+            properties[name] = {'type': json_type}
+            if param.default is inspect.Parameter.empty:
+                required.append(name)
+
+        return {
+            'type': 'function',
+            'function': {
+                'name':        fn.__name__,
+                'description': description,
+                'parameters': {
+                    'type':       'object',
+                    'properties': properties,
+                    'required':   required,
+                },
+            },
+        }
+
+    def _handle_llamaserver_error(self, error, session, response_content, tool_calls, response_queue) -> tuple:
+        """Classify a llama-server (openai client) exception and return the response tuple."""
+        if openai and isinstance(error, openai.APIConnectionError):
+            msg = "Cannot connect to llama-server — is it running?"
+            log.error("llama-server connection error", extra={'data': str(error)})
+            response_queue.put(f"\nError: {msg}")
+            return f"Error: {msg}", None, None
+
+        if openai and isinstance(error, openai.APIStatusError):
+            status = error.status_code
+            log.error("llama-server response error", extra={'data': f"status={status} {error.message}"})
+
+            if status == 500:
+                self._send_retry_notice(session)
+                return self._loop_back_bad_tool(
+                    response_content, tool_calls, session,
+                    "Your previous response contained malformed JSON or an invalid tool call. Please try again."
+                )
+
+            msg = f"llama-server error ({status})"
+            response_queue.put(f"\nError: {msg}")
+            return f"Error: {msg}", None, None
+
+        if tool_calls:
+            return self._loop_back_bad_tool(
+                response_content, tool_calls, session,
+                f"Tool call failed: {error}. Please try again."
+            )
+
+        msg = str(error)
+        log.error("Unexpected llama-server exception", extra={'data': msg})
+        response_queue.put(f"\nError: {msg}")
+        return f"Error: {msg}", None, None
 
     # ──────────────────────────────────────────────────────────────────────────
     # Queue helpers
