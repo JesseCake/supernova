@@ -295,6 +295,33 @@ class CoreProcessor:
             f.write(f"{json.dumps(prompt_tools, indent=2, default=str)}\n")
             f.write("\n")
 
+    def _log_wire_payload(self, model: str, oai_messages: list, oai_tools: list, extra_body: dict, session: dict) -> None:
+        """
+        Dump the exact JSON body about to be sent to llama-server, one file per
+        turn, so turns can be diffed directly to spot anything that's silently
+        shifting the prompt prefix and breaking the KV cache.
+        """
+        import os
+        from core.session_state import get_session_id
+
+        dump_dir = '/tmp/llamaserver_wire_dumps'
+        os.makedirs(dump_dir, exist_ok=True)
+
+        session_id = get_session_id(session) or 'unknown'
+        turn = sum(1 for m in oai_messages if m.get('role') == 'user')
+
+        payload = {
+            'model': model,
+            'messages': oai_messages,
+            'tools': oai_tools if oai_tools else None,
+            'stream': True,
+            'extra_body': extra_body,
+        }
+
+        filepath = os.path.join(dump_dir, f"{session_id}_turn{turn:03d}.json")
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, indent=2, default=str, ensure_ascii=False)
+
     # ──────────────────────────────────────────────────────────────────────────
     # Session management
     # ──────────────────────────────────────────────────────────────────────────
@@ -515,7 +542,7 @@ class CoreProcessor:
                     get_history(session).append(msg)
                 if any(m.get('tool_name') == 'hangup_call' for m in tool_msg):
                     break
-                prompt = get_history(session)
+                prompt = [system_message] + get_history(session)
                 continue
             else:
                 break
@@ -953,6 +980,9 @@ class CoreProcessor:
                     extra_body['id_slot'] = self.config.llama_server.slot_map.get(
                         interface, self.config.llama_server.default_slot
                     )
+
+            # Dump exact wire payload for cache-diffing between turns
+            self._log_wire_payload(model, oai_messages, oai_tools, extra_body, session)
 
             stream = self.llamaserver_client.chat.completions.create(
                 model    = model,

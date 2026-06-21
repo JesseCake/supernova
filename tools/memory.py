@@ -344,46 +344,51 @@ def provide_turn_context(core, tool_config: dict, session: dict, user_input: str
     except Exception as e:
         log.error("Memory injection query failed", extra={'data': str(e)})
 
-    # ── 3. Recent session hint ────────────────────────────────────────────────
-    recency_minutes = tool_config.get('recency_hint_minutes', 120)
-    since_iso       = (datetime.now() - timedelta(minutes=recency_minutes)).isoformat()
-    recent_hint     = None
+    # ── 3. Recent session hint (only ever inject once per session) ────────────
+    recent_hint = None
 
-    try:
-        conn   = _get_db()
-        recent = conn.execute("""
-            SELECT session_id,
-                   MIN(timestamp) as started,
-                   MAX(timestamp) as ended,
-                   COUNT(*)       as turn_count
-            FROM turns
-            WHERE user_id    = ?
-              AND session_id != ?
-              AND timestamp  >= ?
-            GROUP BY session_id
-            ORDER BY ended DESC
-            LIMIT 1
-        """, (user_id, session_id, since_iso)).fetchone()
-        conn.close()
+    if not session.get('_recent_session_hint_sent'):
+        recency_minutes = tool_config.get('recency_hint_minutes', 120)
+        since_iso       = (datetime.now() - timedelta(minutes=recency_minutes)).isoformat()
 
-        if recent:
-            started = recent['started'][:16].replace('T', ' ')
-            ended   = recent['ended'][:16].replace('T', ' ')
-            turns   = recent['turn_count']
-            sid     = recent['session_id']
-            recent_hint = (
-                f"[RECENT SESSION]\n"
-                f"You spoke with {user_id} recently "
-                f"({started} → {ended}, {turns} turns). "
-                f"If they reference that conversation use "
-                f"recall_conversations or get_conversation_transcript. "
-                f"Session reference: {sid}"
-            )
-            log.info("Recent session hint injected",
-                     extra={'data': f"session={sid[:8]} ended={ended}"})
+        try:
+            conn   = _get_db()
+            recent = conn.execute("""
+                SELECT session_id,
+                       MIN(timestamp) as started,
+                       MAX(timestamp) as ended,
+                       COUNT(*)       as turn_count
+                FROM turns
+                WHERE user_id    = ?
+                  AND session_id != ?
+                  AND timestamp  >= ?
+                GROUP BY session_id
+                ORDER BY ended DESC
+                LIMIT 1
+            """, (user_id, session_id, since_iso)).fetchone()
+            conn.close()
 
-    except Exception as e:
-        log.error("Recent session check failed", extra={'data': str(e)})
+            if recent:
+                started = recent['started'][:16].replace('T', ' ')
+                ended   = recent['ended'][:16].replace('T', ' ')
+                turns   = recent['turn_count']
+                sid     = recent['session_id']
+                recent_hint = (
+                    f"[RECENT SESSION]\n"
+                    f"You spoke with {user_id} recently "
+                    f"({started} → {ended}, {turns} turns). "
+                    f"If they reference that conversation use "
+                    f"recall_conversations or get_conversation_transcript. "
+                    f"Session reference: {sid}"
+                )
+                log.info("Recent session hint injected",
+                         extra={'data': f"session={sid[:8]} ended={ended}"})
+
+            # Mark as checked regardless of hit/miss — only check once per session.
+            session['_recent_session_hint_sent'] = True
+
+        except Exception as e:
+            log.error("Recent session check failed", extra={'data': str(e)})
 
     # ── Assemble final injection ──────────────────────────────────────────────
     parts = []
