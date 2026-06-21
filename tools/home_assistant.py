@@ -76,7 +76,7 @@ async def _async_discover(tool_config: dict) -> list:
             return result.tools
 
 
-async def _async_call(tool_config: dict, tool_name: str, arguments: dict) -> str:
+async def _async_call(tool_config: dict, tool_name: str, arguments: dict, debug: bool = False) -> tuple[str, bool]:
     """Open a fresh session, call a tool, return the text result."""
     from mcp import ClientSession
     from mcp.client.streamable_http import streamablehttp_client
@@ -89,6 +89,20 @@ async def _async_call(tool_config: dict, tool_name: str, arguments: dict) -> str
             await session.initialize()
             result = await session.call_tool(tool_name, arguments)
 
+    if debug:
+        block_info = "\n".join(
+            f"  block[{i}] type={type(block).__name__} "
+            f"attrs={[a for a in dir(block) if not a.startswith('_')]} "
+            f"repr={block!r}"
+            for i, block in enumerate(result.content)
+        )
+        log.debug(
+            f"[HA DEBUG] {tool_name} — raw MCP result.content "
+            f"[{type(result.content).__name__}, {len(result.content)} block(s)]:\n"
+            f"{block_info}\n"
+            f"  result.isError = {getattr(result, 'isError', '(no isError attr)')}"
+        )
+
     # Extract text content from result
     texts = []
     for block in result.content:
@@ -96,7 +110,9 @@ async def _async_call(tool_config: dict, tool_name: str, arguments: dict) -> str
             texts.append(block.text)
         elif hasattr(block, 'json'):
             texts.append(json.dumps(block.json))
-    return '\n'.join(texts) if texts else 'OK'
+    text_result = '\n'.join(texts) if texts else 'OK'
+    is_error = bool(getattr(result, 'isError', False))
+    return text_result, is_error
 
 
 # ── Discovery ─────────────────────────────────────────────────────────────────
@@ -205,6 +221,15 @@ def _build_schema_fn(ha_tool) -> callable:
     return schema_fn
 
 
+# ── Debug helpers ─────────────────────────────────────────────────────────────
+
+def _typed_repr(d: dict) -> str:
+    """Render a dict as 'key = value [type]' lines, one per param, for debug logs."""
+    if not d:
+        return "  (empty)"
+    return "\n".join(f"  {k!r} = {v!r}  [{type(v).__name__}]" for k, v in d.items())
+
+
 # ── Executor factory ──────────────────────────────────────────────────────────
 
 def _make_executor(ha_tool_name: str, allowed_params: set,
@@ -214,6 +239,14 @@ def _make_executor(ha_tool_name: str, allowed_params: set,
 
     def execute(tool_args: dict, session: dict, core, tool_config: dict) -> str:
         params = ToolBase.params(tool_args)
+
+        if debug:
+            log.debug(
+                f"[HA DEBUG] {ha_tool_name} — raw tool_args received:\n"
+                f"{_typed_repr(tool_args)}\n"
+                f"[HA DEBUG] {ha_tool_name} — params after ToolBase.params():\n"
+                f"{_typed_repr(params)}"
+            )
 
         # Ollama sometimes wraps all arguments as a JSON string inside a
         # 'kwargs' key: {'kwargs': '{"entity_id": "switch.xyz"}'}.
@@ -226,6 +259,11 @@ def _make_executor(ha_tool_name: str, allowed_params: set,
                 params = json.loads(params['kwargs'])
                 kwargs_unpacked = True
                 log.debug(f"Unpacked kwargs for {ha_tool_name}: {params}")
+                if debug:
+                    log.debug(
+                        f"[HA DEBUG] {ha_tool_name} — params after kwargs unpack:\n"
+                        f"{_typed_repr(params)}"
+                    )
             except (json.JSONDecodeError, TypeError):
                 pass
 
@@ -252,18 +290,26 @@ def _make_executor(ha_tool_name: str, allowed_params: set,
 
         if debug:
             log.debug(
-                f"HA tool call detail: {ha_tool_name}\n"
-                f"  raw tool_args: {tool_args}\n"
-                f"  resolved arguments: {arguments}"
+                f"[HA DEBUG] {ha_tool_name} — FULL COMMAND about to be sent:\n"
+                f"  tool: {ha_tool_name}\n"
+                f"  kwargs_unpacked: {kwargs_unpacked}\n"
+                f"  allowed_params: {sorted(allowed_params) if allowed_params else '(none — unrestricted)'}\n"
+                f"  array_params: {sorted(array_params) if array_params else '(none)'}\n"
+                f"  arguments (final, post-coercion):\n"
+                f"{_typed_repr(arguments)}"
             )
 
         try:
-            result_text = asyncio.run(
-                _async_call(tool_config, ha_tool_name, arguments)
+            result_text, mcp_is_error = asyncio.run(
+                _async_call(tool_config, ha_tool_name, arguments, debug)
             )
 
             if debug:
-                log.debug(f"HA tool result: {ha_tool_name}\n  result: {result_text}")
+                log.debug(
+                    f"[HA DEBUG] {ha_tool_name} — FULL RESPONSE received:\n"
+                    f"  result_text [{type(result_text).__name__}]:\n"
+                    f"{result_text}"
+                )
 
             # Tailor instructions based on whether this was a discovery
             # call or a control call, so the agent knows what to do next.
@@ -287,9 +333,10 @@ def _make_executor(ha_tool_name: str, allowed_params: set,
                     f"Tell the user what happened naturally and concisely."
                 )
 
-            # If HA returned an error string in the result, treat it as
+            # If HA's MCP response itself flagged an error (isError=True),
+            # or the result text happens to read as an error, treat it as
             # a recoverable failure and tell the agent to re-discover.
-            ha_error = (
+            ha_error = mcp_is_error or (
                 isinstance(result_text, str) and
                 result_text.lower().startswith('error')
             )
