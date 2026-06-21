@@ -76,7 +76,7 @@ async def _async_discover(tool_config: dict) -> list:
             return result.tools
 
 
-async def _async_call(tool_config: dict, tool_name: str, arguments: dict, debug: bool = False) -> tuple[str, bool]:
+async def _async_call(tool_config: dict, tool_name: str, arguments: dict, debug: bool = False) -> str:
     """Open a fresh session, call a tool, return the text result."""
     from mcp import ClientSession
     from mcp.client.streamable_http import streamablehttp_client
@@ -110,9 +110,7 @@ async def _async_call(tool_config: dict, tool_name: str, arguments: dict, debug:
             texts.append(block.text)
         elif hasattr(block, 'json'):
             texts.append(json.dumps(block.json))
-    text_result = '\n'.join(texts) if texts else 'OK'
-    is_error = bool(getattr(result, 'isError', False))
-    return text_result, is_error
+    return '\n'.join(texts) if texts else 'OK'
 
 
 # ── Discovery ─────────────────────────────────────────────────────────────────
@@ -230,6 +228,38 @@ def _typed_repr(d: dict) -> str:
     return "\n".join(f"  {k!r} = {v!r}  [{type(v).__name__}]" for k, v in d.items())
 
 
+# ── Spoken progress feedback ───────────────────────────────────────────────────
+
+_PROGRESS_PHRASES = {
+    'GetLiveContext':         "Checking devices",
+    'HassGetState':           "Checking devices",
+    'HassListEntities':       "Checking devices",
+    'HassSearchEntities':     "Checking devices",
+    'HassTurnOn':             "Turning on {name}",
+    'HassTurnOff':            "Turning off {name}",
+    'HassLightSet':           "Adjusting {name}",
+    'HassVacuumStart':        "Starting {name}",
+    'HassVacuumReturnToBase': "Sending {name} back to base",
+}
+
+
+def _progress_phrase(ha_tool_name: str, arguments: dict) -> str:
+    """
+    Build a short spoken-feedback phrase for an HA tool call, fired before
+    the (network-bound) call goes out so the user hears that work is
+    happening rather than silence.
+    """
+    template = _PROGRESS_PHRASES.get(ha_tool_name, "Working on it")
+    if '{name}' in template:
+        name = arguments.get('name')
+        if name:
+            return template.format(name=name)
+        # No name available (rare) — drop back to a generic phrase for this action.
+        generic = template.split('{name}')[0].strip()
+        return generic or "Working on it"
+    return template
+
+
 # ── Executor factory ──────────────────────────────────────────────────────────
 
 def _make_executor(ha_tool_name: str, allowed_params: set,
@@ -299,8 +329,12 @@ def _make_executor(ha_tool_name: str, allowed_params: set,
                 f"{_typed_repr(arguments)}"
             )
 
+        # Immediate spoken/typed feedback so the user hears/sees that work is
+        # happening before the (network-bound) HA call returns.
+        #ToolBase.speak(core, session, _progress_phrase(ha_tool_name, arguments))
+
         try:
-            result_text, mcp_is_error = asyncio.run(
+            result_text = asyncio.run(
                 _async_call(tool_config, ha_tool_name, arguments, debug)
             )
 
@@ -333,10 +367,9 @@ def _make_executor(ha_tool_name: str, allowed_params: set,
                     f"Tell the user what happened naturally and concisely."
                 )
 
-            # If HA's MCP response itself flagged an error (isError=True),
-            # or the result text happens to read as an error, treat it as
+            # If HA returned an error string in the result, treat it as
             # a recoverable failure and tell the agent to re-discover.
-            ha_error = mcp_is_error or (
+            ha_error = (
                 isinstance(result_text, str) and
                 result_text.lower().startswith('error')
             )
