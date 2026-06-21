@@ -304,7 +304,7 @@ class CoreProcessor:
         import os
         from core.session_state import get_session_id
 
-        dump_dir = '/tmp/llamaserver_wire_dumps'
+        dump_dir = os.path.join(self.config.debug.log_prompts_dir, 'wire_dumps')
         os.makedirs(dump_dir, exist_ok=True)
 
         session_id = get_session_id(session) or 'unknown'
@@ -982,7 +982,8 @@ class CoreProcessor:
                     )
 
             # Dump exact wire payload for cache-diffing between turns
-            self._log_wire_payload(model, oai_messages, oai_tools, extra_body, session)
+            if self.config.debug.log_prompts:
+                self._log_wire_payload(model, oai_messages, oai_tools, extra_body, session)
 
             stream = self.llamaserver_client.chat.completions.create(
                 model    = model,
