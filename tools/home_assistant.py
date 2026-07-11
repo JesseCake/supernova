@@ -331,7 +331,7 @@ def _make_executor(ha_tool_name: str, allowed_params: set,
 
         # Immediate spoken/typed feedback so the user hears/sees that work is
         # happening before the (network-bound) HA call returns.
-        #ToolBase.speak(core, session, _progress_phrase(ha_tool_name, arguments))
+        ToolBase.speak(core, session, _progress_phrase(ha_tool_name, arguments))
 
         try:
             result_text = asyncio.run(
