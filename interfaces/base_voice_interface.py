@@ -47,7 +47,7 @@ import uuid
 import wave
 from dataclasses import dataclass, field
 from typing import Optional
-import datetime
+from datetime import datetime
 
 import numpy as np
 import resampy
@@ -139,6 +139,16 @@ class VoiceContext:
     # subclass RTP/TCP loops should discard incoming audio while True.
     rx_paused:          bool            = False
 
+    # True only while the satellite's mic is confirmed open for THIS listening
+    # window. Set when a MIC1 frame arrives, cleared the moment a turn ends.
+    # Gates out backlogged AUD0 that was in flight when the turn ended.
+    rx_gate_open:       bool            = False
+
+    # Accumulated non-voice audio (in samples) since the last voiced chunk.
+    # Replaces wall-clock silence measurement, which misfires when buffered
+    # audio is burst-processed or last_voice_ts is stale.
+    silence_samples:    int             = 0
+
     # ── Barge-in ──────────────────────────────────────────────────────────────
     interrupt_event:    asyncio.Event   = field(default_factory=asyncio.Event)
 
@@ -160,8 +170,7 @@ class VoiceContext:
         self.frames_np     = np.array([], dtype=np.float32)
         self.recording     = False
         self.last_voice_ts = None
-        # vad_buffer intentionally NOT reset here — partial VAD chunks are fine
-        # to carry across; they belong to the next utterance.
+        self.silence_samples = 0
 
     def add_frames(self, chunk: np.ndarray):
         if self.frames_np.size == 0:
@@ -279,6 +288,23 @@ class BaseVoiceInterface:
             **kwargs,
         )
         return ctx
+    
+    def reset_audio_state(self, ctx: VoiceContext) -> None:
+        """
+        Hard-reset all per-utterance audio state and the VAD itself.
+        Called at session open (WAKE) and session close so no flags, buffers,
+        or VAD internal state leak between sessions.
+        """
+        ctx.frames_np       = np.array([], dtype=np.float32)
+        ctx.vad_buffer      = np.array([], dtype=np.float32)
+        ctx.lookback        = np.array([], dtype=np.float32)
+        ctx.recording       = False
+        ctx.last_voice_ts   = None
+        ctx.silence_samples = 0
+        ctx.clear_interrupt()
+        # Fresh VAD instance — Silero carries LSTM state across calls and
+        # misbehaves when resumed on a new stream.
+        ctx.vad = VoiceActivityDetector(threshold=self.vad_threshold)
 
     # ── Feedback hooks ────────────────────────────────────────────────────────
     # All no-ops in the base. Subclasses override what they need.
@@ -604,6 +630,7 @@ class BaseVoiceInterface:
                 await self.on_vad_triggered(ctx)
 
             ctx.last_voice_ts = time.monotonic()
+            ctx.silence_samples = 0
             ctx.add_frames(vad_chunk)
 
         elif ctx.recording:
@@ -611,10 +638,9 @@ class BaseVoiceInterface:
             # mid-sentence pauses rather than fragmenting utterances.
             ctx.add_frames(vad_chunk)
 
-            silence_s = (
-                (time.monotonic() - ctx.last_voice_ts)
-                if ctx.last_voice_ts is not None else 0.0
-            )
+            ctx.silence_samples += len(vad_chunk)
+            silence_s = ctx.silence_samples / INTERNAL_RATE
+            
             if silence_s > self.vad_timeout:
                 await self.on_vad_silence_timeout(ctx)
                 ctx.recording     = False

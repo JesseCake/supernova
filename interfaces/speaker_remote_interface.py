@@ -148,6 +148,14 @@ class SpeakerRemoteInterface(BaseVoiceInterface):
         """Send THNK — satellite transitions to thinking/processing state."""
         await self._send_frame(ctx, b'THNK')
 
+    async def on_vad_silence_timeout(self, ctx: VoiceContext) -> None:
+        # The listening window is over. Any AUD0 still in flight from the
+        # satellite (it keeps streaming until THNK reaches it — the whole
+        # Whisper duration) belongs to the finished window. Close the gate
+        # so that backlog is dropped when the frame loop finally reads it.
+        # Reopens on the next MIC1.
+        ctx.rx_gate_open = False
+
     async def on_session_close(self, ctx: VoiceContext) -> None:
         """Send CLOS — session ends but TCP connection stays open."""
         await self._send_frame(ctx, b'CLOS')
@@ -229,6 +237,8 @@ class SpeakerRemoteInterface(BaseVoiceInterface):
         Greet the satellite, then send RDY0 to open the microphone.
         rx_paused is held True during the greeting so we don't hear ourselves.
         """
+        ctx.rx_gate_open = False
+        self.reset_audio_state(ctx)
         ctx.rx_paused = True
         await self._speak_text(ctx, "I'm here")
         await self._send_frame(ctx, b'RDY0')
@@ -240,6 +250,8 @@ class SpeakerRemoteInterface(BaseVoiceInterface):
         The announcement is injected directly into the LLM as the opening turn.
         silent_start=True suppresses the "Working" TTS and first THNK.
         """
+        ctx.rx_gate_open = False
+        self.reset_audio_state(ctx)
         ctx.rx_paused = True
         await self._contact_core(ctx, announcement, silent_start=True)
 
@@ -253,6 +265,8 @@ class SpeakerRemoteInterface(BaseVoiceInterface):
             self.core_processor.close_session(ctx.session_id)
             ctx.session_id = None
         ctx.rx_paused = False
+        ctx.rx_gate_open = False
+        self.reset_audio_state(ctx)
         await self._send_frame(ctx, b'CLOS')
 
     # ── Post-LLM response hook ────────────────────────────────────────────────
@@ -467,7 +481,7 @@ class SpeakerRemoteInterface(BaseVoiceInterface):
 
                 # ── AUD0: microphone audio ────────────────────────────────────
                 elif ftype == b'AUD0':
-                    if ctx.rx_paused:
+                    if ctx.rx_paused or not ctx.rx_gate_open:
                         log.debug("AUD0 dropped — rx_paused",
                                   extra={'data': str(ctx.endpoint_id)})
                         continue
@@ -491,6 +505,12 @@ class SpeakerRemoteInterface(BaseVoiceInterface):
                         ctx.rx_paused = False
                     await self.on_barge_in(ctx)
                     ctx.reset_audio()
+
+                # ── MIC1: satellite confirms its mic just (re)opened ─────────
+                elif ftype == b'MIC1':
+                    # TCP ordering guarantees everything read before this frame
+                    # was captured in a previous listening window.
+                    ctx.rx_gate_open = True
 
                 # ── STOP: explicit end-of-utterance ───────────────────────────
                 elif ftype == b'STOP':
