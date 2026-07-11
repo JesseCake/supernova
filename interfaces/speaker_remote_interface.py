@@ -156,6 +156,10 @@ class SpeakerRemoteInterface(BaseVoiceInterface):
         # Reopens on the next MIC1.
         ctx.rx_gate_open = False
 
+    async def on_vad_triggered(self, ctx: VoiceContext) -> None:
+        # helper for timeout of idle so that we close the connection if left open (no hanging open calls)
+        self._cancel_idle_timeout(ctx)
+
     async def on_session_close(self, ctx: VoiceContext) -> None:
         """Send CLOS — session ends but TCP connection stays open."""
         await self._send_frame(ctx, b'CLOS')
@@ -168,6 +172,27 @@ class SpeakerRemoteInterface(BaseVoiceInterface):
             except Exception:
                 log.error("cancel_active_response error",
                           extra={'data': str(ctx.endpoint_id)}, exc_info=True)
+                
+    # ── Idle timeout ──────────────────────────────────────────────────────────
+
+    def _arm_idle_timeout(self, ctx: VoiceContext, seconds: float = 30.0) -> None:
+        """After RDY0, close the session if the user says nothing for `seconds`.
+        Safety net for turns where the model neither hung up nor asked anything."""
+        self._cancel_idle_timeout(ctx)
+        async def _idle():
+            try:
+                await asyncio.sleep(seconds)
+                log.info("Session idle timeout — closing",
+                         extra={'data': str(ctx.endpoint_id)})
+                await self._close_session(ctx)
+            except asyncio.CancelledError:
+                pass
+        ctx._idle_task = asyncio.get_running_loop().create_task(_idle())  # type: ignore[attr-defined]
+
+    def _cancel_idle_timeout(self, ctx: VoiceContext) -> None:
+        task = getattr(ctx, '_idle_task', None)
+        if task and not task.done():
+            task.cancel()
 
     # ── Transport implementation ──────────────────────────────────────────────
 
@@ -237,6 +262,7 @@ class SpeakerRemoteInterface(BaseVoiceInterface):
         Greet the satellite, then send RDY0 to open the microphone.
         rx_paused is held True during the greeting so we don't hear ourselves.
         """
+        self._cancel_idle_timeout(ctx)
         ctx.rx_gate_open = False
         self.reset_audio_state(ctx)
         ctx.rx_paused = True
@@ -250,6 +276,7 @@ class SpeakerRemoteInterface(BaseVoiceInterface):
         The announcement is injected directly into the LLM as the opening turn.
         silent_start=True suppresses the "Working" TTS and first THNK.
         """
+        self._cancel_idle_timeout(ctx)
         ctx.rx_gate_open = False
         self.reset_audio_state(ctx)
         ctx.rx_paused = True
@@ -261,6 +288,7 @@ class SpeakerRemoteInterface(BaseVoiceInterface):
         TCP connection is NOT closed — satellite stays registered and ready
         for the next WAKE.
         """
+        self._cancel_idle_timeout(ctx)
         if ctx.session_id:
             self.core_processor.close_session(ctx.session_id)
             ctx.session_id = None
@@ -512,6 +540,7 @@ class SpeakerRemoteInterface(BaseVoiceInterface):
                     # TCP ordering guarantees everything read before this frame
                     # was captured in a previous listening window.
                     ctx.rx_gate_open = True
+                    self._arm_idle_timeout(ctx)
 
                 # ── STOP: explicit end-of-utterance ───────────────────────────
                 elif ftype == b'STOP':
