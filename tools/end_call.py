@@ -23,9 +23,9 @@ def end_call(
 ) -> str:
     """
     End the current voice call, optionally speaking a short farewell.
-    Use when the request is fully resolved, or the user says goodbye,
-    'that's all', or 'thanks'. Call this INSTEAD of writing a goodbye —
-    saying 'I'll end the call now' in text does NOT end the call; only this
+    Use when the request/query is fully resolved, or the user says goodbye or indicates that they're finished with you,
+    saying 'that's all', or 'thanks' etc. Call this INSTEAD of writing a goodbye —
+    saying 'I'll end the call now' or similar in text does NOT end the call; only this
     tool does.
     """
     ...
