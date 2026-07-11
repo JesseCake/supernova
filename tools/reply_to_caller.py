@@ -15,7 +15,7 @@ import threading
 from typing import Annotated
 from pydantic import Field
 from core.tool_base import ToolBase
-from core.session_state import get_history, KEY_IMMEDIATE_SEND, KEY_IMMEDIATE_ONLY
+from core.session_state import get_history, KEY_IMMEDIATE_SEND
 
 log = ToolBase.logger('reply_to_caller')
 
@@ -104,6 +104,7 @@ def execute(tool_args: dict, session, core, tool_config: dict) -> str:
         relay_message,
         caller_interface = caller_interface,
         caller_endpoint  = caller_endpoint,
+        fallback_text    = f'{target_friendly} replied: "{message}"',
     )
 
     # ── Restore target's suspended session ────────────────────────────────────
@@ -126,7 +127,8 @@ def execute(tool_args: dict, session, core, tool_config: dict) -> str:
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _inject_into_caller(core, caller_session_id: str, message: str,
-                        caller_interface: str = '', caller_endpoint: str = ''):
+                        caller_interface: str = '', caller_endpoint: str = '',
+                        fallback_text: str = None):
     if not caller_session_id:
         log.warning("No caller session id — cannot inject reply")
         return
@@ -168,19 +170,27 @@ def _inject_into_caller(core, caller_session_id: str, message: str,
     log.info("Injecting reply into caller session via immediate_send",
              extra={'data': f"session={caller_session_id}"})
 
-    # Temporarily set immediate_send_only so process_input routes the full
-    # LLM response through immediate_send rather than the orphaned queue.
-    caller_session[KEY_IMMEDIATE_ONLY] = True
-
     def _run():
+        delivered = ""
         try:
-            core.process_input(
-                input_text = message,
-                session_id = caller_session_id,
+            delivered = core.process_input(
+                input_text     = message,
+                session_id     = caller_session_id,
+                immediate_only = True,
             )
-        finally:
-            # Restore normal queue-based routing after this injection
-            caller_session[KEY_IMMEDIATE_ONLY] = False
+        except Exception:
+            log.error("Injected turn crashed — falling back to raw delivery",
+                      exc_info=True)
+        if not delivered:
+            # The LLM round produced nothing (zero-content round, tool-loop
+            # exhaustion, mid-turn crash). A relay reply must never silently
+            # vanish — deliver the plain text directly instead.
+            log.warning("Injected turn delivered nothing — sending raw reply",
+                        extra={'data': f"session={caller_session_id}"})
+            try:
+                immediate_send(fallback_text or message)
+            except Exception:
+                log.error("Fallback immediate_send failed", exc_info=True)
 
     threading.Thread(target=_run, daemon=True).start()
 

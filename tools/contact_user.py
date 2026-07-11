@@ -104,7 +104,7 @@ def execute(tool_args: dict, session, core, tool_config: dict) -> str:
     caller_name         = ToolBase.speaker(session) or "Someone"
     caller_session_id   = _get_session_id(core, session)
     caller_endpoint     = ToolBase.endpoint(session)
-    caller_interface    = ToolBase.interface(session)
+    caller_interface    = session.get('interface') or ToolBase.interface(session)
 
     log.info("Contacting user",
              extra={'data': f"{user_id} via {interface} details={details}"})
@@ -190,15 +190,36 @@ def execute(tool_args: dict, session, core, tool_config: dict) -> str:
 
     log.info("Relay initiated",
              extra={'data': f"{friendly} via {interface} endpoint={endpoint_id}"})
+    
+    # Voice callers can't receive an injected reply mid-session (nothing
+    # drains a speaker session's queue between turns). Instead: hang up now,
+    # so when the reply arrives the caller session is gone and
+    # reply_to_caller routes it through the event-handler path — a
+    # server-initiated call-back via initiate_call().
+    hang_up_after = caller_interface == InterfaceMode.SPEAKER.value
+    if hang_up_after:
+        log.info("Voice caller — requesting hangup so reply arrives as call-back",
+                 extra={'data': f"caller_endpoint={caller_endpoint}"})
+        ToolBase.request_hangup(session)
+
+    if hang_up_after:
+        instructions = (
+            f"Tell {caller_name} you've reached out to {friendly} via "
+            f"{interface} and that you'll call back as soon as you have a "
+            f"reply. Keep it to one short sentence — this session will "
+            f"close after your response."
+        )
+    else:
+        instructions = (
+            f"Tell {caller_name} you've reached out to {friendly} via "
+            f"{interface} and will let them know when you get a reply."
+        )
 
     return ToolBase.result(core, 'contact_user', {
         "status":       "sent",
         "user":         friendly,
         "interface":    interface,
-        "instructions": (
-            f"Tell {caller_name} you've reached out to {friendly} via "
-            f"{interface} and will let them know when you get a reply."
-        ),
+        "instructions": instructions,
     })
 
 

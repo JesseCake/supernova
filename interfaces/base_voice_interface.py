@@ -222,7 +222,7 @@ class BaseVoiceInterface:
 
         # Spoken reassurance if the LLM produces nothing for this long after
         # dispatch (e.g. KV cache rebuild delaying the first token).
-        self.slow_response_notice_s    = 4.0
+        self.slow_response_notice_s    = 5.0
         self.slow_response_notice_text = "Just a moment"
 
         # ── Sentence splitter ─────────────────────────────────────────────────

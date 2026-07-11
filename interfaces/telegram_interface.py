@@ -114,7 +114,7 @@ class TelegramInterface:
             if core_session is not None:
                 core_session[KEY_INTERFACE_MODE]    = InterfaceMode.GENERAL
                 core_session['endpoint_id']         = chat_id
-                core_session['interface']           = InterfaceMode.GENERAL.value
+                core_session['interface']           = 'telegram'
                 loop = asyncio.get_event_loop()
                 core_session['immediate_send'] = lambda text, _loop=loop, _chat_id=chat_id: \
                     asyncio.run_coroutine_threadsafe(
