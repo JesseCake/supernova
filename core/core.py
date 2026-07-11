@@ -1293,8 +1293,16 @@ class CoreProcessor:
     # ──────────────────────────────────────────────────────────────────────────
 
     def send_whole_response(self, response_text: str, session: dict):
-        """Push a complete pre-formed string to the response_queue."""
-        get_response_queue(session).put(str(response_text))
+        """
+        Push a complete pre-formed string to the response_queue.
+
+        Wrapped in newlines: the voice-side sentence splitter treats newlines
+        as hard boundaries, so the leading one flushes any partial sentence
+        already buffered, and the trailing one guarantees this text is spoken
+        immediately rather than held as an incomplete sentence until the next
+        LLM round happens to produce more tokens.
+        """
+        get_response_queue(session).put("\n" + str(response_text) + "\n")
 
     def response_finished(self, session: dict):
         """Push the None sentinel and set response_finished event."""
