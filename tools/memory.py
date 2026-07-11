@@ -577,9 +577,11 @@ def on_session_end(core, tool_config: dict, session: dict):
     # ── Phase 2: Fact extraction ──────────────────────────────────────────────
     # Only run if this session had a known user (no point storing facts for
     # 'unknown' — they'd never be retrievable in a useful way).
-    if user_id == 'unknown':
-        log.info("Phase 2: skipping fact extraction — user_id unknown",
-                 extra={'data': f"session={session_id[:8]}"})
+    known = set(core.presence_registry.all_users()) \
+        if hasattr(core, 'presence_registry') else set()
+    if user_id not in known:
+        log.info("Phase 2: skipping fact extraction — not a canonical user",
+                 extra={'data': f"session={session_id[:8]} user_id={user_id!r}"})
         return
 
     # Pass identity into the headless session so _get_user_id resolves correctly
@@ -591,25 +593,37 @@ def on_session_end(core, tool_config: dict, session: dict):
         'interface':    session.get('interface', 'headless'),
     }
 
+    friendly = core.presence_registry.get_friendly_name(user_id) \
+        if hasattr(core, 'presence_registry') else user_id
+
     extraction_prompt = (
-        "You are a memory extraction assistant. Your only job is to identify "
-        "facts from the conversation transcript below that are worth remembering "
-        "long-term about the user, and store each one using the store_memory tool.\n\n"
-        "Extract facts that are:\n"
-        "- Personal details (name, age, location, occupation)\n"
-        "- Preferences and habits (diet, hobbies, routines, likes/dislikes)\n"
-        "- Health or lifestyle information\n"
-        "- Important decisions or commitments made\n"
-        "- Anything the user explicitly asked to be remembered\n\n"
-        "CRITICAL: Store only atomic facts about the user as a person. "
-        "NEVER store the conversation transcript itself, questions asked, "
-        "or time-specific information. Each stored fact must be a single "
-        "sentence about a permanent attribute of the user.\n\n"
-        "If nothing worth remembering was said, "
-        "do not call store_memory at all.\n\n"
-        "IMPORTANT: you do not need to explain yourself beyond the actions you take using tools as this is a headless session."
-        f"The user in this conversation is: {user_id}\n\n"
-        f"Transcript:\n{transcript}\n\n"
+        "You are a memory extraction assistant. Read the transcript and store "
+        "durable facts about the user with the store_memory tool. Most "
+        "conversations contain NOTHING worth storing — storing nothing is the "
+        "normal outcome, not a failure.\n\n"
+        f"The user is {friendly}. Write every fact in third person using the "
+        f"name {friendly}. Never write 'User', 'the user', or 'I'.\n\n"
+        "STORE (scope='private'): stable personal attributes — identity, "
+        "relationships, health conditions, diet, strong preferences, skills, "
+        "recurring routines — and anything the user explicitly asked to remember.\n"
+        "STORE (scope='shared'): stable household facts that apply to everyone "
+        "— the home, the car, pets, shared history.\n\n"
+        "NEVER store:\n"
+        "- What anyone is doing, or where they are, right now "
+        "(BAD: 'Dean is in the kitchen making coffee')\n"
+        "- Tasks, errands, reminders, or list contents "
+        "(BAD: 'Jesse has a picture that needs a frame'; "
+        "BAD: 'Jesse has carrots on the shopping list')\n"
+        "- One-off questions or lookups "
+        "(BAD: 'Jesse is interested in Bunnings store hours')\n"
+        "- Smart-home actions or tool mechanics "
+        "(BAD: 'Jesse activated a scene by calling HassTurnOn')\n"
+        "- Opinions about the user's mood, competence, or state of mind\n"
+        "- Facts about this assistant or this conversation itself\n\n"
+        "A good fact will still be true and useful in six months. If unsure, "
+        "do not store it. Store at most 3 facts per conversation.\n\n"
+        "Do not explain yourself — this is a headless session; only act via tools.\n\n"
+        f"Transcript:\n{transcript}\n"
     )
 
     try:
@@ -799,7 +813,7 @@ def _store_execute(tool_args: dict, session, core, tool_config: dict) -> str:
         # signal it has seen the conflict and wants to replace the old fact.
         overwrite_id = params.get('overwrite_id', '').strip()
 
-        if not overwrite_id and user_id != 'global':
+        if not overwrite_id:
             try:
                 conflict_threshold = tool_config.get('conflict_threshold', 0.15)
                 existing = collection.query(
