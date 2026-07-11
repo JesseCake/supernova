@@ -21,6 +21,7 @@ Data: data/shopping_list/lists.json
 from typing import Annotated
 from pydantic import Field
 from core.tool_base import ToolBase
+import json
 
 log       = ToolBase.logger('shopping_list')
 TOOL_NAME = 'shopping_list'
@@ -46,6 +47,27 @@ def _save(data: dict) -> bool:
 def _canonical(name: str) -> str:
     """Normalise list name — lowercase and stripped."""
     return name.strip().lower()
+
+def _coerce_items(raw) -> list:
+    """
+    Normalise the 'items' argument to a list of strings.
+    Ollama sometimes sends a plain string, or a JSON-encoded array string,
+    where the schema declares list[str] — iterating a bare string would
+    split it into characters and wreck the substring matcher.
+    """
+    if isinstance(raw, list):
+        return [str(i) for i in raw]
+    if isinstance(raw, str):
+        s = raw.strip()
+        if s.startswith('['):
+            try:
+                parsed = json.loads(s)
+                if isinstance(parsed, list):
+                    return [str(i) for i in parsed]
+            except Exception:
+                pass
+        return [p for p in (x.strip() for x in s.split(',')) if p]
+    return []
 
 
 # ── Context injection ─────────────────────────────────────────────────────────
@@ -176,7 +198,7 @@ def delete_list(
 
 def _add_execute(tool_args: dict, session, core, tool_config: dict) -> str:
     params    = ToolBase.params(tool_args)
-    new_items = [i.strip().lower() for i in params.get('items', []) if i.strip()]
+    new_items = [i.strip().lower() for i in _coerce_items(params.get('items')) if i.strip()]
     name      = _canonical(params.get('list_name', PROTECTED))
 
     if not new_items:
@@ -223,7 +245,7 @@ def _add_execute(tool_args: dict, session, core, tool_config: dict) -> str:
 
 def _remove_execute(tool_args: dict, session, core, tool_config: dict) -> str:
     params    = ToolBase.params(tool_args)
-    to_remove = [i.strip().lower() for i in params.get('items', []) if i.strip()]
+    to_remove = [i.strip().lower() for i in _coerce_items(params.get('items')) if i.strip()]
     name      = _canonical(params.get('list_name', PROTECTED))
 
     if not to_remove:
@@ -244,7 +266,7 @@ def _remove_execute(tool_args: dict, session, core, tool_config: dict) -> str:
             match = query
         else:
             for item in current:
-                if query in item or item in query:
+                if len(query) >= 2 and (query in item or item in query):
                     match = item
                     break
 
