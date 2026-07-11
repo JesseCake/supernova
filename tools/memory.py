@@ -373,14 +373,17 @@ def provide_turn_context(core, tool_config: dict, session: dict, user_input: str
                 ended   = recent['ended'][:16].replace('T', ' ')
                 turns   = recent['turn_count']
                 sid     = recent['session_id']
+
+                who = friendly if 'friendly' in dir() else None
                 recent_hint = (
                     f"[RECENT SESSION]\n"
-                    f"You spoke with {user_id} recently "
+                    f"You spoke with this same person recently "
                     f"({started} → {ended}, {turns} turns). "
                     f"If they reference that conversation use "
                     f"recall_conversations or get_conversation_transcript. "
                     f"Session reference: {sid}"
                 )
+                
                 log.info("Recent session hint injected",
                          extra={'data': f"session={sid[:8]} ended={ended}"})
 
@@ -397,10 +400,23 @@ def provide_turn_context(core, tool_config: dict, session: dict, user_input: str
         log.info("Memory injection complete",
                  extra={'data': f"user={user_id} query={user_input[:60]!r} "
                                 f"snippets={len(injections)}"})
-        parts.append(
-            "[MEMORY]\nRelevant context from past conversations:\n"
-            + "\n".join(injections)
-        )
+        friendly = core.presence_registry.get_friendly_name(user_id) \
+            if (core and hasattr(core, 'presence_registry')
+                and user_id != 'unknown') else None
+
+        if friendly:
+            header = (
+                f"[MEMORY]\n"
+                f"Stored facts about {friendly} — the person you are speaking "
+                f"with. These facts describe {friendly}'s life, NOT yours: you "
+                f"are the assistant and none of these apply to you. When "
+                f"using them as relevant information in discussion with {friendly},"
+                f"use second person: say 'you take B12', never '{friendly} takes B12').\n"
+            )
+        else:
+            header = "[MEMORY]\nRelevant context from past conversations:\n"
+
+        parts.append(header + "\n".join(injections))
     else:
         log.debug("Memory injection — nothing relevant found",
                   extra={'data': f"user={user_id} query={user_input[:60]!r}"})
