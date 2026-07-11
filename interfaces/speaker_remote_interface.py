@@ -267,6 +267,7 @@ class SpeakerRemoteInterface(BaseVoiceInterface):
         ctx.rx_paused = False
         ctx.rx_gate_open = False
         self.reset_audio_state(ctx)
+        ctx._turn_resolved = True   # type: ignore[attr-defined]
         await self._send_frame(ctx, b'CLOS')
 
     # ── Post-LLM response hook ────────────────────────────────────────────────
@@ -539,8 +540,8 @@ class SpeakerRemoteInterface(BaseVoiceInterface):
         the presence registry after speaker identification.
 
         Frame ordering:
-          1. Base transcribes audio (Whisper)
-          2. We send THNK (satellite transitions LISTENING → THINKING)
+          1. We send THNK (satellite transitions LISTENING → THINKING)
+          2. Base transcribes audio (Whisper)
           3. Base collects speaker ID result
           4. We update presence registry
           5. Base dispatches to _contact_core
@@ -549,6 +550,18 @@ class SpeakerRemoteInterface(BaseVoiceInterface):
           8. LLM streams, TTS plays (SPEAKING per sentence)
           9. _contact_core sends RDY0 (THINKING → LISTENING)
         """
+        # Send THNK at the silence-timeout moment — the instant listening
+        # ends — rather than waiting for Whisper to finish (the base only
+        # fires on_thinking post-transcription). Gives immediate "processing"
+        # feedback and closes the satellite mic sooner.
+        await self._send_frame(ctx, b'THNK')
+
+        # Track whether this turn reaches a terminal frame (RDY0 or CLOS).
+        # The base has silent early-returns (short buffer, empty ASR,
+        # hallucination filter); without this we'd strand the satellite
+        # in THINKING with its mic off.
+        ctx._turn_resolved = False   # type: ignore[attr-defined]
+
         # Delegate to base — it handles snapshot, Whisper, hallucination filter,
         # close-channel phrase, speaker ID collection, and _contact_core dispatch.
         # We hook in via on_thinking (called before _contact_core) and
@@ -558,6 +571,10 @@ class SpeakerRemoteInterface(BaseVoiceInterface):
         # Presence registry update — runs after speaker ID is collected
         if ctx.identified_speaker:
             self._update_presence(ctx)
+
+        if not getattr(ctx, '_turn_resolved', True):
+            # Turn fizzled before _contact_core — resume listening.
+            await self._send_frame(ctx, b'RDY0')
 
     # ── RDY0 after response ───────────────────────────────────────────────────
     # The base _contact_core sets rx_paused=False at the end but doesn't send
@@ -575,6 +592,7 @@ class SpeakerRemoteInterface(BaseVoiceInterface):
         All other logic is in the base.
         """
         closed = await super()._contact_core(ctx, input_text, silent_start)
+        ctx._turn_resolved = True   # type: ignore[attr-defined]
         if not closed:
             # Base set rx_paused=False — now tell the satellite to open its mic
             await self._send_frame(ctx, b'RDY0')
