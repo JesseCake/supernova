@@ -1294,14 +1294,18 @@ class CoreProcessor:
 
     def send_whole_response(self, response_text: str, session: dict):
         """
-        Push a complete pre-formed string to the response_queue.
+        Push a complete pre-formed string to the user immediately.
 
-        Wrapped in newlines: the voice-side sentence splitter treats newlines
-        as hard boundaries, so the leading one flushes any partial sentence
-        already buffered, and the trailing one guarantees this text is spoken
-        immediately rather than held as an incomplete sentence until the next
-        LLM round happens to produce more tokens.
+        Sessions that register an 'immediate_send' callable (text interfaces
+        like Telegram) get the text delivered as its own out-of-band message
+        in real time. Otherwise it goes onto the response_queue, wrapped in
+        newlines so the voice-side sentence splitter flushes it immediately
+        instead of buffering it as an incomplete sentence.
         """
+        send_fn = get_immediate_send(session)
+        if send_fn:
+            send_fn(str(response_text))
+            return
         get_response_queue(session).put("\n" + str(response_text) + "\n")
 
     def response_finished(self, session: dict):
