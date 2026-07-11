@@ -540,7 +540,7 @@ class CoreProcessor:
             if tool_msg:
                 for msg in tool_msg:
                     get_history(session).append(msg)
-                if any(m.get('tool_name') == 'hangup_call' for m in tool_msg):
+                if any(m.get('tool_name') in ('hangup_call', 'end_call') for m in tool_msg):
                     break
                 prompt = [system_message] + get_history(session)
                 continue

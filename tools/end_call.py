@@ -1,18 +1,18 @@
 """
-hangup_call tool — signals the voice channel to close.
-Restricted to voice interfaces only (set in hangup_call.yaml).
+end_call tool — signals the voice channel to close.
+Restricted to voice interfaces only (set in end_call.yaml).
 """
 from typing import Annotated
 from pydantic import Field
 from core.tool_base import ToolBase
 from core.session_state import request_hangup
 
-log = ToolBase.logger('hangup_call')
+log = ToolBase.logger('end_call')
 
 
 # ── Schema function ───────────────────────────────────────────────────────────
 
-def hangup_call(
+def end_call(
     farewell: Annotated[str, Field(
         default="",
         description=(
@@ -25,7 +25,7 @@ def hangup_call(
     End the current voice call, optionally speaking a short farewell.
     Use when the request is fully resolved, or the user says goodbye,
     'that's all', or 'thanks'. Call this INSTEAD of writing a goodbye —
-    saying 'I'll hang up now' in text does not end the call; only this
+    saying 'I'll end the call now' in text does NOT end the call; only this
     tool does.
     """
     ...
