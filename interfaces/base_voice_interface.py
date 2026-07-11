@@ -48,6 +48,7 @@ import wave
 from dataclasses import dataclass, field
 from typing import Optional
 from datetime import datetime
+import queue
 
 import numpy as np
 import resampy
@@ -218,6 +219,11 @@ class BaseVoiceInterface:
         self.speaker_id_threshold = speaker_id_threshold
 
         self.close_channel_phrase = "finish conversation"
+
+        # Spoken reassurance if the LLM produces nothing for this long after
+        # dispatch (e.g. KV cache rebuild delaying the first token).
+        self.slow_response_notice_s    = 4.0
+        self.slow_response_notice_text = "Just a moment"
 
         # ── Sentence splitter ─────────────────────────────────────────────────
         self.sentence_endings = re.compile(
@@ -406,7 +412,6 @@ class BaseVoiceInterface:
                 self._configure_session(ctx, core_session)
 
             if not silent_start:
-                await self._speak_text(ctx, "Working")
                 await self.on_thinking(ctx)
 
         log.info("Sending to core", extra={'data': f"{ctx.endpoint_id} {input_text!r}"})
@@ -426,10 +431,29 @@ class BaseVoiceInterface:
         buffer       = ""
         ctx.rx_paused = True
 
+        response_q      = get_response_queue(core_session)
+        first_chunk_in  = False
+        notice_spoken   = False
+        notice_deadline = time.monotonic() + self.slow_response_notice_s
+
         while True:
-            chunk = await asyncio.to_thread(get_response_queue(core_session).get)
+            try:
+                # Short blocking poll. Timeout raises Empty WITHOUT consuming,
+                # so no chunk can be lost to an orphaned to_thread worker —
+                # which is why this isn't asyncio.wait_for around a plain get.
+                chunk = await asyncio.to_thread(response_q.get, True, 0.25)
+            except queue.Empty:
+                if (not first_chunk_in and not notice_spoken
+                        and not silent_start
+                        and time.monotonic() >= notice_deadline):
+                    notice_spoken = True
+                    await self._speak_text(ctx, self.slow_response_notice_text)
+                continue
+
+            first_chunk_in = True
             if chunk is None:
                 break
+
             buffer += chunk
             sentences = self.sentence_endings.split(buffer)
             for sent in sentences[:-1]:
@@ -640,7 +664,7 @@ class BaseVoiceInterface:
 
             ctx.silence_samples += len(vad_chunk)
             silence_s = ctx.silence_samples / INTERNAL_RATE
-            
+
             if silence_s > self.vad_timeout:
                 await self.on_vad_silence_timeout(ctx)
                 ctx.recording     = False
