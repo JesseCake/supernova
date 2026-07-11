@@ -3,7 +3,7 @@ import aiohttp
 import uuid
 import threading
 from core.interface_mode import InterfaceMode
-from core.session_state import KEY_INTERFACE_MODE, get_response_queue
+from core.session_state import KEY_INTERFACE_MODE, get_response_queue, DISCARD_ACCUMULATED
 from core.session_reaper import SessionReaper
 
 from core.logger import get_logger
@@ -185,6 +185,9 @@ class TelegramInterface:
                 chunk = await asyncio.to_thread(get_response_queue(core_session).get)
                 if chunk is None:
                     break
+                if chunk == DISCARD_ACCUMULATED:
+                    response.clear()   # pre-tool text already sent as its own message
+                    continue
                 response.append(chunk)
                 await self._maybe_send_typing(chat_id)
 
@@ -235,6 +238,9 @@ class TelegramInterface:
                 chunk = await asyncio.to_thread(get_response_queue(core_session).get)
                 if chunk is None:
                     break
+                if chunk == DISCARD_ACCUMULATED:
+                    response.clear()   # pre-tool text already sent as its own message
+                    continue
                 response.append(chunk)
                 await self._maybe_send_typing(chat_id)
 

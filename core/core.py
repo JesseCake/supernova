@@ -56,7 +56,7 @@ from core.session_state import (
     is_immediate_send_only, get_ts_start, get_session_id,
     KEY_HISTORY, KEY_RESPONSE_QUEUE, KEY_RESPONSE_DONE,
     KEY_CLOSE_CHANNEL, KEY_CANCEL, KEY_OLLAMA_STREAM, KEY_TS_START,
-    KEY_INTERFACE_MODE, KEY_AGENT_MODE, KEY_SESSION_ID
+    KEY_INTERFACE_MODE, KEY_AGENT_MODE, KEY_SESSION_ID, DISCARD_ACCUMULATED
 )
 from core.event_store import EventStore
 from core.scheduler import Scheduler
@@ -444,7 +444,7 @@ class CoreProcessor:
     # Main entry point
     # ──────────────────────────────────────────────────────────────────────────
 
-    def process_input(self, input_text: str, session_id: str, images: list = None):
+    def process_input(self, input_text: str, session_id: str, images: list = None, immediate_only: bool = None) -> str:
         """
         Run the full LLM loop for one user utterance and push output to the
         session's response_queue for consumption by the interface.
@@ -547,24 +547,46 @@ class CoreProcessor:
             else:
                 break
 
-        # Fire final response via immediate_send for text interfaces
-        send_fn = get_immediate_send(session)
-        if send_fn and is_immediate_send_only(session):
+        # ── Response delivery routing ─────────────────────────────────────────
+        # The immediate_only parameter overrides the session flag when given.
+        # Injected turns (relay replies) pass True so routing is decided
+        # per-turn instead of via shared mutable session state — the old
+        # temporary-flag approach could hang a concurrent normal turn (its
+        # sentinel got suppressed) or leak the flag on a crash.
+        route_immediate = (
+            immediate_only if immediate_only is not None
+            else is_immediate_send_only(session)
+        )
+        send_fn            = get_immediate_send(session)
+        deliver_immediate  = bool(send_fn) and route_immediate
+        delivered          = ""
+
+        if deliver_immediate:
             final_chunks = []
             q = get_response_queue(session)
             while not q.empty():
                 try:
                     chunk = q.get_nowait()
-                    if chunk is not None:
+                    if chunk == DISCARD_ACCUMULATED:
+                        final_chunks = []   # already sent via immediate_send
+                    elif chunk is not None:
                         final_chunks.append(chunk)
                 except Exception:
                     break
             final_text = "".join(final_chunks).strip()
             if final_text:
                 send_fn(final_text)
+                delivered = final_text
+            else:
+                log.warning("Immediate-only turn produced no deliverable text",
+                            **self._elapsed(session))
 
         log.info("Response finished", **self._elapsed(session))
-        self.response_finished(session)
+        # Immediate-only turns have no queue consumer — a sentinel put here
+        # would sit stale and desync the NEXT normal turn's drain loop
+        # (it pops the old None first and returns an empty response).
+        self.response_finished(session, queue_sentinel=not deliver_immediate)
+        return delivered
 
     # ──────────────────────────────────────────────────────────────────────────
     # Headless (background tasks)
@@ -893,7 +915,12 @@ class CoreProcessor:
             send_fn = get_immediate_send(session)
             if send_fn:
                 send_fn(response_content.strip())
-                self._flush_queue(response_queue)
+                # Don't flush here — the interface's drain loop consumes this
+                # queue concurrently and may already hold some of these tokens
+                # (race → fused messages like "LetThe shopping list has...").
+                # Enqueue a discard marker instead: FIFO ordering means the
+                # consumer sees it after all pre-tool tokens and drops them.
+                response_queue.put(DISCARD_ACCUMULATED)
 
         tool_messages = []
         for tc in tool_calls:
@@ -1308,7 +1335,8 @@ class CoreProcessor:
             return
         get_response_queue(session).put("\n" + str(response_text) + "\n")
 
-    def response_finished(self, session: dict):
-        """Push the None sentinel and set response_finished event."""
-        get_response_queue(session).put(None)
+    def response_finished(self, session: dict, queue_sentinel: bool = True):
+        """Set the response-done event; push the None sentinel unless suppressed."""
+        if queue_sentinel:
+            get_response_queue(session).put(None)
         session[KEY_RESPONSE_DONE].set()

@@ -67,6 +67,9 @@ KEY_ENDPOINT_ID      = 'endpoint_id'
 KEY_IMMEDIATE_SEND   = 'immediate_send'
 KEY_IMMEDIATE_ONLY   = 'immediate_send_only'
 KEY_SESSION_ID        = 'session_id'
+# Queue marker: everything accumulated before this point was already
+# delivered via immediate_send — the consumer should discard it.
+DISCARD_ACCUMULATED = "\x00__DISCARD_ACCUMULATED__"
 
 
 # ── Interface mode ─────────────────────────────────────────────────────────────
