@@ -7,3 +7,27 @@ There is some tight tuning here as I'm running it on a salvaged AMD BC250 crypto
 If you want to disable the image pipeline to save some RAM, add the "--no-mmproj" flag to the server.
 
 TODO: Improve this documentation
+
+
+#Building llama.cpp
+
+I use the AMD BC250 for my inference, and I like to keep it bleeding edge especially with improvements to Vulkan happening all the time as well as KV cache, so I build like this:
+
+cd ~
+git clone https://github.com/ggml-org/llama.cpp
+cd llama.cpp
+cmake -B build -DGGML_VULKAN=ON
+cmake --build build --config Release -j2 --target llama-server
+
+(I use -j2 because even though we can parallel build across all cores, we run out of RAM easily and crash during build)
+
+
+#Rebuilding
+If I want to update to the latest sources and rebuild I do this:
+
+cd ~/llama.cpp
+rm -rf build
+git pull
+cmake -B build -DGGML_VULKAN=ON
+cmake --build build --config Release -j2 --target llama-server
+
