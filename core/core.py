@@ -498,7 +498,7 @@ class CoreProcessor:
 
 
         # max_tool_loops from agent mode config
-        max_loops  = agent_mode.max_tool_loops if agent_mode else 5
+        max_loops  = agent_mode.max_tool_loops if agent_mode else 20
         loop_count = 0
         had_images = bool(images)
 
@@ -546,6 +546,29 @@ class CoreProcessor:
                 continue
             else:
                 break
+
+        # If the cap cut the chain off right after a tool round, the model
+        # never got a round to produce text — the turn would end in silence.
+        # Force one final tools-off round so the user gets an answer built
+        # from whatever was gathered.
+        if loop_count >= max_loops and tool_msg:
+            log.warning("Tool loop cap reached — forcing final text round",
+                        **self._elapsed(session))
+            get_history(session).append({
+                'role':    'system',
+                'content': ("[Tool limit reached — no more tool calls are "
+                            "available. Answer the user now using the "
+                            "information gathered so far, and if user wishes, you may try again on next turn.]"),
+            })
+            prompt = [system_message] + get_history(session)
+            full_response, _, _ = self._send_to_llm(
+                prompt_text  = prompt,
+                prompt_tools = [],   # no tools offered — text is the only move
+                session      = session,
+            )
+            if full_response:
+                get_history(session).append(
+                    {'role': 'assistant', 'content': full_response})
 
         # ── Response delivery routing ─────────────────────────────────────────
         # The immediate_only parameter overrides the session flag when given.
