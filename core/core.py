@@ -29,6 +29,7 @@ import time
 import types
 import typing
 import inspect
+import base64
 try:
     import ollama
 except Exception:
@@ -478,6 +479,9 @@ class CoreProcessor:
         )
 
         user_message = {'role': 'user', 'content': input_text}
+        if images:
+            user_message['images'] = list(images)
+
         prompt = [system_message] + turn_prompt + [user_message]
 
         # Persist turn injections and user message to history
@@ -500,7 +504,7 @@ class CoreProcessor:
         # max_tool_loops from agent mode config
         max_loops  = agent_mode.max_tool_loops if agent_mode else 20
         loop_count = 0
-        had_images = bool(images)
+        #had_images = bool(images)
 
         # ── Tool loop ─────────────────────────────────────────────────────────
         while loop_count < max_loops:
@@ -508,18 +512,18 @@ class CoreProcessor:
                 prompt_text  = prompt,
                 prompt_tools = prompt_tools,
                 session      = session,
-                images       = images,
+                #images       = images,
             )
-            images     = None
+            #images     = None
             loop_count += 1
 
             # Annotate last user message in history if images were attached
-            if had_images:
-                for msg in reversed(get_history(session)):
-                    if msg.get('role') == 'user':
-                        msg['content'] = f"[image was attached] {msg['content']}"
-                        break
-                had_images = False
+            #if had_images:
+            #    for msg in reversed(get_history(session)):
+            #        if msg.get('role') == 'user':
+            #            msg['content'] = f"[image was attached] {msg['content']}"
+            #            break
+            #    had_images = False
 
             # Append assistant turn to history
             if full_response or chat_tool_calls:
@@ -773,11 +777,11 @@ class CoreProcessor:
             tool_calls       = []
 
             # Attach images to last user message if provided
-            if images:
-                for msg in reversed(prompt_text):
-                    if msg.get('role') == 'user':
-                        msg['images'] = images
-                        break
+            #if images:
+            #    for msg in reversed(prompt_text):
+            #        if msg.get('role') == 'user':
+            #            msg['images'] = images
+            #            break
 
             # debug logging for full prompt and tool list send to Ollama so we can diagnose KV cache breaking changes between sessions/turns:
             self._log_prompt(prompt_text, prompt_tools, session)
@@ -1129,6 +1133,17 @@ class CoreProcessor:
             ))
         return tool_calls
 
+    @staticmethod
+    def _image_url(img) -> str:
+        """Normalise any image input shape to a data-URI string."""
+        if isinstance(img, (bytes, bytearray)):
+            try:
+                img = bytes(img).decode('ascii')          # base64-as-bytes
+            except UnicodeDecodeError:
+                img = base64.b64encode(bytes(img)).decode('ascii')  # raw bytes
+        img = ''.join(str(img).split())
+        return img if img.startswith('data:') else f"data:image/jpeg;base64,{img}"
+
     def _messages_to_openai(self, messages: list, images: list = None) -> list:
         """
         Translate our internal, backend-agnostic message list into OpenAI
@@ -1192,7 +1207,16 @@ class CoreProcessor:
                 content = f"{injected}\n\n{content}" if content else injected
                 pending_system = []
 
-            oai.append({'role': role, 'content': content})
+            msg_images = msg.get('images')
+            if msg_images:
+                blocks = ([{'type': 'text', 'text': content}] if content else [])
+                blocks += [{'type': 'image_url',
+                            'image_url': {'url': self._image_url(im)}}
+                           for im in msg_images]
+                oai.append({'role': role, 'content': blocks})
+            else:
+                oai.append({'role': role, 'content': content})
+                
             if role == 'user':
                 last_user_idx = len(oai) - 1
 
@@ -1206,16 +1230,6 @@ class CoreProcessor:
                 oai.insert(0, {'role': 'system', 'content': '\n\n'.join(pending_system)})
                 if last_user_idx is not None:
                     last_user_idx += 1
-
-        if images and last_user_idx is not None:
-            text = oai[last_user_idx]['content']
-            content_blocks = [{'type': 'text', 'text': text}]
-            for img_b64 in images:
-                content_blocks.append({
-                    'type':      'image_url',
-                    'image_url': {'url': f"data:image/jpeg;base64,{img_b64}"},
-                })
-            oai[last_user_idx]['content'] = content_blocks
 
         return oai
 

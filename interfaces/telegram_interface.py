@@ -2,6 +2,7 @@ import asyncio
 import aiohttp
 import uuid
 import threading
+import base64
 from core.interface_mode import InterfaceMode
 from core.session_state import KEY_INTERFACE_MODE, get_response_queue, DISCARD_ACCUMULATED
 from core.session_reaper import SessionReaper
@@ -226,7 +227,7 @@ class TelegramInterface:
                 kwargs={
                     "input_text": prompt,
                     "session_id": session_id,
-                    "images":     [image_bytes],
+                    "images":     [base64.b64encode(image_bytes).decode('ascii')],
                 },
                 daemon=True,
             )
