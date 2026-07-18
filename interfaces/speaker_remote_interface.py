@@ -262,6 +262,7 @@ class SpeakerRemoteInterface(BaseVoiceInterface):
         Greet the satellite, then send RDY0 to open the microphone.
         rx_paused is held True during the greeting so we don't hear ourselves.
         """
+        ctx._hangup_requested = False    # type: ignore[attr-defined]
         self._cancel_idle_timeout(ctx)
         ctx.rx_gate_open = False
         self.reset_audio_state(ctx)
@@ -276,6 +277,7 @@ class SpeakerRemoteInterface(BaseVoiceInterface):
         The announcement is injected directly into the LLM as the opening turn.
         silent_start=True suppresses the "Working" TTS and first THNK.
         """
+        ctx._hangup_requested = False    # type: ignore[attr-defined]
         self._cancel_idle_timeout(ctx)
         ctx.rx_gate_open = False
         self.reset_audio_state(ctx)
@@ -305,6 +307,8 @@ class SpeakerRemoteInterface(BaseVoiceInterface):
         Called by _contact_core after streaming the full response and
         confirming no hangup was requested. Sends RDY0 to re-open the mic.
         """
+        if getattr(ctx, '_hangup_requested', False):
+            return
         await self._send_frame(ctx, b'RDY0')
 
     # ── Registry API ─────────────────────────────────────────────────────────
@@ -636,7 +640,7 @@ class SpeakerRemoteInterface(BaseVoiceInterface):
         
         closed = await super()._contact_core(ctx, input_text, silent_start)
         ctx._turn_resolved = True   # type: ignore[attr-defined]
-        if not closed:
+        if not closed and not getattr(ctx, '_hangup_requested', False):
             # Base set rx_paused=False — now tell the satellite to open its mic
             await self._send_frame(ctx, b'RDY0')
         return closed
