@@ -535,6 +535,15 @@ class SpeakerRemoteInterface(BaseVoiceInterface):
                     await self.on_barge_in(ctx)
                     ctx.reset_audio()
 
+                # ── BYE0: user hang-up from the satellite ─────────────────────
+                elif ftype == b'BYE0':
+                    log.info("Hang-up (BYE0)", extra={'data': str(ctx.endpoint_id)})
+                    ctx._hangup_requested = True     # type: ignore[attr-defined]
+                    ctx.interrupt_event.set()        # stop TTS0 mid-stream
+                    await self.on_barge_in(ctx)      # cancel active LLM response
+                    ctx.reset_audio()
+                    await self._close_session(ctx)   # sends CLOS; TCP stays open
+
                 # ── MIC1: satellite confirms its mic just (re)opened ─────────
                 elif ftype == b'MIC1':
                     # TCP ordering guarantees everything read before this frame
