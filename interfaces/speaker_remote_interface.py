@@ -629,6 +629,11 @@ class SpeakerRemoteInterface(BaseVoiceInterface):
         Override to send RDY0 after the LLM response completes (if no hangup).
         All other logic is in the base.
         """
+        #guard in case of a mid-turn hangup from remote end
+        if getattr(ctx, '_hangup_requested', False):
+            ctx._turn_resolved = True    # user hung up mid-turn — drop it
+            return True
+        
         closed = await super()._contact_core(ctx, input_text, silent_start)
         ctx._turn_resolved = True   # type: ignore[attr-defined]
         if not closed:
