@@ -551,6 +551,30 @@ class CoreProcessor:
             else:
                 break
 
+        # If the loop ended normally (model made no further tool calls) but
+        # also produced no text, it went silent instead of answering — often
+        # caused by a large/noisy tool result (e.g. open_website on a JS-heavy
+        # page) that the model didn't know how to summarize. Force one
+        # recovery round so the turn never ends in dead silence.
+        if loop_count > 0 and loop_count < max_loops and not (full_response or '').strip():
+            log.warning("Model returned empty final response — forcing recovery round",
+                        **self._elapsed(session))
+            get_history(session).append({
+                'role':    'system',
+                'content': ("[Your last response was empty. Summarize the "
+                            "most recent tool result for the user now.]"),
+            })
+            prompt = [system_message] + get_history(session)
+            full_response, _, _ = self._send_to_llm(
+                prompt_text  = prompt,
+                prompt_tools = [],
+                session      = session,
+            )
+            if full_response:
+                get_history(session).append(
+                    {'role': 'assistant', 'content': full_response})
+
+
         # If the cap cut the chain off right after a tool round, the model
         # never got a round to produce text — the turn would end in silence.
         # Force one final tools-off round so the user gets an answer built
