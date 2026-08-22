@@ -15,7 +15,7 @@
 general:
   description:     "Default conversational mode — helpful, warm, and responsive."
   precontext:      "personality/agent_general.md"
-  max_tool_loops:  5
+  max_tool_loops:  20
   is_default:      true
   trigger_phrases: "general mode, go back to normal, stop what you're doing, back to normal"
 
