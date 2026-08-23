@@ -231,10 +231,10 @@ def _typed_repr(d: dict) -> str:
 # ── Spoken progress feedback ───────────────────────────────────────────────────
 
 _PROGRESS_PHRASES = {
-    'GetLiveContext':         "Checking devices",
-    'HassGetState':           "Checking devices",
-    'HassListEntities':       "Checking devices",
-    'HassSearchEntities':     "Checking devices",
+    'GetLiveContext':         "Connection to home automation",
+    'HassGetState':           "Connection to home automation",
+    'HassListEntities':       "Connection to home automation",
+    'HassSearchEntities':     "Connection to home automation",
     'HassTurnOn':             "Turning on {name}",
     'HassTurnOff':            "Turning off {name}",
     'HassLightSet':           "Adjusting {name}",
@@ -419,7 +419,7 @@ def provide_context(core, tool_config: dict, session: dict) -> str:
         f"Use the domain to pick the right tool, passing name= exactly as returned:\n"
         f"   domain=switch  → HassTurnOn(name='...') or HassTurnOff(name='...')\n"
         f"   domain=light   → HassTurnOn / HassTurnOff / HassLightSet(name='...')\n"
-        f"   domain=scene   → HassTurnOn(name='...') to activate (never turn off)\n"
+        f"   domain=scene   → HassTurnOn(name='...') to activate (IMPORTANT: scenes can only be turned on to activate, never turned off!)\n"
         f"   domain=vacuum  → HassVacuumStart / HassVacuumReturnToBase(name='...')\n"
         f"3. Always use the name parameter — never use entity_id.\n"
         f"4. Never skip GetLiveContext even if you think you know the device name."
