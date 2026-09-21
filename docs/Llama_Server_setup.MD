@@ -9,7 +9,7 @@ If you want to disable the image pipeline to save some RAM, add the "--no-mmproj
 TODO: Improve this documentation
 
 
-#Building llama.cpp
+# Building llama.cpp
 
 I use the AMD BC250 for my inference, and I like to keep it bleeding edge especially with improvements to Vulkan happening all the time as well as KV cache, so I build like this:
 
@@ -22,7 +22,7 @@ cmake --build build --config Release -j2 --target llama-server
 (I use -j2 because even though we can parallel build across all cores, we run out of RAM easily and crash during build)
 
 
-#Rebuilding
+# Rebuilding
 If I want to update to the latest sources and rebuild I do this:
 
 cd ~/llama.cpp
@@ -30,4 +30,9 @@ rm -rf build
 git pull
 cmake -B build -DGGML_VULKAN=ON
 cmake --build build --config Release -j2 --target llama-server
+
+
+# Command for running Llama
+This is my command with tuning to maximise KV cache and slots to maintain separation:
+~/llama.cpp/build/bin/llama-server   -hf unsloth/gemma-4-12b-it-GGUF:UD-Q4_K_XL   --jinja   -c 393216   --parallel 3   --flash-attn on   -ctk q4_0 -ctv q4_0   --cache-ram 2048 --cache-reuse 32   --host 0.0.0.0 --port 8080   -b 8192 -ub 2048   --temperature 1.0 --top-p 0.95 --top-k 64 --min-p 0.0  -ngl 999 --ctx-checkpoints 64 --checkpoint-min-step 512 --cache-idle-slots
 
