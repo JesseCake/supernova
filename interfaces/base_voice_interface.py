@@ -489,6 +489,7 @@ class BaseVoiceInterface:
         core_session[KEY_INTERFACE_MODE] = ctx.interface_mode
         core_session['endpoint_id']      = ctx.endpoint_id
         core_session['interface']        = ctx.interface_mode.value
+        core_session['_disable_thinking'] = True
         if ctx.identified_speaker:
             core_session['speaker'] = ctx.identified_speaker
 

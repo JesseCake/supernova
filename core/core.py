@@ -1053,11 +1053,15 @@ class CoreProcessor:
             if self.config.llama_server.use_slots:
                 if session.get('_headless'):
                     extra_body['id_slot'] = self.config.llama_server.headless_slot
+                    extra_body['cache_prompt'] = False  # we don't want to waste memory keeping cache for headless ops
                 else:
                     interface = session.get('interface', 'general')
                     extra_body['id_slot'] = self.config.llama_server.slot_map.get(
                         interface, self.config.llama_server.default_slot
                     )
+
+            if session.get('_disable_thinking'):
+                extra_body['chat_template_kwargs'] = {'enable_thinking': False}
 
             # Dump exact wire payload for cache-diffing between turns
             if self.config.debug.log_prompts:
