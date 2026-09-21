@@ -231,10 +231,10 @@ def _typed_repr(d: dict) -> str:
 # ── Spoken progress feedback ───────────────────────────────────────────────────
 
 _PROGRESS_PHRASES = {
-    'GetLiveContext':         "Connection to home automation",
-    'HassGetState':           "Connection to home automation",
-    'HassListEntities':       "Connection to home automation",
-    'HassSearchEntities':     "Connection to home automation",
+    'GetLiveContext':         "Connecting to home automation",
+    'HassGetState':           "Connecting to home automation",
+    'HassListEntities':       "Connecting to home automation",
+    'HassSearchEntities':     "Connecting to home automation",
     'HassTurnOn':             "Turning on {name}",
     'HassTurnOff':            "Turning off {name}",
     'HassLightSet':           "Adjusting {name}",
