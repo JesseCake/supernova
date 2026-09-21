@@ -1102,6 +1102,12 @@ class CoreProcessor:
                     response_content += delta.content
                     response_queue.put(delta.content)
 
+                # reading back the reasoning from the LLM if any
+                reasoning = getattr(delta, 'reasoning_content', None)
+                if reasoning:
+                    response_queue.put(('reasoning', reasoning))   # tagged tuple, distinct from plain str
+
+
                 if delta.tool_calls:
                     for tc_delta in delta.tool_calls:
                         entry = pending_tool_calls.setdefault(

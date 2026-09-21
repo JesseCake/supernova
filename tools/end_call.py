@@ -17,7 +17,7 @@ def end_call(
         default="",
         description=(
             "Optional short goodbye to speak as the call ends, e.g. "
-            "'No worries, bye!'. Put your goodbye HERE, not in response text."
+            "'No worries, bye!'. If using this flag, put response here, and say nothing else in the turn with this tool."
         )
     )] = "",
 ) -> str:

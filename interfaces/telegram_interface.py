@@ -189,6 +189,12 @@ class TelegramInterface:
                 if chunk == DISCARD_ACCUMULATED:
                     response.clear()   # pre-tool text already sent as its own message
                     continue
+
+                # use the reasoning output as "typing" signalling:
+                if isinstance(chunk, tuple) and chunk[0] == 'reasoning':
+                    await self._maybe_send_typing(chat_id)
+                    continue
+
                 response.append(chunk)
                 await self._maybe_send_typing(chat_id)
 

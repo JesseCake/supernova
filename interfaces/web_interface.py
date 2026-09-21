@@ -121,13 +121,23 @@ class WebInterface:
 
             session            = self.core_processor.get_session(session_id)
             assistant_response = ""
+            reasoning_text     = ""
+
+            def render():
+                if reasoning_text:
+                    return f"<details><summary>🤔 Thinking</summary>\n\n{reasoning_text}\n\n</details>\n\n{assistant_response}"
+                return assistant_response
 
             while True:
                 chunk = get_response_queue(session).get()
                 if chunk is None:
                     return
+                if isinstance(chunk, tuple) and chunk[0] == 'reasoning':
+                    reasoning_text += chunk[1]
+                    yield {"role": "assistant", "content": render()}
+                    continue
                 assistant_response += chunk
-                yield {"role": "assistant", "content": assistant_response}
+                yield {"role": "assistant", "content": render()}
 
         css = """
             html, body, .gradio-container { height: 100% !important; }

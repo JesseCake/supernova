@@ -454,6 +454,10 @@ class BaseVoiceInterface:
             if chunk is None:
                 break
 
+            # ignore reasoning chunks:
+            if isinstance(chunk, tuple) and chunk[0] == 'reasoning':
+                continue
+
             buffer += chunk
             sentences = self.sentence_endings.split(buffer)
             for sent in sentences[:-1]:
