@@ -34,5 +34,5 @@ cmake --build build --config Release -j2 --target llama-server
 
 # Command for running Llama
 This is my command with tuning to maximise KV cache and slots to maintain separation:
-~/llama.cpp/build/bin/llama-server   -hf unsloth/gemma-4-12b-it-GGUF:UD-Q4_K_XL   --jinja   -c 393216   --parallel 3   --flash-attn on   -ctk q4_0 -ctv q4_0   --cache-ram 2048 --cache-reuse 32   --host 0.0.0.0 --port 8080   -b 8192 -ub 2048   --temperature 1.0 --top-p 0.95 --top-k 64 --min-p 0.0  -ngl 999 --ctx-checkpoints 64 --checkpoint-min-step 512 --cache-idle-slots
+~/llama.cpp/build/bin/llama-server   -hf unsloth/gemma-4-12b-it-GGUF:UD-Q4_K_XL   --jinja   -c 393216   --parallel 3   --flash-attn on   -ctk q4_0 -ctv q4_0   --cache-ram 2048 --cache-reuse 32   --host 0.0.0.0 --port 8080   -b 8192 -ub 2048   --temperature 1.0 --top-p 0.95 --top-k 64 --min-p 0.05  -ngl 999 --ctx-checkpoints 64 --checkpoint-min-step 512 --cache-idle-slots --repeat-penalty 1.1 --repeat-last-n 64
 
