@@ -505,6 +505,7 @@ class CoreProcessor:
         max_loops  = agent_mode.max_tool_loops if agent_mode else 20
         loop_count = 0
         #had_images = bool(images)
+        had_tool_round = False
 
         # ── Tool loop ─────────────────────────────────────────────────────────
         while loop_count < max_loops:
@@ -542,6 +543,8 @@ class CoreProcessor:
             #        self._flush_queue(get_response_queue(session))
 
             if tool_msg:
+                had_tool_round = True
+
                 for msg in tool_msg:
                     get_history(session).append(msg)
                 if any(m.get('tool_name') in ('hangup_call', 'end_call') for m in tool_msg):
@@ -556,19 +559,24 @@ class CoreProcessor:
         # caused by a large/noisy tool result (e.g. open_website on a JS-heavy
         # page) that the model didn't know how to summarize. Force one
         # recovery round so the turn never ends in dead silence.
-        if loop_count > 0 and loop_count < max_loops and not (full_response or '').strip():
+        if (loop_count > 0 
+            and loop_count < max_loops 
+            and had_tool_round
+            and not tool_msg
+            and not (full_response or '').strip()):
             log.warning("Model returned empty final response — forcing recovery round",
                         **self._elapsed(session))
             get_history(session).append({
-                'role':    'system',
-                'content': ("[Your last response was empty. Summarize the "
+                'role':    'user',
+                'content': ("SYSTEM: [Your last response was empty. Summarize the "
                             "most recent tool result for the user now.]"),
             })
             prompt = [system_message] + get_history(session)
             full_response, _, _ = self._send_to_llm(
                 prompt_text  = prompt,
-                prompt_tools = [],
+                prompt_tools = prompt_tools,
                 session      = session,
+                tool_choice  = 'none', 
             )
             if full_response:
                 get_history(session).append(
@@ -583,16 +591,17 @@ class CoreProcessor:
             log.warning("Tool loop cap reached — forcing final text round",
                         **self._elapsed(session))
             get_history(session).append({
-                'role':    'system',
-                'content': ("[Tool limit reached — no more tool calls are "
+                'role':    'user',
+                'content': ("SYSTEM: [Tool limit reached — no more tool calls are "
                             "available. Answer the user now using the "
                             "information gathered so far, and if user wishes, you may try again on next turn.]"),
             })
             prompt = [system_message] + get_history(session)
             full_response, _, _ = self._send_to_llm(
                 prompt_text  = prompt,
-                prompt_tools = [],   # no tools offered — text is the only move
+                prompt_tools = prompt_tools,
                 session      = session,
+                tool_choice  = 'none',
             )
             if full_response:
                 get_history(session).append(
@@ -733,12 +742,15 @@ class CoreProcessor:
         if speaker:
             context += f"\n\n[USER IDENTIFIED]\nYou are speaking with {speaker}."
 
+        turn_injections = []
+
         if session.get('_headless'):
             messages = conversation_history[:]
         else:
-            messages = conversation_history + [{'role': 'system', 'content': context}]
+            time_msg = {'role': 'system', 'content': context}
+            messages = conversation_history + [time_msg]
+            turn_injections.append(time_msg)    # persisted, so old user turns keep their time block
 
-        turn_injections = []
         # skip tool injections for headless sessions
         if not session.get('_headless'):
             for text, persist in self.tool_loader.get_turn_context_injections(self, session, input_text):
@@ -786,6 +798,7 @@ class CoreProcessor:
         prompt_tools: list,
         session:      dict,
         images:       list = None,
+        tool_choice = None,
     ) -> tuple:
         """
         Stream a chat completion from Ollama and forward tokens to response_queue.
@@ -820,7 +833,7 @@ class CoreProcessor:
                 stream     = True,
                 keep_alive = -1,
                 think      = False,
-                tools      = prompt_tools,
+                tools      = [] if tool_choice == 'none' else prompt_tools,
                 options    = {
                     'num_ctx': num_ctx,
                 }
@@ -1027,6 +1040,7 @@ class CoreProcessor:
         prompt_tools: list,
         session:      dict,
         images:       list = None,
+        tool_choice = None,
     ) -> tuple:
         """
         Stream a chat completion from llama-server's OpenAI-compatible
@@ -1071,6 +1085,7 @@ class CoreProcessor:
                 model    = model,
                 messages = oai_messages,
                 tools    = oai_tools or openai.NOT_GIVEN,
+                tool_choice = tool_choice if (tool_choice and oai_tools) else openai.NOT_GIVEN,
                 stream   = True,
                 extra_body = extra_body,
             )
