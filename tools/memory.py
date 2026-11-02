@@ -582,13 +582,17 @@ def on_session_end(core, tool_config: dict, session: dict):
                  extra={'data': f"session={session_id[:8]} turns={len(lines)}"})
         summary = core.run_headless(
             summary_prompt,
+            tools=[],
             model=tool_config.get('summary_model'),
             num_ctx=tool_config.get('summary_num_ctx'),
             )
-        if summary:
+        if summary and not summary.lstrip().startswith('Error:'):
             _store_session_summary(session_id, session, summary, core)
+        else:
+            log.warning("Session summary empty or errored — not stored",
+                        extra={'data': f"session={session_id[:8]} got={summary[:80]!r}"})
     except Exception as e:
-        log.error("Session summary failed", extra={'data': str(e)})
+        log.error("Session summary failed", extra={'data': str(e)}, exc_info=True)
 
     # ── Phase 2: Fact extraction ──────────────────────────────────────────────
     # Only run if this session had a known user (no point storing facts for

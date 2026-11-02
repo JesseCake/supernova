@@ -711,7 +711,8 @@ class CoreProcessor:
                 chunk = q.get(timeout=30)
                 if chunk is None:
                     break
-                result.append(chunk)
+                if isinstance(chunk, str) and chunk != DISCARD_ACCUMULATED:
+                    result.append(chunk)     # skip ('reasoning', ...) tuples
             except Exception:
                 break
 
