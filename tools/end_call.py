@@ -12,31 +12,14 @@ log = ToolBase.logger('end_call')
 
 # ── Schema function ───────────────────────────────────────────────────────────
 
-def end_call(
-    farewell: Annotated[str, Field(
-        default="",
-        description=(
-            "Optional short goodbye to speak as the call ends, e.g. "
-            "'No worries, bye!'. If using this flag, put response here, and say nothing else in the turn with this tool."
-        )
-    )] = "",
-) -> str:
+def end_call() -> str:
     """
-    End the current voice call, optionally speaking a short farewell. If adding the short farewell field, don't say anything else during the turn.
-    Use when the request/query is fully resolved, or the user says goodbye or indicates that they're finished with you,
-    saying 'that's all', or 'thanks' etc. Call this INSTEAD of writing a goodbye —
-    saying 'I'll end the call now' or similar in text does NOT end the call; only this
-    tool does.
+    End the voice call. Use when the request is resolved or the user says goodbye, 'that's all', 'thanks' etc. Say a brief goodbye in your reply text and call this tool in the same turn; saying 'I'll hang up' without calling it leaves the call open.
     """
-    ...
-
 
 # ── Executor ──────────────────────────────────────────────────────────────────
 
 def execute(tool_args: dict, session, core, tool_config: dict) -> str:
-    farewell = (ToolBase.params(tool_args).get('farewell') or '').strip()
-    log.info("Hanging up", extra={'data': f"endpoint={ToolBase.endpoint(session)!r} farewell={farewell!r}"})
-    if farewell:
-        ToolBase.speak(core, session, farewell)
-    request_hangup(session)
+    log.info("Hanging up", extra={'data': f"endpoint={ToolBase.endpoint(session)!r}"})
+    ToolBase.request_hangup(session)
     return None
