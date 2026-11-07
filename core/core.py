@@ -1012,9 +1012,12 @@ class CoreProcessor:
                 if wrapped is None:
                     content = json.dumps({"text": "ok"})
                 else:
-                    content = json.dumps(
-                        json.loads(wrapped).get('tool_result', {}).get('content', {})
-                    )
+                    tool_content = json.loads(wrapped).get('tool_result', {}).get('content', {})
+                    content = json.dumps(tool_content, ensure_ascii=False)
+                    try:
+                        content.encode('utf-8')   # lone surrogates would fail here
+                    except UnicodeEncodeError:
+                        content = json.dumps(tool_content)   # fall back to escaped form
             except Exception as e:
                 log.error("Tool execution error", extra={'data': f"{tool_name_detected}: {e}"})
                 content = json.dumps({"text": f"Tool error: {e}"})
