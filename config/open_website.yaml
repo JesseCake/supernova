@@ -7,9 +7,20 @@ cache_ttl_minutes: 60      # how long to keep fetched pages on disk
                            # session cookies are NOT subject to this TTL
 
 # Content defaults (all overridable per-call by the agent)
-chunk_size_chars: 4000
+chunk_size_chars: 2500     # characters per chunk returned to the model
 include_links: true
 include_external_links: false
+max_links: 20              # most links returned per page. Links already listed earlier
+                           # in the conversation are left out, so a sub-page only adds
+                           # links the model hasn't seen yet
+
+# Junk filtering (saves context)
+strip_text_art: true       # replace decorative ASCII/box-drawing art with a one-line note
+max_code_block_lines: 40   # longer code/preformatted blocks are cut, with a note
+
+# Limits (per user message; 0 = no limit)
+max_opens_per_turn: 5        # different pages the tool will open
+max_chunk_reads_per_turn: 8  # extra reads of pages already opened (chunk 2, 3, ...)
 
 # Fetch behaviour
 request_timeout_seconds: 20
